@@ -1,0 +1,11 @@
+# Requirements for AM_gui_v7 (GUI side, Python 3.x)
+# NOTE: Abaqus kernel runs its own Python 2.7 environment; do NOT install these there.
+
+PyQt5>=5.15
+pandas>=1.3
+numpy>=1.21
+matplotlib>=3.4
+openpyxl>=3.0
+scikit-learn>=1.0
+optuna>=3.0
+joblib>=1.1
