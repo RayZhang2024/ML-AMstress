@@ -1,0 +1,42 @@
+# Abaqus / CAE simulation artifacts
+*.odb
+*.cae
+*.jnl
+*.lck
+*.mdl
+*.pac
+*.pes
+*.prt
+*.res
+*.sel
+*.sim
+*.sta
+*.stt
+*.com
+*.dat
+*.msg
+*.log
+*.1
+
+# Input / job files
+*.inp
+*.for
+*.bat
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Virtual environments
+venv/
+.env/
+
+# Jupyter / IDE
+.ipynb_checkpoints/
+.vscode/
+.idea/
