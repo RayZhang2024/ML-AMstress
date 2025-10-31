@@ -35,12 +35,13 @@ import joblib
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 
+
 __version__ = "0.6.0"
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 DEFAULT_ABAQUS_CMD    = "abaqus"
-DEFAULT_BUILD_SCRIPT  = SCRIPT_DIR / "build_cae_gui.py"
-DEFAULT_INPUT_SCRIPT  = SCRIPT_DIR / "create_input_gui.py"
+DEFAULT_BUILD_SCRIPT  = SCRIPT_DIR / "build_cae.py"
+DEFAULT_INPUT_SCRIPT  = SCRIPT_DIR / "create_input.py"
 DEFAULT_IMPORT_SCRIPT = SCRIPT_DIR / "import_and_partition.py"
 DEFAULT_APPLY_MAT_SCRIPT = SCRIPT_DIR / "apply_materials.py"
 DEFAULT_MESH_SCRIPT   = SCRIPT_DIR / "apply_meshing.py"
@@ -103,51 +104,12 @@ class Worker(QtCore.QThread):
         except Exception as e:
             self.output.emit(f"[Worker] 停止失败：{e}")
 
-
-# --------------------------- Launch helper ---------------------------
-# class LaunchMixin:
-#     def _launch(self, cmd, cwd, log, run_button, stop_button=None, on_finished_extra=None):
-#         exe = cmd[0]
-#         if shutil.which(exe) is None:
-#             QtWidgets.QMessageBox.critical(self, "Executable not found",
-#                                            f"'{exe}' 不在 PATH。请在【设置】里配置正确的 Abaqus 命令。")
-#             return
-#         log.clear()
-#         if hasattr(log, "appendPlainText"):
-#             log.appendPlainText("$ " + " ".join(map(str, cmd)))
-#         else:
-#             log.append("$ " + " ".join(map(str, cmd)))
-#         run_button.setEnabled(False)
-#         if stop_button is not None:
-#             stop_button.setEnabled(True)
-
-#         self._worker = Worker(cmd, cwd)
-#         if hasattr(log, "appendPlainText"):
-#             self._worker.output.connect(log.appendPlainText)
-#         else:
-#             self._worker.output.connect(log.append)
-
-#         def _finish(code):
-#             run_button.setEnabled(True)
-#             if stop_button is not None:
-#                 stop_button.setEnabled(False)
-#             if hasattr(log, "appendPlainText"):
-#                 log.appendPlainText(f"\n=== finished (exit {code}) ===\n")
-#             else:
-#                 log.append(f"\n=== finished (exit {code}) ===\n")
-#             # 仅当 code == 0 时才继续串联下一步
-#             if code == 0 and callable(on_finished_extra):
-#                 on_finished_extra()
-
-#         self._worker.finished.connect(_finish)
-#         self._worker.start()
-
 class LaunchMixin:
     def _launch(self, cmd, cwd, log, run_button, stop_button=None, on_finished_extra=None, clear_log=False):
         exe = cmd[0]
         if shutil.which(exe) is None:
             QtWidgets.QMessageBox.critical(self, "Executable not found",
-                                           f"'{exe}' 不在 PATH。请在【设置】里配置正确的 Abaqus 命令。")
+                                            f"'{exe}' 不在 PATH。请在【设置】里配置正确的 Abaqus 命令。")
             return
 
         # ⬇️ do NOT wipe the log unless explicitly requested
@@ -263,10 +225,30 @@ class BuildModelTab(QtWidgets.QWidget, LaunchMixin):
         self.build_seed_sp.setDecimals(3); self.build_seed_sp.setRange(1e-3, 1e6); self.build_seed_sp.setValue(0.5)
         form.addRow("Build seed size", self.build_seed_sp)
 
+        # Build direction (axis) and zero plane
+        self.axis_cb = QtWidgets.QComboBox()
+        self.axis_cb.addItems(["Y", "X", "Z"])  # default Y for back-compat
+        self.axis_cb.setCurrentText(self.settings.get("build_axis", "Y"))
+        form.addRow("Build axis", self.axis_cb)
+        
+        self.axis_zero_sp = QtWidgets.QDoubleSpinBox()
+        self.axis_zero_sp.setRange(-1e9, 1e9)
+        self.axis_zero_sp.setDecimals(6)
+        self.axis_zero_sp.setSingleStep(0.1)
+        self.axis_zero_sp.setValue(float(self.settings.get("axis_zero", 0.0)))
+        form.addRow("Axis zero (plane)", self.axis_zero_sp)
+
+
         # NEW: Boundary condition toggle
         self.bc_chk = QtWidgets.QCheckBox("Apply anti-rigid-body BCs (U1/U2/U3)")
         self.bc_chk.setChecked(True)
         form.addRow("", self.bc_chk)
+
+        # Post heat treatment (Build Model scope ONLY: creates extra step in apply_materials)
+        self.ht_build_chk = QtWidgets.QCheckBox("Post heat treatment (adds final step in model)")
+        self.ht_build_chk.setChecked(bool(self.settings.get("ht_build_enabled", False)))
+        form.addRow("", self.ht_build_chk)
+
 
         # Output dir
         self.dir_le = QtWidgets.QLineEdit(self.settings.get("default_save_dir", str(SCRIPT_DIR)))
@@ -299,7 +281,9 @@ class BuildModelTab(QtWidgets.QWidget, LaunchMixin):
         self.base_seed_sp.setEnabled(import_mode)
         self.build_seed_sp.setEnabled(import_mode)
         self.bc_chk.setEnabled(import_mode)
-        
+        self.axis_cb.setEnabled(import_mode)
+        self.axis_zero_sp.setEnabled(import_mode)
+
     def _fout_mode_and_dt(self):
         if self.rb_fout_endstep.isChecked():
             return "END_STEP", 4.0  # dt ignored in this mode
@@ -317,13 +301,13 @@ class BuildModelTab(QtWidgets.QWidget, LaunchMixin):
 
     def _pick_geom(self):
         f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select CAD file", "",
-                                                     "CAD files (*.stp *.step *.igs *.iges *.sat);;All files (*)")
+                                                      "CAD files (*.stp *.step *.igs *.iges *.sat);;All files (*)")
         if f:
             self.geom_le.setText(f)
 
     def _pick_xlsx(self, line):
         f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select Excel file", "",
-                                                     "Excel files (*.xlsx);;All files (*)")
+                                                      "Excel files (*.xlsx);;All files (*)")
         if f:
             line.setText(f)
             if line is self.base_xlsx_le:
@@ -429,6 +413,9 @@ class BuildModelTab(QtWidgets.QWidget, LaunchMixin):
     def _run(self):
         save_dir = Path(self.dir_le.text()).expanduser().resolve()
         save_dir.mkdir(parents=True, exist_ok=True)
+        self.settings["ht_build_enabled"] = bool(self.ht_build_chk.isChecked())
+        self.settings["build_axis"] = self.axis_cb.currentText().upper()
+        self.settings["axis_zero"]  = float(self.axis_zero_sp.value())
 
         import_mode = (self.mode_cb.currentIndex() == 1)
         self._tmpdir = tempfile.TemporaryDirectory()
@@ -450,8 +437,8 @@ class BuildModelTab(QtWidgets.QWidget, LaunchMixin):
             if n3 == 0: warnings.append("未找到 'layer_thickness ='，将采用末尾兜底块。")
 
             txt4, n4 = re.subn(r"savepathName\s*=.*",
-                               f"savepathName = r'{save_dir.as_posix()}/'",
-                               txt3, count=1)
+                                f"savepathName = r'{save_dir.as_posix()}/'",
+                                txt3, count=1)
             if n4 == 0: warnings.append("未找到 'savepathName ='，将采用末尾兜底块。")
 
             if any(x.startswith("未找到") for x in warnings):
@@ -505,13 +492,17 @@ savepathName    = r'{save_dir.as_posix()}/'
         cae_out = _ascii_path(proposed)
         self._last_cae = cae_out  # keep for follow-up steps
 
+        axis = self.axis_cb.currentText().upper()
+        axis_zero = float(self.axis_zero_sp.value())
+
         # Patch import template constants
         tpl = self._import_tpl.read_text("utf-8")
         tpl = re.sub(r'^CAD_FILE\s*=.*',  'CAD_FILE = r"%s"' % ascii_cad.as_posix(), tpl, flags=re.M)
         tpl = re.sub(r'^SCALE\s*=.*',     'SCALE = %s' % float(self.scale_sp.value()), tpl, flags=re.M)
         tpl = re.sub(r'^LAYER_THK\s*=.*', 'LAYER_THK = %s' % float(self.layer_sp.value()), tpl, flags=re.M)
         tpl = re.sub(r'^BUILD_H\s*=.*',   'BUILD_H = %s' % float(self.height_sp.value()), tpl, flags=re.M)
-        tpl = re.sub(r'^Y_ZERO\s*=.*',    'Y_ZERO = %s' % 0.0, tpl, flags=re.M)
+        tpl = re.sub(r'^BUILD_AXIS\s*=.*', 'BUILD_AXIS = "%s"' % axis, tpl, flags=re.M)
+        tpl = re.sub(r'^AXIS_ZERO\s*=.*',  'AXIS_ZERO  = %s' % axis_zero, tpl, flags=re.M)
         tpl = re.sub(r'^SAVE_AS\s*=.*',   'SAVE_AS = r"%s"' % cae_out.as_posix(), tpl, flags=re.M)
         tpl = re.sub(r'^TOL\s*=.*',       'TOL = %s' % 1.0e-9, tpl, flags=re.M)
 
@@ -539,6 +530,9 @@ savepathName    = r'{save_dir.as_posix()}/'
                 tpl3 = re.sub(r'^BASE_SEED\s*=.*',     'BASE_SEED = %s' % float(self.base_seed_sp.value()), tpl3, flags=re.M)
                 tpl3 = re.sub(r'^BUILD_SEED\s*=.*',    'BUILD_SEED = %s' % float(self.build_seed_sp.value()), tpl3, flags=re.M)
                 tpl3 = re.sub(r'^LAYER_THK\s*=.*',     'LAYER_THK = %s' % float(self.layer_sp.value()), tpl3, flags=re.M)
+                # NEW: provide BUILD_AXIS / AXIS_ZERO to boundary script
+                tpl3 = re.sub(r'^BUILD_AXIS\s*=.*', 'BUILD_AXIS = "%s"' % axis, tpl3, flags=re.M)
+                tpl3 = re.sub(r'^AXIS_ZERO\s*=.*',  'AXIS_ZERO  = %s' % axis_zero, tpl3, flags=re.M)
 
                 bc_patched = Path(self._tmpdir.name) / "apply_boundary_patched.py"
                 bc_patched.write_text(tpl3, "utf-8")
@@ -565,7 +559,8 @@ savepathName    = r'{save_dir.as_posix()}/'
                 tplm = re.sub(r'^PART_NAME\s*=.*',  'PART_NAME = "ImportedPart"', tplm, flags=re.M)
                 tplm = re.sub(r'^BASE_SEED\s*=.*',  'BASE_SEED = %s' % float(self.base_seed_sp.value()), tplm, flags=re.M)
                 tplm = re.sub(r'^BUILD_SEED\s*=.*', 'BUILD_SEED = %s' % float(self.build_seed_sp.value()), tplm, flags=re.M)
-                tplm = re.sub(r'^Y_ZERO\s*=.*',     'Y_ZERO = %s' % 0.0, tplm, flags=re.M)
+                tplm = re.sub(r'^BUILD_AXIS\s*=.*', 'BUILD_AXIS = "%s"' % axis, tplm, flags=re.M)
+                tplm = re.sub(r'^AXIS_ZERO\s*=.*',  'AXIS_ZERO  = %s' % axis_zero, tplm, flags=re.M)
                 tplm = re.sub(r'^TOL\s*=.*',        'TOL = %s' % 1.0e-6, tplm, flags=re.M)
 
                 mesh_patched = Path(self._tmpdir.name) / "apply_meshing_patched.py"
@@ -574,7 +569,7 @@ savepathName    = r'{save_dir.as_posix()}/'
                 cmdm = [self.settings.get("abaqus_cmd", DEFAULT_ABAQUS_CMD), "cae", f"noGUI={mesh_patched}"]
                 # 关键：网格完成后再跑边界
                 self._launch(cmdm, self._last_cae.parent, self.log, self.run_btn,
-                             stop_button=self.stop_btn, on_finished_extra=_run_bc)
+                              stop_button=self.stop_btn, on_finished_extra=_run_bc)
 
             # ---- materials provided? then run them first, else mesh now ----
             base_xlsx = self.base_xlsx_le.text().strip()
@@ -606,6 +601,12 @@ savepathName    = r'{save_dir.as_posix()}/'
             tpl2 = re.sub(r'^MODEL_NAME\s*=.*',    'MODEL_NAME = "Model-1"', tpl2, flags=re.M)
             tpl2 = re.sub(r'^TOL\s*=.*',           'TOL = %s' % 1.0e-9, tpl2, flags=re.M)
             tpl2 = re.sub(r'^TIME_INTERVAL\s*=.*', 'TIME_INTERVAL = %s' % float(self.fout_dt.value()), tpl2, flags=re.M)
+            tpl2 = re.sub(r'^HT_ENABLED\s*=.*',
+                          'HT_ENABLED = %d' % (1 if self.ht_build_chk.isChecked() else 0),
+                          tpl2, flags=re.M)
+            tpl2 = re.sub(r'^HT_TEMP_C\s*=.*',
+                          'HT_TEMP_C = %s' % float(self.settings.get("ht_temp_c", 650.0)),
+                          tpl2, flags=re.M)
 
             apply_patched = Path(self._tmpdir.name) / "apply_materials_patched.py"
             apply_patched.write_text(tpl2, "utf-8")
@@ -613,7 +614,7 @@ savepathName    = r'{save_dir.as_posix()}/'
             cmd2 = [self.settings.get("abaqus_cmd", DEFAULT_ABAQUS_CMD), "cae", f"noGUI={apply_patched}"]
             # 材料→网格→边界（on_finished_extra 串联）
             self._launch(cmd2, self._last_cae.parent, self.log, self.run_btn,
-                         stop_button=self.stop_btn, on_finished_extra=_run_mesh)
+                          stop_button=self.stop_btn, on_finished_extra=_run_mesh)
 
         self._launch(cmd_import, save_dir, self.log, self.run_btn, stop_button=self.stop_btn, on_finished_extra=_after_import)
 
@@ -631,6 +632,40 @@ class InputAndUtempTab(QtWidgets.QWidget, LaunchMixin):
         cae_btn = QtWidgets.QPushButton("…"); cae_btn.clicked.connect(self._pick_cae)
         hl_cae = QtWidgets.QHBoxLayout(); hl_cae.addWidget(self.cae_le); hl_cae.addWidget(cae_btn)
         form.addRow("CAE file", hl_cae)
+
+        # --- Add this right after the CAE file picker rows in InputAndUtempTab.__init__ ---
+        
+        # Build axis + zero plane (for UTEMP)
+        self.axis_cb = QtWidgets.QComboBox()
+        # Prefer to mirror previously used setting if present, default to settings.get("build_axis", "Y")
+        self.axis_cb.addItems(["X", "Y", "Z"])
+        self.axis_cb.setCurrentText(self.settings.get("build_axis", "Y"))
+        
+        self.axis_zero_sp = QtWidgets.QDoubleSpinBox()
+        self.axis_zero_sp.setRange(-1e12, 1e12)
+        self.axis_zero_sp.setDecimals(6)
+        self.axis_zero_sp.setSingleStep(0.1)
+        self.axis_zero_sp.setValue(float(self.settings.get("axis_zero", 0.0)))
+        
+        form.addRow("Build axis (UTEMP)", self.axis_cb)
+        form.addRow("Axis zero (plane)", self.axis_zero_sp)
+
+        # ---- Post Heat Treatment (UTEMP scope ONLY) ----
+        self.ht_input_chk = QtWidgets.QCheckBox("Enable post heat treatment in UTEMP")
+        self.ht_input_chk.setChecked(bool(self.settings.get("ht_input_enabled", False)))
+        form.addRow("", self.ht_input_chk)
+        
+        self.ht_temp_ds = QtWidgets.QDoubleSpinBox()
+        self.ht_temp_ds.setDecimals(1); self.ht_temp_ds.setRange(25.0, 1200.0)
+        self.ht_temp_ds.setSuffix(" °C")
+        self.ht_temp_ds.setValue(float(self.settings.get("ht_temp_c", 650.0)))
+        self.ht_temp_ds.setEnabled(self.ht_input_chk.isChecked())
+        form.addRow("HT soak temperature", self.ht_temp_ds)
+        
+        def _toggle_ht_input(on):
+            self.ht_temp_ds.setEnabled(on)
+        self.ht_input_chk.toggled.connect(_toggle_ht_input)
+        _toggle_ht_input(self.ht_input_chk.isChecked())
 
         self.temp_step = QtWidgets.QSpinBox(); self.temp_step.setRange(1, 100); self.temp_step.setValue(5)
         form.addRow("Temperature step", self.temp_step)
@@ -700,10 +735,33 @@ class InputAndUtempTab(QtWidgets.QWidget, LaunchMixin):
         self._tmpdir = tempfile.TemporaryDirectory()
         patched = Path(self._tmpdir.name) / "create_input_patched.py"
 
+        # persist for this session
+        self.settings["ht_input_enabled"] = bool(self.ht_input_chk.isChecked())
+        self.settings["ht_temp_c"] = float(self.ht_temp_ds.value())
+
+
         src = self._tpl.read_text("utf-8")
         warnings = []
 
-        txt = f"CAE_FILE = r'{cae_file}'\n" + src
+        # Map axis → Abaqus coordinate index (1-based)
+        axis_map = {"X": 1, "Y": 2, "Z": 3}
+        axis_sel = self.axis_cb.currentText().upper()
+        coord_idx = axis_map.get(axis_sel, 2)  # default Y if anything odd
+        axis_zero = float(self.axis_zero_sp.value())
+        
+        # remember for next time
+        self.settings["build_axis"] = axis_sel
+        self.settings["axis_zero"]  = axis_zero
+        
+        txt = (
+            f"CAE_FILE = r'{cae_file}'\n"
+            f"COORD_IDX = {coord_idx}\n"
+            f"AXIS_ZERO = {axis_zero}\n"
+            f"HT_ENABLED = {1 if self.ht_input_chk.isChecked() else 0}\n"
+            f"HT_TEMP_C  = {float(self.ht_temp_ds.value())}\n"
+            + src
+        )
+
         txt2, n_om = re.subn(r"openMdb\([^)]*\)", "openMdb(pathName=CAE_FILE)", txt, count=1)
         if n_om == 0:
             warnings.append("未在模板中找到 openMdb(...)；将在顶部注入。")
@@ -714,8 +772,8 @@ class InputAndUtempTab(QtWidgets.QWidget, LaunchMixin):
 
         pattern_call = r"\bcreate_input\s*\(\s*\)"
         repl_call = ("create_input("
-                     "temp_step, temp_initial, temp_interval, "
-                     "grad_step, grad_initial, grad_interval)")
+                      "temp_step, temp_initial, temp_interval, "
+                      "grad_step, grad_initial, grad_interval)")
         txt3, n_ci = re.subn(pattern_call, repl_call, txt2, count=1)
         if n_ci == 0 and re.search(r"\bcreate_input\s*\(", txt2) is None:
             warnings.append("未找到 create_input() 调用；将在文件末尾追加。")
@@ -775,7 +833,7 @@ class DataExtractTab(QtWidgets.QWidget, LaunchMixin):
         form.addRow("Plane tolerance:", self.tol_sb)
 
         # Variable & position
-        self.var_cb = QtWidgets.QComboBox(); self.var_cb.addItems(["NT11","Mises","S11","S22","S33", "U1", "U2", "U3"])
+        self.var_cb = QtWidgets.QComboBox(); self.var_cb.addItems(["NT11","Mises","S11","S22","S33", "U1", "U2", "U3", "UMAG"])
         self.posn_cb = QtWidgets.QComboBox(); self.posn_cb.addItems(["Unique Nodal","Integration Point"])
         form.addRow("Output Variable:", self.var_cb)
         form.addRow("Variable Position:", self.posn_cb)
@@ -791,6 +849,46 @@ class DataExtractTab(QtWidgets.QWidget, LaunchMixin):
         b2 = QtWidgets.QPushButton("Select Output Folder…"); b2.clicked.connect(self._pick_out_dir)
         row2 = QtWidgets.QHBoxLayout(); row2.addWidget(self.out_dir_le); row2.addWidget(b2)
         form.addRow("Output Folder:", row2)
+
+        # --- NEW: Coordinate sampling (IDW) controls ---
+        self.coord_file_le = QtWidgets.QLineEdit()
+        b3 = QtWidgets.QPushButton("Pick…")
+        b3.clicked.connect(lambda: self._pick_file(self.coord_file_le))
+        row3 = QtWidgets.QHBoxLayout(); row3.addWidget(self.coord_file_le); row3.addWidget(b3)
+        form.addRow("Coordinate file (x,y,z per line):", row3)
+        
+        self.idw_k_sp = QtWidgets.QSpinBox()
+        self.idw_k_sp.setRange(1, 64); self.idw_k_sp.setValue(4)
+        form.addRow("IDW K (neighbours):", self.idw_k_sp)
+        
+        self.idw_radius_ds = QtWidgets.QDoubleSpinBox()
+        self.idw_radius_ds.setDecimals(6); self.idw_radius_ds.setRange(0.0, 1e9); self.idw_radius_ds.setValue(1e-3)
+        form.addRow("IDW radius (model units):", self.idw_radius_ds)
+        
+        self.idw_power_ds = QtWidgets.QDoubleSpinBox()
+        self.idw_power_ds.setDecimals(2); self.idw_power_ds.setRange(0.1, 10.0); self.idw_power_ds.setValue(2.0)
+        form.addRow("IDW power (p):", self.idw_power_ds)
+        
+        # Small hint so users know plane inputs are ignored when coord file is set
+        hint = QtWidgets.QLabel("Hint: If a coordinate file is selected, plane selection is ignored (IDW mode).")
+        hint.setStyleSheet("color: #888;")
+        form.addRow("", hint)
+        # -----------------------------------------------
+
+        def _toggle_plane_vs_idw():
+            use_idw = bool(self.coord_file_le.text().strip())
+            # Plane widgets
+            self.plane_cb.setEnabled(not use_idw)
+            self.pos_sb.setEnabled(not use_idw)
+            self.tol_sb.setEnabled(not use_idw)
+            # IDW widgets
+            self.idw_k_sp.setEnabled(True)
+            self.idw_radius_ds.setEnabled(True)
+            self.idw_power_ds.setEnabled(True)
+        
+        self.coord_file_le.textChanged.connect(lambda _: _toggle_plane_vs_idw())
+        _toggle_plane_vs_idw()
+
 
         # Run/Stop
         self.run_btn = QtWidgets.QPushButton("Extract (one CSV per ODB)"); self.run_btn.clicked.connect(self._run_extraction)
@@ -812,6 +910,11 @@ class DataExtractTab(QtWidgets.QWidget, LaunchMixin):
         d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select output folder for CSVs")
         if d:
             self.out_dir_le.setText(d)
+
+    def _pick_file(self, line):
+        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select file", "", "Text/CSV (*.txt *.csv);;All files (*)")
+        if f:
+            line.setText(f)
 
     def _stop_running(self):
         if hasattr(self, "_worker") and self._worker.isRunning():
@@ -845,6 +948,11 @@ class DataExtractTab(QtWidgets.QWidget, LaunchMixin):
             r'^TOL\s*=.*':           'TOL = %s' % tol,
             r'^STEP_SELECT\s*=.*':   'STEP_SELECT = "%s"' % step,
             r'^FRAME_SELECT\s*=.*':  'FRAME_SELECT = "%s"' % frame,
+            r'^COORD_FILE\s*=.*':   'COORD_FILE = r"%s"' % self.coord_file_le.text().strip().replace('\\','/'),
+            r'^IDW_K\s*=.*':        'IDW_K = %d' % int(self.idw_k_sp.value()),
+            r'^IDW_RADIUS\s*=.*':   'IDW_RADIUS = %s' % float(self.idw_radius_ds.value()),
+            r'^IDW_POWER\s*=.*':    'IDW_POWER = %s' % float(self.idw_power_ds.value()),
+
         }
         # force UTF-8 cookie if any other cookie is present
         txt = re.sub(r'^\s*#\s*-\*-\s*coding\s*:\s*.*?-\*-\s*$', '# -*- coding: utf-8 -*-', txt, flags=re.M)
@@ -1443,6 +1551,20 @@ class MainWindow(QtWidgets.QMainWindow):
             s.setdefault("default_save_dir", str(SCRIPT_DIR))
             s.setdefault("base_xlsx", "")
             s.setdefault("build_xlsx", "")
+            s.setdefault("build_axis", "Y")
+            s.setdefault("axis_zero", 0.0)
+            # inside the if self._settings_path.exists(): block (back-compat)
+            s.setdefault("ht_build_enabled", False)
+            s.setdefault("ht_input_enabled", False)
+            s.setdefault("ht_temp_c", 650.0)
+            
+            # Back-compat: if old 'ht_enabled' exists, seed both (one-time effect)
+            if "ht_enabled" in s:
+                s["ht_build_enabled"] = bool(s.get("ht_build_enabled", s["ht_enabled"]))
+                s["ht_input_enabled"] = bool(s.get("ht_input_enabled", s["ht_enabled"]))
+
+
+
             return s
         return {
             "abaqus_cmd": DEFAULT_ABAQUS_CMD,
@@ -1455,6 +1577,14 @@ class MainWindow(QtWidgets.QMainWindow):
             "default_save_dir": str(SCRIPT_DIR),
             "base_xlsx": "",
             "build_xlsx": "",
+            "build_axis": "Y",
+            "axis_zero": 0.0,
+            # inside the return { ... } defaults block (else branch)
+            "ht_build_enabled": False,
+            "ht_input_enabled": False,
+            "ht_temp_c": 650.0,
+
+
         }
 
     def closeEvent(self, ev):

@@ -27,12 +27,60 @@ from driverUtils import executeOnCaeStartup
 executeOnCaeStartup()
 session.viewports['Viewport: 1'].partDisplay.geometryOptions.setValues(
     referenceRepresentation=ON)
+
+
+# ===== NEW: axis helpers =====
+def _axis_idx(axis):
+    axis = (axis or "Y").upper()
+    return 0 if axis == "X" else 2 if axis == "Z" else 1
+
+def _principal_plane_perp(axis):
+    # Return principal plane perpendicular to the build axis
+    axis = (axis or "Y").upper()
+    if axis == "X": return YZPLANE
+    if axis == "Z": return XYPLANE
+    return XZPLANE  # Y
+
+def _bbox_axis(xmin, xmax, ymin, ymax, zmin, zmax, axis, lo, hi, pad=0.0):
+    """Axis-aware bounding box for getByBoundingBox.
+    Only the build-axis bounds use (lo, hi); the other two get full extents ±pad."""
+    if axis.upper() == "X":
+        return (lo, ymin - pad, zmin - pad, hi, ymax + pad, zmax + pad)
+    if axis.upper() == "Z":
+        return (xmin - pad, ymin - pad, lo, xmax + pad, ymax + pad, hi)
+    # default Y
+    return (xmin - pad, lo, zmin - pad, xmax + pad, hi, zmax + pad)
+
+def _bbox6(obj):
+    """Return (xMin, xMax, yMin, yMax, zMin, zMax) for parts/instances across Abaqus versions."""
+    try:
+        bb = obj.boundingBox  # preferred API on many versions
+        return (bb.xMin, bb.xMax, bb.yMin, bb.yMax, bb.zMin, bb.zMax)
+    except Exception:
+        try:
+            bb = obj.getBoundingBox()  # dict: {'low': (x0,y0,z0), 'high': (x1,y1,z1)}
+            (x0, y0, z0) = bb['low']; (x1, y1, z1) = bb['high']
+            return (x0, x1, y0, y1, z0, z1)
+        except Exception:
+            # last resort: compute from all node coords (slower but robust)
+            nodes = getattr(obj, 'nodes', [])
+            xs = [n.coordinates[0] for n in nodes] or [0.0, 0.0]
+            ys = [n.coordinates[1] for n in nodes] or [0.0, 0.0]
+            zs = [n.coordinates[2] for n in nodes] or [0.0, 0.0]
+            return (min(xs), max(xs), min(ys), max(ys), min(zs), max(zs))
+
+# ===========================================
+
 #=================================================================================
 # PART-0 Input variables
 
 #=================================================================================
 
 savepathName = R'D:\1_Project\AM_modelGUI\GUI\AM900_' # cae save path
+
+# GUI will patch these three lines (same way it patches shape/height/etc.)
+BUILD_AXIS = "Y"     # "X" | "Y" | "Z"
+AXIS_ZERO  = 0.0     # slicing origin on selected axis (base plane)
 
 #=================================================================================
 # PART-1 Define build shape, height and layer thickness
@@ -130,28 +178,28 @@ s.unsetPrimaryObject()
 del mdb.models['Model-1'].sketches['__profile__']
 
 #======================================================================================
-# PART-3 create datum planes and partition layers
+# PART-3 create datum planes and partition layers (axis-aware)
 #======================================================================================
 
-
+# Create layer datum planes perpendicular to the selected build axis
+_dp_ids = []
 for i in range(layer_number):
-    p.DatumPlaneByPrincipalPlane(offset=i*layer_thickness + baseplane_offset, principalPlane=XZPLANE)
+    d = p.DatumPlaneByPrincipalPlane(
+        principalPlane=_principal_plane_perp(BUILD_AXIS),
+        offset=AXIS_ZERO + i*layer_thickness
+    )
+    _dp_ids.append(d.id)
 
+# (keep your existing mid-plane for optional half-model; unchanged)
 p.DatumPlaneByPrincipalPlane(offset=12.5, principalPlane=XYPLANE)
 
+# Partition with layer planes (use the planes we just created)
+for did in _dp_ids:
+    p.PartitionCellByDatumPlane(cells=p.cells, datumPlane=p.datums[did])
 
-for j in range(layer_number):    
-    p.PartitionCellByDatumPlane(cells= p.cells.findAt(((0,build_height - 0.1 ,3),),((0,build_height - 0.1 ,12.5),),((0,build_height - 0.1 ,15),), ), datumPlane=p.datums[j + 3])    
-
-p.PartitionCellByDatumPlane(cells= p.cells.getByBoundingBox(-500,0,-500,500,500,500), datumPlane=p.datums[layer_number + 3]) 
-
-e = p.edges
-pickedEdges = e.findAt(((-12.5, -15, 12.5),), ((-12.5, 0, 12.5),), 
-                       (( 12.5, -15, 12.5),), (( 12.5, 0, 12.5),),
-                       ((    0, -15,    0),), ((    0, 0,    0),), 
-                       ((    0, -15,   25),), ((    0, 0,   25),),)
-p.PartitionEdgeByParam(edges=pickedEdges, parameter=0.5)
-
+# Partition by the XY mid-plane for half model (unchanged intent)
+p.PartitionCellByDatumPlane(cells=p.cells.getByBoundingBox(-500,0,-500,500,500,500),
+                            datumPlane=p.datums[layer_number + 3])
 
 #================================================================================
 # PART-4 create materials properties
@@ -221,20 +269,32 @@ a = mdb.models['Model-1'].rootAssembly
 #a.DatumCsysByDefault(CARTESIAN)
 
 a.Instance(name='Part-1-1', part=p, dependent=ON)
-# set for base
-a.Set(cells=a.instances['Part-1-1'].cells.getByBoundingBox(-500,-500,-500,500,0,500), name='Set-0') 
-# set for each layer
-for i in range(layer_number):    
-    a.Set(cells=
-    a.instances['Part-1-1'].cells.getByBoundingBox(-500,i*layer_thickness,-500,500,(i+1)*layer_thickness,500), name='Set-'+str(i+1))
 
+# ===== NEW: axis-aware bounding values from instance bbox
 c1 = a.instances['Part-1-1'].cells
-#getByBoundingBox(xmin,ymin,zmin,xmax,ymax,zmax)
-cells1 = c1.getByBoundingBox(-12.5, 0.0, 0, 12.5, build_height, 25) 
-a.Set(cells=cells1, name='Set-'+str(layer_number+1)) # set for the whole build-part
+ix0, ix1, iy0, iy1, iz0, iz1 = _bbox6(a.instances['Part-1-1'])
+span = max(ix1 - ix0, iy1 - iy0, iz1 - iz0)
+PAD  = max(1.0e-6, 0.05*span)
 
-cells2 = c1.getByBoundingBox(-12.5, 0.0, 12.5, 12.5, build_height, 25) 
-a.Set(cells=cells2, name='Set-'+str(layer_number+2)) # set for the half build-part
+# set-0: base (coord <= AXIS_ZERO)
+bb0 = _bbox_axis(ix0, ix1, iy0, iy1, iz0, iz1, BUILD_AXIS, -1.0e99, AXIS_ZERO + 1e-9, pad=PAD)
+a.Set(cells=c1.getByBoundingBox(*bb0), name='Set-0')
+
+# set-1..set-N: per-layer shells
+for i in range(layer_number):
+    lo = AXIS_ZERO + i * layer_thickness
+    hi = AXIS_ZERO + (i+1) * layer_thickness
+    bbi = _bbox_axis(ix0, ix1, iy0, iy1, iz0, iz1, BUILD_AXIS, lo - 1e-9, hi + 1e-9, pad=PAD)
+    a.Set(cells=c1.getByBoundingBox(*bbi), name='Set-'+str(i+1))
+
+# set-(N+1): whole build region
+bb_all = _bbox_axis(ix0, ix1, iy0, iy1, iz0, iz1, BUILD_AXIS, AXIS_ZERO - 1e-9, AXIS_ZERO + build_height + 1e-9, pad=PAD)
+cells1 = c1.getByBoundingBox(*bb_all)
+a.Set(cells=cells1, name='Set-'+str(layer_number+1))
+
+# half build-part (unchanged: by Z mid-cut at z≈12.5 in your model)
+cells2 = c1.getByBoundingBox(-12.5, 0.0, 12.5, 12.5, build_height, 25)
+a.Set(cells=cells2, name='Set-'+str(layer_number+2)) # optional half
 
 #======================================================================================
 # PART-6 Create part geometry sets, set-0 for the base and set-1 for the build-part
@@ -243,11 +303,14 @@ a.Set(cells=cells2, name='Set-'+str(layer_number+2)) # set for the half build-pa
 
 
 c = p.cells
-cells = c.getByBoundingBox(-12.5,-15,0,12.5,0,25)
+px0, px1, py0, py1, pz0, pz1 = _bbox6(p)
+cells = c.getByBoundingBox(*_bbox_axis(px0, px1, py0, py1, pz0, pz1, BUILD_AXIS, -1.0e99, AXIS_ZERO + 1e-9, pad=1e-6))
+
 p.Set(cells=cells, name='Set-0')
 
 c = p.cells
-cells = c.getByBoundingBox(-12.5,0,0,12.5,build_height,25)
+cells = c.getByBoundingBox(*_bbox_axis(px0, px1, py0, py1, pz0, pz1, BUILD_AXIS, AXIS_ZERO - 1e-9, AXIS_ZERO + build_height + 1e-9, pad=1e-6))
+
 p.Set(cells=cells, name='Set-1')
 
 #======================================================================================
@@ -373,14 +436,14 @@ p.generateMesh()
 #======================================================================================
 session.viewports['Viewport: 1'].assemblyDisplay.setValues(step='Step-1')
 a4 = mdb.models['Model-1'].rootAssembly
-c1 = a4.instances['Part-1-1'].cells
-cells1 = c1.getByBoundingBox(-12.5,-15,0,12.5,build_height,25)
-f1 = a4.instances['Part-1-1'].faces
-faces1 = f1.getByBoundingBox(-12.5,-15,0,12.5,build_height,25)
-e1 = a4.instances['Part-1-1'].edges
-edges1 = e1.getByBoundingBox(-12.5,-15,0,12.5,build_height,25)
-v1 = a4.instances['Part-1-1'].vertices
-verts1 = v1.getByBoundingBox(-12.5,-15,0,12.5,build_height,25)
+c1 = a4.instances['Part-1-1'].cells; f1 = a4.instances['Part-1-1'].faces
+e1 = a4.instances['Part-1-1'].edges; v1 = a4.instances['Part-1-1'].vertices
+ix0, ix1, iy0, iy1, iz0, iz1 = _bbox6(a4.instances['Part-1-1'])
+bb_temp = _bbox_axis(ix0, ix1, iy0, iy1, iz0, iz1, BUILD_AXIS, AXIS_ZERO - 1e-9, AXIS_ZERO + build_height + 1e-9, pad=1e-6)
+cells1 = c1.getByBoundingBox(*bb_temp)
+faces1 = f1.getByBoundingBox(*bb_temp)
+edges1 = e1.getByBoundingBox(*bb_temp)
+verts1 = v1.getByBoundingBox(*bb_temp)
 region = a4.Set(vertices=verts1, edges=edges1, faces=faces1, cells=cells1, 
     name='Set-'+str(layer_number+3))
 mdb.models['Model-1'].Temperature(name='Predefined Field-1', 

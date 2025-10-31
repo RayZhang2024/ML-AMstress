@@ -1,0 +1,17 @@
+{
+  "abaqus_cmd": "C:/SIMULIA/Commands/abq2021.bat",
+  "build_script": "D:\\1_Project\\AM_modelGUI\\GUI\\ML-AMstress\\build_cae.py",
+  "input_script": "D:\\1_Project\\AM_modelGUI\\GUI\\ML-AMstress\\create_input.py",
+  "import_script": "D:\\1_Project\\AM_modelGUI\\GUI\\ML-AMstress\\import_and_partition.py",
+  "apply_materials_script": "D:\\1_Project\\AM_modelGUI\\GUI\\ML-AMstress\\apply_materials.py",
+  "apply_meshing_script": "D:\\1_Project\\AM_modelGUI\\GUI\\ML-AMstress\\apply_meshing.py",
+  "apply_boundary_script": "D:\\1_Project\\AM_modelGUI\\GUI\\ML-AMstress\\apply_boundary.py",
+  "default_save_dir": "E:/0_STFC_work/A_Projects/own/Simulation/Bench",
+  "base_xlsx": "D:/1_Project/AM_modelGUI/GUI/base_properties_2.xlsx",
+  "build_xlsx": "D:/1_Project/AM_modelGUI/GUI/build_properties_1.xlsx",
+  "build_axis": "Y",
+  "axis_zero": 0.0,
+  "ht_build_enabled": false,
+  "ht_input_enabled": false,
+  "ht_temp_c": 650.0
+}

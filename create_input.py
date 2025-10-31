@@ -10,10 +10,30 @@ import sys
 from abaqus import *
 from abaqusConstants import *
 import math
-# session.viewports['Viewport: 1'].setValues(displayedObject=None) #
-# openMdb(
-   # pathName='D:/1_Project/A2021HN080001_AM_national/004_Data/code/test/24.cae')
- #             D:\1_Project\A2021HN080001_AM_national\004_Data\code
+
+# 1=X, 2=Y, 3=Z (will be injected by AM_gui Input&UTEMP tab; keep safe defaults if not provided)
+try:
+    COORD_IDX
+except NameError:
+    COORD_IDX = 2  # default Y
+
+try:
+    AXIS_ZERO
+except NameError:
+    AXIS_ZERO = 0.0
+    
+# ---- HT flags injected by GUI; keep safe defaults ----
+try:
+    HT_ENABLED
+except NameError:
+    HT_ENABLED = 0  # 0 = off, 1 = on
+
+try:
+    HT_TEMP_C
+except NameError:
+    HT_TEMP_C = 650.0  # 
+# ------------------------------------------------------
+
 
 session.viewports['Viewport: 1'].setValues(displayedObject=None)
 # The first CLI argument is the .cae file path passed in from AM_gui:
@@ -80,7 +100,8 @@ for x in range (temp_step):
             fid.write("      IF(KSTEP==i) THEN\n")
             fid.write("          GT=0\n")
             fid.write("          IF(i==1) THEN\n")    # heat the base plate for the first few layers
-            fid.write("             GT=GT+(0)*EXP(-3*((COORDS(2)-(i-0.5)*"+str(layer_sp)+")/R2)**2)\n")
+            fid.write("             GT=GT+(0)*EXP(-3*((COORDS("+str(int(COORD_IDX))+")-(" \
+                      +str(float(AXIS_ZERO))+"+(i-0.5)*"+str(layer_sp)+"))/R2)**2)\n")
             fid.write("             IF(TIME(1) .GE. 0.0 .AND. TIME(1)<1.0) THEN\n")
             fid.write("                 TEMP(1)=(1-EXP(HC*TIME(1)))*GT+TEMPT+TS+50.0\n")
             fid.write("     1            *i**0.3-50.0\n")
@@ -93,8 +114,9 @@ for x in range (temp_step):
             fid.write("                 TEMP(1)=TS+50.0*i**0.3-50\n")
             fid.write("             END IF\n")
             fid.write("          ELSE \n")
-            fid.write("             GT=GT+(A-((i-1)**0.3*50.0-50.0))*EXP(-3*((COORDS(2)-\n")
-            fid.write("     1         (i-1)*"+str(layer_sp)+")/R2)**2)\n")
+            fid.write("             GT=GT+(A-((i-1)**0.3*50.0-50.0))*EXP(-3*((COORDS(" \
+                      +str(int(COORD_IDX))+")-(" +str(float(AXIS_ZERO))+"+(i-1)*"+str(layer_sp) \
+                      +"))/R2)**2)\n")            
             fid.write("             IF(TIME(1) .GE. 0.0 .AND. TIME(1)<1.0) THEN\n")
             fid.write("                 TEMP(1)=(1-EXP(HC*TIME(1)))*GT+TEMPT+TS+50.0*\n")
             fid.write("     1         i**0.3-50.0\n")
@@ -113,9 +135,26 @@ for x in range (temp_step):
             fid.write("          IF (TIME(1)<0.9) THEN\n")
             fid.write("          TEMP(1)=EXP(CC*(TIME(1)))*(TS+50.0*i**0.3-50.0)+25\n")
             fid.write("          ELSE\n")
-            fid.write("          TEMP(1)="+str(layer_n+1)+"\n")
+            fid.write("          TEMP(1)=25\n")
             fid.write("          END IF\n")
             fid.write("      END IF\n")
+
+            # --- NEW: heat-treatment step (only when HT is enabled) ---
+            if int(HT_ENABLED) == 1:
+                fid.write("      IF (KSTEP=="+str(layer_n+4)+") THEN\n")
+                fid.write("          ! Ramp 25C -> T_HT over 0.25 of step time, hold 0.5, cool back in 0.25\n")
+                fid.write("          THT = "+("{:.6f}".format(float(HT_TEMP_C)))+"\n")
+                fid.write("          TAMB = 25.0\n")
+                fid.write("          t = TIME(1)\n")
+                fid.write("          IF (t .LT. 0.4D0) THEN\n")
+                fid.write("              TEMP(1) = TAMB + (THT - TAMB)*(t/0.4D0)\n")
+                fid.write("          ELSEIF (t .LT. 0.6D0) THEN\n")
+                fid.write("              TEMP(1) = THT\n")
+                fid.write("          ELSE\n")
+                fid.write("              TEMP(1) = THT - (THT - TAMB)*((t-0.6D0)/0.4D0)\n")
+                fid.write("          ENDIF\n")
+                fid.write("      END IF\n")            
+            
             fid.write("      RETURN\n")
             fid.write("      END\n")
             
