@@ -81,6 +81,7 @@ savepathName = R'D:\1_Project\AM_modelGUI\GUI\AM900_' # cae save path
 # GUI will patch these three lines (same way it patches shape/height/etc.)
 BUILD_AXIS = "Y"     # "X" | "Y" | "Z"
 AXIS_ZERO  = 0.0     # slicing origin on selected axis (base plane)
+BOTTOM_LAYER_REMOVAL = 0  # number of bottom build layers to remove after base (0-10)
 
 #=================================================================================
 # PART-1 Define build shape, height and layer thickness
@@ -344,7 +345,11 @@ p.SectionAssignment(region=region, sectionName='additive', offset=0.0,
 # Step-lyaer_number+4 for build part half -- not implemented
 # create fieldOutputRequests
 #======================================================================================
-for i in range(layer_number+3):
+rem_layers = int(min(max(BOTTOM_LAYER_REMOVAL, 0), min(10, layer_number)))
+print(">> Bottom layer removal request:", BOTTOM_LAYER_REMOVAL, "(clamped to", rem_layers, ")")
+total_steps = layer_number + 3 + rem_layers
+base_removal_step_num = layer_number + 3  # unchanged position
+for i in range(total_steps):
     if i == 0:
         mdb.models['Model-1'].StaticStep(initialInc=0.08, maxInc=0.3, maxNumInc=10000, 
         minInc=0.0002, name='Step-1', previous='Initial', timePeriod=4.0) # Create the step 1 with the privious step being initial
@@ -380,11 +385,32 @@ for i in range(layer_number):
 
 # Deactivate the base part
 #======================================================================================
-session.viewports['Viewport: 1'].assemblyDisplay.setValues(step='Step-'+str(layer_number+3))
+session.viewports['Viewport: 1'].assemblyDisplay.setValues(step='Step-'+str(base_removal_step_num))
 a1 = mdb.models['Model-1'].rootAssembly
 region =a1.sets['Set-0']
-mdb.models['Model-1'].ModelChange(name='Int-'+str(layer_number+2), createStepName='Step-'+str(layer_number+3), 
+mdb.models['Model-1'].ModelChange(name='Int-'+str(layer_number+2), createStepName='Step-'+str(base_removal_step_num), 
     region=region, activeInStep=False, includeStrain=False)
+
+# Optionally deactivate additional bottom build layers after the base
+if rem_layers > 0:
+    for j in range(rem_layers):
+        step_num = base_removal_step_num + 1 + j
+        set_idx = j + 1  # Set-1 is the first build layer above the base
+        if set_idx > layer_number:
+            break
+        try:
+            region = a1.sets['Set-'+str(set_idx)]
+        except Exception:
+            print("!! Missing set for bottom removal:", 'Set-'+str(set_idx))
+            continue
+        print(">> Removing bottom build layer Set-%d at Step-%d" % (set_idx, step_num))
+        mdb.models['Model-1'].ModelChange(
+            name='Int-bottom-'+str(set_idx),
+            createStepName='Step-'+str(step_num),
+            region=region,
+            activeInStep=False,
+            includeStrain=False
+        )
 
 #======================================================================================
 # PART-10 Mesh
@@ -545,5 +571,3 @@ v1 = a4.instances['Part-1-1'].vertices
 #======================================================================================
 mdb.saveAs(
     pathName= savepathName + str(layer_number))
-
-

@@ -1,17 +1,18 @@
 {
   "abaqus_cmd": "C:/SIMULIA/Commands/abq2021.bat",
-  "build_script": "D:\\1_Project\\AM_modelGUI\\GUI\\ML-AMstress\\build_cae.py",
+  "build_script": "D:/1_Project/AM_modelGUI/GUI/ML-AMstress/build_cae.py",
   "input_script": "D:\\1_Project\\AM_modelGUI\\GUI\\ML-AMstress\\create_input.py",
   "import_script": "D:\\1_Project\\AM_modelGUI\\GUI\\ML-AMstress\\import_and_partition.py",
   "apply_materials_script": "D:\\1_Project\\AM_modelGUI\\GUI\\ML-AMstress\\apply_materials.py",
   "apply_meshing_script": "D:\\1_Project\\AM_modelGUI\\GUI\\ML-AMstress\\apply_meshing.py",
   "apply_boundary_script": "D:\\1_Project\\AM_modelGUI\\GUI\\ML-AMstress\\apply_boundary.py",
-  "default_save_dir": "D:/1_Project/AM_modelGUI/GUI/sample_list/3_rectangle_block/TA15/run_files",
+  "default_save_dir": "D:/1_Project/AM_modelGUI/GUI/sample_list/5_calibration_block/TA15/run_files_2layer_removed",
   "base_xlsx": "D:/1_Project/AM_modelGUI/GUI/sample_list/material_properties/base_properties.xlsx",
   "build_xlsx": "D:/1_Project/AM_modelGUI/GUI/sample_list/material_properties/Ti_properties.xlsx",
   "build_axis": "Y",
   "axis_zero": 0.0,
   "ht_build_enabled": false,
   "ht_input_enabled": false,
-  "ht_temp_c": 650.0
+  "ht_temp_c": 650.0,
+  "bottom_layers_remove": 2
 }

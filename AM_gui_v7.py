@@ -189,6 +189,11 @@ class BuildModelTab(QtWidgets.QWidget, LaunchMixin):
         self.layer_sp.setDecimals(3); self.layer_sp.setRange(0.01, 5.0); self.layer_sp.setSuffix(" mm"); self.layer_sp.setValue(0.5)
         form.addRow("Layer thickness", self.layer_sp)
 
+        self.bottom_remove_sp = QtWidgets.QSpinBox()
+        self.bottom_remove_sp.setRange(0, 10)
+        self.bottom_remove_sp.setValue(int(self.settings.get("bottom_layers_remove", 0)))
+        form.addRow("Bottom layers to remove (0-10)", self.bottom_remove_sp)
+
         # Import inputs
         self.geom_le = QtWidgets.QLineEdit()
         self.geom_btn = QtWidgets.QPushButton("…"); self.geom_btn.clicked.connect(self._pick_geom)
@@ -421,6 +426,7 @@ class BuildModelTab(QtWidgets.QWidget, LaunchMixin):
         self.settings["ht_build_enabled"] = bool(self.ht_build_chk.isChecked())
         self.settings["build_axis"] = self.axis_cb.currentText().upper()
         self.settings["axis_zero"]  = float(self.axis_zero_sp.value())
+        self.settings["bottom_layers_remove"] = int(self.bottom_remove_sp.value())
 
         import_mode = (self.mode_cb.currentIndex() == 1)
         self._tmpdir = tempfile.TemporaryDirectory()
@@ -446,19 +452,25 @@ class BuildModelTab(QtWidgets.QWidget, LaunchMixin):
                                 txt3, count=1)
             if n4 == 0: warnings.append("未找到 'savepathName ='，将采用末尾兜底块。")
 
+            txt5, n5 = re.subn(r"^BOTTOM_LAYER_REMOVAL\s*=.*",
+                               f"BOTTOM_LAYER_REMOVAL = {int(self.bottom_remove_sp.value())}",
+                               txt4, count=1, flags=re.M)
+            if n5 == 0: warnings.append("未找到 'BOTTOM_LAYER_REMOVAL ='，将采用末尾兜底块。")
+
             if any(x.startswith("未找到") for x in warnings):
-                txt4 += f"""
+                txt5 += f"""
 
 # ===== GUI injected parameters (fallback) =====
 shape_index     = {self.shapes[self.shape_cb.currentText()]}
 build_height    = {self.height_sp.value()}
 layer_thickness = {self.layer_sp.value()}
 savepathName    = r'{save_dir.as_posix()}/'
+BOTTOM_LAYER_REMOVAL = {int(self.bottom_remove_sp.value())}
 # =============================================
 """
 
             patched = Path(self._tmpdir.name) / "build_cae_patched.py"
-            patched.write_text(txt4, "utf-8")
+            patched.write_text(txt5, "utf-8")
             for w in warnings: self.log.appendPlainText("[警告] " + w)
 
             cmd = [self.settings.get("abaqus_cmd", DEFAULT_ABAQUS_CMD), "cae", f"noGUI={patched}"]
@@ -611,6 +623,9 @@ savepathName    = r'{save_dir.as_posix()}/'
                           tpl2, flags=re.M)
             tpl2 = re.sub(r'^HT_TEMP_C\s*=.*',
                           'HT_TEMP_C = %s' % float(self.settings.get("ht_temp_c", 650.0)),
+                          tpl2, flags=re.M)
+            tpl2 = re.sub(r'^BOTTOM_LAYER_REMOVAL\s*=.*',
+                          'BOTTOM_LAYER_REMOVAL = %d' % int(self.bottom_remove_sp.value()),
                           tpl2, flags=re.M)
 
             apply_patched = Path(self._tmpdir.name) / "apply_materials_patched.py"

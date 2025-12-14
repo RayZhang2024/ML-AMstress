@@ -18,6 +18,7 @@ BUILD_AXIS      = "Y"   # "X" | "Y" | "Z" (not used in this file; kept for consi
 AXIS_ZERO       = 0.0   # split plane value along BUILD_AXIS (ditto)
 HT_ENABLED      = 0      # 0/1; GUI will overwrite
 HT_TEMP_C       = 650.0  # °C; not used here but kept for clarity
+BOTTOM_LAYER_REMOVAL = 0  # number of bottom build layers to remove after base (0-10)
 
 # =============================================================
 
@@ -179,16 +180,20 @@ def main():
                          initialInc=initInc, maxInc=maxInc, maxNumInc=maxNumInc, minInc=minInc)
         return name
 
+    rem_layers = int(min(max(BOTTOM_LAYER_REMOVAL, 0), min(10, layer_number)))
     prev = 'Initial'
     prev = _mk_step(1, prev, 0.08, 0.3, 10000, 0.0002, 4.0)  # base
     for i in range(1, layer_number+1):                       # layers
         prev = _mk_step(i+1, prev, 0.08, 0.3, 10000, 0.0002, 4.0)
     prev = _mk_step(layer_number+2, prev, 0.1, 1.0, 10000, 0.0002, 1.0)   # cooling
     prev = _mk_step(layer_number+3, prev, 1.0, 1.0, 10000, 0.0002, 1.0)   # base removal
+    # additional bottom-layer removals after base
+    for j in range(rem_layers):
+        prev = _mk_step(layer_number+3+j+1, prev, 1.0, 1.0, 10000, 0.0002, 1.0)
 
     if int(HT_ENABLED) == 1:
-        # Heat-treatment step at index N+4; choose a 1.0 time unit period (UTEMP uses piecewise in-step time)
-        prev = _mk_step(layer_number+4, prev, 0.05, 1.0, 10000, 0.0002, 0.05)    
+        # Heat-treatment step index shifts by rem_layers
+        prev = _mk_step(layer_number+4+rem_layers, prev, 0.05, 1.0, 10000, 0.0002, 0.05)    
 
     _ti = float(TIME_INTERVAL if TIME_INTERVAL is not None else 0.8)
     if _ti < 0.0: _ti = 0.8
@@ -207,12 +212,12 @@ def main():
         except:
             return False
     
-    def _ensure_build_steps(m, total_layers):
+    def _ensure_build_steps(m, total_layers, rem_layers=0, ht_enabled=0):
         """
         Ensure Static, General steps exist. We need steps 1..(N+3).
         If any existing Step-* is not StaticStep, use a clean BStep-* sequence.
         """
-        need = int(total_layers) + 3
+        need = int(total_layers) + 3 + int(rem_layers) + (1 if int(ht_enabled)==1 else 0)
         use_prefix = 'Step'
         ok = True
         for i in range(1, need+1):
@@ -310,7 +315,8 @@ def main():
         layer_number = int(N)
 
     # 2) Ensure valid Static, General steps exist: Step-1..Step-(N+3) or BStep-*
-    step_of = _ensure_build_steps(m, N)
+    rem_layers = int(min(max(BOTTOM_LAYER_REMOVAL, 0), min(10, N)))
+    step_of = _ensure_build_steps(m, N, rem_layers=rem_layers, ht_enabled=HT_ENABLED)
 
     # 3) Int-1: deactivate the all-build set at step 1 (if present)
     if all_nm and (all_nm in a.sets.keys()):
@@ -344,6 +350,25 @@ def main():
                       region=a.sets['set-0'], activeInStep=False, includeStrain=False)
     else:
         print("[INFO] No 'set-0' base set; skipping base deactivation.")
+
+    # 6) Optional: deactivate additional bottom layers (set-1..set-rem_layers) after base
+    if rem_layers > 0:
+        for j in range(rem_layers):
+            set_idx = j + 1
+            if ('set-%d' % set_idx) not in a.sets.keys():
+                print("[WARN] Missing set-%d for bottom removal; skipping." % set_idx)
+                continue
+            int_name = 'Int-bottom-%d' % set_idx
+            if int_name in m.interactions.keys():
+                del m.interactions[int_name]
+            step_idx = N + 3 + j + 1
+            m.ModelChange(
+                name=int_name,
+                createStepName=step_of(step_idx),
+                region=a.sets['set-%d' % set_idx],
+                activeInStep=False,
+                includeStrain=False
+            )
 
     print("[CHECK] N layers =", N,
           "| Int-1 present =", ('Int-1' in m.interactions.keys()),
