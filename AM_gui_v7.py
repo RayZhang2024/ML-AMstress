@@ -31,6 +31,11 @@ import tempfile
 import platform
 from pathlib import Path
 import joblib
+import numpy as np
+from matplotlib import cm, colors
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
+from matplotlib.figure import Figure
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -39,7 +44,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 __version__ = "0.6.0"
 SCRIPT_DIR = Path(__file__).resolve().parent
 
-DEFAULT_ABAQUS_CMD    = "abaqus"
+DEFAULT_ABAQUS_CMD    = "C:/SIMULIA/Commands/abq2021.bat"
 DEFAULT_BUILD_SCRIPT  = SCRIPT_DIR / "build_cae.py"
 DEFAULT_INPUT_SCRIPT  = SCRIPT_DIR / "create_input.py"
 DEFAULT_IMPORT_SCRIPT = SCRIPT_DIR / "import_and_partition.py"
@@ -808,6 +813,266 @@ layer_sp     = {self.layer_sp.value()}
 import os, re, tempfile
 from pathlib import Path
 
+
+class GridBuilderDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Grid builder")
+        form = QtWidgets.QFormLayout(self)
+
+        self.normal_cb = QtWidgets.QComboBox()
+        self.normal_cb.addItems(["X", "Y", "Z"])
+        form.addRow("Plane normal", self.normal_cb)
+
+        self.plane_ds = QtWidgets.QDoubleSpinBox()
+        self.plane_ds.setRange(-1e9, 1e9)
+        self.plane_ds.setDecimals(6)
+        self.plane_ds.setValue(0.0)
+        form.addRow("Plane value", self.plane_ds)
+
+        def _make_range(label_prefix):
+            start = QtWidgets.QDoubleSpinBox(); start.setRange(-1e9, 1e9); start.setDecimals(6); start.setValue(0.0)
+            end   = QtWidgets.QDoubleSpinBox(); end.setRange(-1e9, 1e9); end.setDecimals(6); end.setValue(1.0)
+            step  = QtWidgets.QDoubleSpinBox(); step.setRange(1e-9, 1e9); step.setDecimals(6); step.setValue(0.1)
+            row = QtWidgets.QHBoxLayout(); row.addWidget(QtWidgets.QLabel("Start")); row.addWidget(start)
+            row.addWidget(QtWidgets.QLabel("End")); row.addWidget(end)
+            row.addWidget(QtWidgets.QLabel("Step")); row.addWidget(step)
+            return start, end, step, row, f"{label_prefix} range (start/end/step)"
+
+        self.x_start, self.x_end, self.x_step, rowx, labx = _make_range("X")
+        form.addRow(labx, rowx)
+        self.y_start, self.y_end, self.y_step, rowy, laby = _make_range("Y")
+        form.addRow(laby, rowy)
+        self.z_start, self.z_end, self.z_step, rowz, labz = _make_range("Z")
+        form.addRow(labz, rowz)
+
+        def _toggle_ranges():
+            n = self.normal_cb.currentText().upper()
+            is_x = n == "X"
+            is_y = n == "Y"
+            is_z = n == "Z"
+            # When normal is Z, disable Z range; use plane value for Z
+            rowz.setEnabled(not is_z)
+            # When normal is X, disable X range
+            rowx.setEnabled(not is_x)
+            # When normal is Y, disable Y range
+            rowy.setEnabled(not is_y)
+
+        self.normal_cb.currentIndexChanged.connect(_toggle_ranges)
+        _toggle_ranges()
+
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
+        form.addRow(bb)
+
+    def build_grid(self):
+        normal = self.normal_cb.currentText().upper()
+        # Validate steps
+        def _vec(start, end, step):
+            if step <= 0:
+                raise ValueError("Step must be > 0")
+            # Include end if it aligns within half a step
+            return np.arange(start, end + step * 0.5, step)
+
+        if normal == "Z":
+            xs = _vec(self.x_start.value(), self.x_end.value(), self.x_step.value())
+            ys = _vec(self.y_start.value(), self.y_end.value(), self.y_step.value())
+            zz = float(self.plane_ds.value())
+            X, Y = np.meshgrid(xs, ys, indexing="xy")
+            coords = np.column_stack([X.ravel(), Y.ravel(), np.full(X.size, zz)])
+        elif normal == "X":
+            ys = _vec(self.y_start.value(), self.y_end.value(), self.y_step.value())
+            zs = _vec(self.z_start.value(), self.z_end.value(), self.z_step.value())
+            xx = float(self.plane_ds.value())
+            Y, Z = np.meshgrid(ys, zs, indexing="xy")
+            coords = np.column_stack([np.full(Y.size, xx), Y.ravel(), Z.ravel()])
+        else:  # normal == "Y"
+            xs = _vec(self.x_start.value(), self.x_end.value(), self.x_step.value())
+            zs = _vec(self.z_start.value(), self.z_end.value(), self.z_step.value())
+            yy = float(self.plane_ds.value())
+            X, Z = np.meshgrid(xs, zs, indexing="xy")
+            coords = np.column_stack([X.ravel(), np.full(X.size, yy), Z.ravel()])
+
+        if coords.size == 0:
+            raise ValueError("Empty grid (check ranges and steps).")
+        return coords
+
+
+class BuildMeasurementDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Build measurement")
+        form = QtWidgets.QFormLayout(self)
+
+        self.meas_le = QtWidgets.QLineEdit()
+        b_meas = QtWidgets.QPushButton("Pick")
+        b_meas.clicked.connect(lambda: self._pick_file(self.meas_le, is_measure=True))
+        row_meas = QtWidgets.QHBoxLayout(); row_meas.addWidget(self.meas_le); row_meas.addWidget(b_meas)
+        form.addRow("Measurement CSV (x,y,value):", row_meas)
+
+        self.grid_le = QtWidgets.QLineEdit()
+        b_grid = QtWidgets.QPushButton("Pick")
+        b_grid.clicked.connect(lambda: self._pick_file(self.grid_le, is_measure=False))
+        row_grid = QtWidgets.QHBoxLayout(); row_grid.addWidget(self.grid_le); row_grid.addWidget(b_grid)
+        form.addRow("Grid file (from Grid builder):", row_grid)
+
+        self.out_dir_le = QtWidgets.QLineEdit()
+        b_out = QtWidgets.QPushButton("Select")
+        b_out.clicked.connect(self._pick_out_dir)
+        row_out = QtWidgets.QHBoxLayout(); row_out.addWidget(self.out_dir_le); row_out.addWidget(b_out)
+        form.addRow("Output folder:", row_out)
+
+        self.run_btn = QtWidgets.QPushButton("Extract && Save")
+        self.run_btn.clicked.connect(self._run_extraction)
+        b_close = QtWidgets.QPushButton("Close"); b_close.clicked.connect(self.reject)
+        row_btns = QtWidgets.QHBoxLayout(); row_btns.addWidget(self.run_btn); row_btns.addWidget(b_close)
+        form.addRow("", row_btns)
+
+        self.log = QtWidgets.QPlainTextEdit(); self.log.setReadOnly(True)
+        self.log.setPlaceholderText("Status and file paths will appear here...")
+        form.addRow("Log:", self.log)
+
+    def _pick_file(self, line, is_measure=False):
+        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select file", "", "CSV/TXT (*.csv *.txt);;All files (*)")
+        if f:
+            line.setText(f)
+            if is_measure and not self.out_dir_le.text().strip():
+                self.out_dir_le.setText(str(Path(f).parent))
+
+    def _pick_out_dir(self):
+        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select output folder")
+        if d:
+            self.out_dir_le.setText(d)
+
+    def _load_measurement(self, path):
+        import pandas as pd
+        df = pd.read_csv(path, header=None, sep=None, engine="python", comment="#")
+        if df.shape[1] < 3:
+            raise ValueError("Expected at least 3 columns (x,y,value) in measurement CSV.")
+        df = df.iloc[:, :3]
+        df.columns = ["x", "y", "value"]
+        for c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df = df.dropna()
+        if df.empty:
+            raise ValueError("No numeric rows found in measurement CSV.")
+        return df
+
+    def _load_grid(self, path):
+        import pandas as pd
+        df = pd.read_csv(path, header=None, sep=None, engine="python", comment="#")
+        if df.shape[1] < 2:
+            raise ValueError("Grid file must have at least two columns (x,y).")
+        df = df.iloc[:, :2]
+        df.columns = ["x", "y"]
+        df["x"] = pd.to_numeric(df["x"], errors="coerce")
+        df["y"] = pd.to_numeric(df["y"], errors="coerce")
+        df = df.dropna()
+        if df.empty:
+            raise ValueError("No numeric rows found in grid file.")
+        return df
+
+    def _run_extraction(self):
+        self.log.clear()
+        try:
+            import pandas as pd  # noqa: F401
+            import csv
+            import numpy as np
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Missing dependency", f"pandas or csv import failed: {e}")
+            return
+
+        meas_path = Path(self.meas_le.text().strip())
+        grid_path = Path(self.grid_le.text().strip())
+        if not meas_path.is_file():
+            QtWidgets.QMessageBox.warning(self, "Missing measurement file", "Please select a measurement CSV (x,y,value).")
+            return
+        if not grid_path.is_file():
+            QtWidgets.QMessageBox.warning(self, "Missing grid file", "Please select a grid file generated by Grid Builder.")
+            return
+
+        out_dir_txt = self.out_dir_le.text().strip()
+        out_dir = Path(out_dir_txt) if out_dir_txt else meas_path.parent
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Cannot create output folder", str(e))
+            return
+
+        try:
+            meas_df = self._load_measurement(meas_path)
+            grid_df = self._load_grid(grid_path)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Load error", str(e))
+            return
+
+        round_dec = 6  # align with grid builder output formatting
+        meas_map = {}
+        for _, r in meas_df.iterrows():
+            key = (round(float(r["x"]), round_dec), round(float(r["y"]), round_dec))
+            if key not in meas_map:
+                meas_map[key] = r["value"]
+
+        meas_xy = meas_df[["x", "y"]].to_numpy(dtype=float)
+        meas_vals = meas_df["value"].to_numpy()
+
+        rows = []
+        values_only = []
+        approx = 0
+        for _, r in grid_df.iterrows():
+            key = (round(float(r["x"]), round_dec), round(float(r["y"]), round_dec))
+            if key in meas_map:
+                v = meas_map[key]
+            else:
+                # Nearest-neighbour fallback in 2D to avoid blank outputs
+                gx, gy = float(r["x"]), float(r["y"])
+                diffs = meas_xy - np.array([gx, gy])
+                d2 = np.sum(diffs * diffs, axis=1)
+                idx = int(np.argmin(d2))
+                v = meas_vals[idx]
+                approx += 1
+            rows.append((r["x"], r["y"], v))
+            values_only.append(v)
+
+        table_name = f"{meas_path.stem}__sampled_on_{grid_path.stem}.csv"
+        table_path = out_dir / table_name
+        try:
+            with open(table_path, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["x", "y", "value"])
+                for x, y, v in rows:
+                    w.writerow([x, y, v])
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Save error", f"Failed to write sampled CSV: {e}")
+            return
+
+        formatted_vals = []
+        for v in values_only:
+            if v == "" or v is None:
+                formatted_vals.append("")
+            else:
+                try:
+                    formatted_vals.append("{:.6f}".format(float(v)))
+                except Exception:
+                    formatted_vals.append(str(v))
+
+        values_only_name = f"values_only__measurement__{grid_path.stem}.csv"
+        values_only_path = out_dir / values_only_name
+        try:
+            with open(values_only_path, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["", ""] + formatted_vals)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Save error", f"Failed to write values-only CSV: {e}")
+            return
+
+        self.log.appendPlainText(f"Measurement rows: {len(meas_df)} | Grid points: {len(grid_df)} | Exact matches: {len(values_only) - approx} | Nearest-neighbour: {approx}")
+        self.log.appendPlainText(f"Saved sampled CSV -> {table_path}")
+        self.log.appendPlainText(f"Saved values-only CSV -> {values_only_path}")
+        if approx:
+            self.log.appendPlainText("[INFO] Some grid points used nearest-neighbour lookup (no exact x,y match).")
+        QtWidgets.QMessageBox.information(self, "Build measurement", f"Done.\nSampled CSV:\n{table_path}\nValues-only CSV:\n{values_only_path}")
+
 class DataExtractTab(QtWidgets.QWidget, LaunchMixin):
     def __init__(self, settings):
         super().__init__()
@@ -854,7 +1119,9 @@ class DataExtractTab(QtWidgets.QWidget, LaunchMixin):
         self.coord_file_le = QtWidgets.QLineEdit()
         b3 = QtWidgets.QPushButton("Pick…")
         b3.clicked.connect(lambda: self._pick_file(self.coord_file_le))
-        row3 = QtWidgets.QHBoxLayout(); row3.addWidget(self.coord_file_le); row3.addWidget(b3)
+        b3b = QtWidgets.QPushButton("Grid builder…")
+        b3b.clicked.connect(self._open_grid_builder)
+        row3 = QtWidgets.QHBoxLayout(); row3.addWidget(self.coord_file_le); row3.addWidget(b3); row3.addWidget(b3b)
         form.addRow("Coordinate file (x,y,z per line):", row3)
         
         self.idw_k_sp = QtWidgets.QSpinBox()
@@ -897,6 +1164,10 @@ class DataExtractTab(QtWidgets.QWidget, LaunchMixin):
 
         self.log = QtWidgets.QPlainTextEdit(); self.log.setReadOnly(True)
 
+        self.build_measure_btn = QtWidgets.QPushButton("Build measurement")
+        self.build_measure_btn.clicked.connect(self._open_measurement_dialog)
+        hb.addWidget(self.build_measure_btn)
+
         v = QtWidgets.QVBoxLayout(self); v.addLayout(form); v.addLayout(hb); v.addWidget(self.log, 1)
 
     def _pick_odb_dir(self):
@@ -916,6 +1187,31 @@ class DataExtractTab(QtWidgets.QWidget, LaunchMixin):
         if f:
             line.setText(f)
 
+    def _open_grid_builder(self):
+        dlg = GridBuilderDialog(self)
+        if dlg.exec_():
+            try:
+                coords = dlg.build_grid()
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Grid error", str(e))
+                return
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self, "Save generated grid", "", "CSV files (*.csv);;Text files (*.txt);;All files (*)"
+            )
+            if not path:
+                return
+            try:
+                if path.lower().endswith(".csv"):
+                    np.savetxt(path, coords, fmt="%.6f", delimiter=",")
+                else:
+                    np.savetxt(path, coords, fmt="%.6f")
+                self.coord_file_le.setText(path)
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Save failed", str(e))
+
+    def _open_measurement_dialog(self):
+        dlg = BuildMeasurementDialog(self)
+        dlg.exec_()
     def _stop_running(self):
         if hasattr(self, "_worker") and self._worker.isRunning():
             self.log.appendPlainText("[GUI] 收到停止请求，正在终止整棵进程树 ...")
@@ -992,6 +1288,411 @@ class DataExtractTab(QtWidgets.QWidget, LaunchMixin):
         # Headless ODB API (no CAE session):
         cmd = [self.settings.get("abaqus_cmd", "abaqus"), "python", run_py]
         self._launch(cmd, Path(__file__).resolve().parent, self.log, self.run_btn, stop_button=self.stop_btn)
+
+
+# --------------------------- Data Alignment Tab (NEW) ---------------------------
+class DataAlignmentTab(QtWidgets.QWidget):
+    def __init__(self, settings):
+        super().__init__()
+        self.settings = settings
+        self.ref_points = None
+        self.float_points = None
+        self._scale_x = 1.0
+        self._scale_y = 1.0
+        self._ref_size = 18
+        self._float_size = 18
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QtWidgets.QHBoxLayout(self)
+
+        # Left controls
+        form = QtWidgets.QFormLayout()
+
+        self.ref_le = QtWidgets.QLineEdit()
+        self.ref_le.setPlaceholderText("No reference file selected")
+        self.ref_le.setReadOnly(True)
+        btn_ref = QtWidgets.QPushButton("Upload ref")
+        btn_ref.clicked.connect(lambda: self._load_file(is_ref=True))
+        hl_ref = QtWidgets.QHBoxLayout()
+        hl_ref.addWidget(self.ref_le)
+        hl_ref.addWidget(btn_ref)
+        form.addRow("Reference (.txt)", hl_ref)
+
+        self.float_le = QtWidgets.QLineEdit()
+        self.float_le.setPlaceholderText("No float file selected")
+        self.float_le.setReadOnly(True)
+        btn_float = QtWidgets.QPushButton("Upload float")
+        btn_float.clicked.connect(lambda: self._load_file(is_ref=False))
+        hl_float = QtWidgets.QHBoxLayout()
+        hl_float.addWidget(self.float_le)
+        hl_float.addWidget(btn_float)
+        form.addRow("Float (.txt)", hl_float)
+
+        self.status_lbl = QtWidgets.QLabel("Load reference and float .txt files (x y z columns).")
+        self.status_lbl.setWordWrap(True)
+        form.addRow(self.status_lbl)
+
+        # Symbol size controls
+        self.ref_size_sp = QtWidgets.QSpinBox()
+        self.ref_size_sp.setRange(2, 128)
+        self.ref_size_sp.setValue(self._ref_size)
+        self.ref_size_sp.setSuffix(" pt")
+        self.ref_size_sp.valueChanged.connect(self._update_plot)
+        form.addRow("Ref marker size", self.ref_size_sp)
+
+        self.float_size_sp = QtWidgets.QSpinBox()
+        self.float_size_sp.setRange(2, 128)
+        self.float_size_sp.setValue(self._float_size)
+        self.float_size_sp.setSuffix(" pt")
+        self.float_size_sp.valueChanged.connect(self._update_plot)
+        form.addRow("Float marker size", self.float_size_sp)
+
+        # Float transform controls
+        self.shift_x_ds = QtWidgets.QDoubleSpinBox()
+        self.shift_x_ds.setRange(-1e9, 1e9)
+        self.shift_x_ds.setDecimals(4)
+        self.shift_x_ds.setSingleStep(0.1)
+        self.shift_x_ds.valueChanged.connect(self._update_plot)
+        form.addRow("Float shift X", self.shift_x_ds)
+
+        self.shift_y_ds = QtWidgets.QDoubleSpinBox()
+        self.shift_y_ds.setRange(-1e9, 1e9)
+        self.shift_y_ds.setDecimals(4)
+        self.shift_y_ds.setSingleStep(0.1)
+        self.shift_y_ds.valueChanged.connect(self._update_plot)
+        form.addRow("Float shift Y", self.shift_y_ds)
+
+        self.scale_x_ds = QtWidgets.QDoubleSpinBox()
+        self.scale_x_ds.setRange(0.001, 1e6)
+        self.scale_x_ds.setDecimals(4)
+        self.scale_x_ds.setSingleStep(0.05)
+        self.scale_x_ds.setValue(self._scale_x)
+        self.scale_x_ds.valueChanged.connect(self._update_plot)
+        form.addRow("Float scale X", self.scale_x_ds)
+
+        self.scale_y_ds = QtWidgets.QDoubleSpinBox()
+        self.scale_y_ds.setRange(0.001, 1e6)
+        self.scale_y_ds.setDecimals(4)
+        self.scale_y_ds.setSingleStep(0.05)
+        self.scale_y_ds.setValue(self._scale_y)
+        self.scale_y_ds.valueChanged.connect(self._update_plot)
+        form.addRow("Float scale Y", self.scale_y_ds)
+
+        self.colorbar_chk = QtWidgets.QCheckBox("Color by Z (show colorbar)")
+        self.colorbar_chk.setChecked(True)
+        self.colorbar_chk.toggled.connect(self._update_plot)
+        form.addRow("", self.colorbar_chk)
+
+        self.rot_deg_ds = QtWidgets.QDoubleSpinBox()
+        self.rot_deg_ds.setRange(-360.0, 360.0)
+        self.rot_deg_ds.setDecimals(3)
+        self.rot_deg_ds.setSingleStep(1.0)
+        self.rot_deg_ds.setSuffix(" °")
+        self.rot_deg_ds.valueChanged.connect(self._update_plot)
+        form.addRow("Float rotate Z", self.rot_deg_ds)
+
+        # Step sizes for keyboard nudges
+        self.step_xy_ds = QtWidgets.QDoubleSpinBox()
+        self.step_xy_ds.setRange(0.0001, 1e6)
+        self.step_xy_ds.setDecimals(4)
+        self.step_xy_ds.setSingleStep(0.1)
+        self.step_xy_ds.setValue(0.1)
+        form.addRow("Shift step (keys)", self.step_xy_ds)
+
+        self.step_rot_ds = QtWidgets.QDoubleSpinBox()
+        self.step_rot_ds.setRange(0.001, 360.0)
+        self.step_rot_ds.setDecimals(3)
+        self.step_rot_ds.setSingleStep(1.0)
+        self.step_rot_ds.setValue(1.0)
+        self.step_rot_ds.setSuffix(" °")
+        form.addRow("Rotate step (keys)", self.step_rot_ds)
+
+        save_btn = QtWidgets.QPushButton("Save transformed float…")
+        save_btn.clicked.connect(self._save_transformed_float)
+        form.addRow(save_btn)
+
+        left_box = QtWidgets.QVBoxLayout()
+        left_box.addLayout(form)
+        left_box.addStretch(1)
+
+        # Shortcut hint
+        hint = QtWidgets.QLabel("Keys: arrows to shift float (X/Y), [ ] to rotate Z, 0 to reset.")
+        hint.setStyleSheet("color: #666;")
+        left_box.addWidget(hint)
+
+        # Right plot area
+        self.fig = Figure(figsize=(6, 5))
+        self.ax = self.fig.add_subplot(111, projection="3d")
+        self.canvas = FigureCanvas(self.fig)
+        self.canvas.setMinimumSize(420, 320)
+        self.toolbar = NavigationToolbar(self.canvas, self)
+        self._mappable = cm.ScalarMappable(norm=colors.Normalize(0.0, 1.0), cmap=cm.viridis)
+        self._colorbar = self.fig.colorbar(
+            self._mappable, ax=self.ax, orientation="horizontal", fraction=0.05, pad=0.12
+        )
+        self._colorbar.set_label("Z value")
+
+        # Default to a 3D view (can still rotate with mouse/toolbar)
+        try:
+            self.ax.view_init(elev=25, azim=-60)
+            self.ax.set_proj_type("ortho")  # parallel projection
+        except Exception:
+            pass
+
+        # Quick projection and clear buttons
+        view_btns = QtWidgets.QHBoxLayout()
+        for label in ["View X", "View Y", "View Z"]:
+            b = QtWidgets.QPushButton(label)
+            if label.endswith("X"):
+                b.clicked.connect(lambda _, axis="X": self._set_view(axis))
+            elif label.endswith("Y"):
+                b.clicked.connect(lambda _, axis="Y": self._set_view(axis))
+            else:
+                b.clicked.connect(lambda _, axis="Z": self._set_view(axis))
+            view_btns.addWidget(b)
+        clear_btn = QtWidgets.QPushButton("Clear plot")
+        clear_btn.clicked.connect(self._clear_plot)
+        view_btns.addWidget(clear_btn)
+
+        right = QtWidgets.QVBoxLayout()
+        right.addLayout(view_btns)
+        right.addWidget(self.toolbar)
+        right.addWidget(self.canvas, 1)
+
+        layout.addLayout(left_box, 0)
+        layout.addLayout(right, 1)
+
+        self._setup_shortcuts()
+        self._update_plot()
+
+    def _setup_shortcuts(self):
+        # Translate with arrows; rotate with [ and ]; reset with 0
+        def _nudge(spin, delta):
+            spin.setValue(spin.value() + delta)
+
+        shortcuts = [
+            (QtGui.QKeySequence(QtCore.Qt.Key_Left),  lambda: _nudge(self.shift_x_ds, -float(self.step_xy_ds.value()))),
+            (QtGui.QKeySequence(QtCore.Qt.Key_Right), lambda: _nudge(self.shift_x_ds,  float(self.step_xy_ds.value()))),
+            (QtGui.QKeySequence(QtCore.Qt.Key_Up),    lambda: _nudge(self.shift_y_ds,  float(self.step_xy_ds.value()))),
+            (QtGui.QKeySequence(QtCore.Qt.Key_Down),  lambda: _nudge(self.shift_y_ds, -float(self.step_xy_ds.value()))),
+            (QtGui.QKeySequence("["),                 lambda: _nudge(self.rot_deg_ds, -float(self.step_rot_ds.value()))),
+            (QtGui.QKeySequence("]"),                 lambda: _nudge(self.rot_deg_ds,  float(self.step_rot_ds.value()))),
+            (QtGui.QKeySequence("0"),                 self._reset_transform),
+        ]
+        for seq, fn in shortcuts:
+            sc = QtWidgets.QShortcut(seq, self)
+            sc.activated.connect(fn)
+
+    def _reset_transform(self):
+        self.shift_x_ds.setValue(0.0)
+        self.shift_y_ds.setValue(0.0)
+        self.rot_deg_ds.setValue(0.0)
+        self.scale_x_ds.setValue(1.0)
+        self.scale_y_ds.setValue(1.0)
+
+    def _set_view(self, axis: str):
+        axis = axis.upper()
+        views = {
+            "X": (0.0, 0.0),    # look along +X
+            "Y": (0.0, 90.0),   # along +Y
+            "Z": (90.0, -90.0)  # top-down along +Z
+        }
+        elev, azim = views.get(axis, (25.0, -60.0))
+        try:
+            self.ax.view_init(elev=elev, azim=azim)
+            self.ax.set_proj_type("ortho")
+            self.canvas.draw_idle()
+        except Exception:
+            pass
+
+    def _clear_plot(self):
+        self.ref_points = None
+        self.float_points = None
+        self.ref_le.clear()
+        self.float_le.clear()
+        self._update_plot()
+
+    def _read_xyz(self, path: str) -> np.ndarray:
+        # Accept .txt or .csv; skip a header line if present
+        first = Path(path).read_text(encoding="utf-8", errors="ignore").splitlines()
+        first_line = first[0] if first else ""
+        has_header = False
+        delim = "," if "," in first_line else None
+        try:
+            parts = [float(x) for x in first_line.strip().split(delim)]
+            if len(parts) != 3:
+                has_header = True
+        except Exception:
+            has_header = True
+
+        arr = np.loadtxt(path, delimiter=delim, skiprows=1 if has_header else 0, usecols=[0, 1, 2])
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        if arr.shape[1] != 3:
+            raise ValueError("Expected 3 columns (x y z).")
+        return arr.astype(float)
+
+    def _load_file(self, is_ref: bool):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Select data file", "", "Data files (*.txt *.csv);;All files (*)"
+        )
+        if not path:
+            return
+        try:
+            pts = self._read_xyz(path)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Invalid file", str(e))
+            return
+
+        if is_ref:
+            self.ref_points = pts
+            self.ref_le.setText(path)
+            which = "reference"
+        else:
+            self.float_points = pts
+            self.float_le.setText(path)
+            which = "float"
+
+        self.status_lbl.setText(f"Loaded {pts.shape[0]} points from {which} file.")
+        self._update_plot()
+
+    def _transform_float_points(self):
+        if self.float_points is None:
+            return None
+        # Rotate around Z, then translate in X/Y
+        theta = np.deg2rad(float(self.rot_deg_ds.value()))
+        c, s = np.cos(theta), np.sin(theta)
+        rot = np.array([[c, -s], [s, c]], dtype=float)
+        scale_vec = np.array([float(self.scale_x_ds.value()), float(self.scale_y_ds.value())], dtype=float)
+        xy = (self.float_points[:, :2] * scale_vec) @ rot.T
+        xy[:, 0] += float(self.shift_x_ds.value())
+        xy[:, 1] += float(self.shift_y_ds.value())
+        out = self.float_points.copy()
+        out[:, 0:2] = xy
+        return out
+
+    def _save_transformed_float(self):
+        tf = self._transform_float_points()
+        if tf is None:
+            QtWidgets.QMessageBox.information(self, "No float data", "Load a float file first.")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save transformed float",
+            "",
+            "CSV files (*.csv);;Text files (*.txt);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            if path.lower().endswith(".csv"):
+                np.savetxt(path, tf, fmt="%.6f", delimiter=",")
+            else:
+                np.savetxt(path, tf, fmt="%.6f")
+            QtWidgets.QMessageBox.information(self, "Saved", f"Transformed float points saved to:\n{path}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Save failed", str(e))
+
+    def _set_equal_aspect(self):
+        pts = []
+        if self.ref_points is not None:
+            pts.append(self.ref_points)
+        tf = self._transform_float_points()
+        if tf is not None:
+            pts.append(tf)
+        if not pts:
+            return
+        data = np.vstack(pts)
+        mins = data.min(axis=0)
+        maxs = data.max(axis=0)
+        span = np.maximum(maxs - mins, 1e-9)
+        # pad each axis a bit to avoid degenerate ranges without forcing a cube
+        pad = np.maximum(span * 0.05, 1e-3)
+        lower = mins - pad
+        upper = maxs + pad
+        self.ax.set_xlim(lower[0], upper[0])
+        self.ax.set_ylim(lower[1], upper[1])
+        self.ax.set_zlim(lower[2], upper[2])
+
+    def _update_plot(self):
+        self.ax.clear()
+        tf = self._transform_float_points()
+
+        # Build a shared color scale based on Z
+        z_arrays = []
+        if self.ref_points is not None:
+            z_arrays.append(self.ref_points[:, 2])
+        if tf is not None:
+            z_arrays.append(tf[:, 2])
+
+        norm = None
+        use_cmap = bool(self.colorbar_chk.isChecked())
+        if use_cmap and z_arrays:
+            zcat = np.hstack(z_arrays)
+            z_min, z_max = float(np.min(zcat)), float(np.max(zcat))
+            if z_max == z_min:
+                z_max = z_min + 1.0
+            norm = colors.Normalize(vmin=z_min, vmax=z_max)
+
+        handles = []
+        if self.ref_points is not None:
+            h = self.ax.scatter(
+                self.ref_points[:, 0],
+                self.ref_points[:, 1],
+                self.ref_points[:, 2],
+                s=float(self.ref_size_sp.value()),
+                c=self.ref_points[:, 2] if norm is not None else "#1f77b4",
+                cmap=cm.viridis if norm is not None else None,
+                norm=norm,
+                marker="o",
+                label="Reference",
+                alpha=0.85,
+            )
+            handles.append(h)
+        if tf is not None:
+            h = self.ax.scatter(
+                tf[:, 0],
+                tf[:, 1],
+                tf[:, 2],
+                s=float(self.float_size_sp.value()),
+                c=tf[:, 2] if norm is not None else "#ff7f0e",
+                cmap=cm.viridis if norm is not None else None,
+                norm=norm,
+                marker="^",
+                label="Float",
+                alpha=0.85,
+            )
+            handles.append(h)
+
+        self.ax.set_xlabel("X")
+        self.ax.set_ylabel("Y")
+        self.ax.set_zlabel("Z")
+
+        if handles:
+            self.ax.legend(loc="upper right")
+            self._set_equal_aspect()
+        else:
+            self.ax.text2D(
+                0.5,
+                0.5,
+                "Load reference and float files to view points",
+                transform=self.ax.transAxes,
+                ha="center",
+                va="center",
+                fontsize=10,
+                color="#666666",
+            )
+
+        if norm is not None:
+            self._mappable.set_norm(norm)
+            self._colorbar.ax.set_visible(True)
+            self._colorbar.update_normal(self._mappable)
+            self._colorbar.set_label("Z value")
+        else:
+            self._colorbar.ax.set_visible(False)
+
+        self.canvas.draw_idle()
 # --------------------------- Batch Submit Tab ---------------------------
 class BatchSubmitTab(QtWidgets.QWidget, LaunchMixin):
     def __init__(self, settings):
@@ -1529,6 +2230,7 @@ class MainWindow(QtWidgets.QMainWindow):
         tabs.addTab(BuildModelTab(self.settings), "Build Model")
         tabs.addTab(InputAndUtempTab(self.settings), "Input & UTEMP")
         tabs.addTab(DataExtractTab(self.settings), "Data Extract")  # NEW
+        tabs.addTab(DataAlignmentTab(self.settings), "Data alignment")
         tabs.addTab(BatchSubmitTab(self.settings), "Submit Jobs")
         tabs.addTab(MachineLearningTab(self.settings), "ML (GBM)")
 
