@@ -1093,6 +1093,7 @@ class DataExtractTab(QtWidgets.QWidget, LaunchMixin):
         super().__init__()
         self.settings = settings
         self._tmpdir = None
+        self._early_stop_file = None
         self._setup_ui()
 
     def _setup_ui(self):
@@ -1423,9 +1424,26 @@ class DataAlignmentTab(QtWidgets.QWidget):
         self.step_rot_ds.setSuffix(" °")
         form.addRow("Rotate step (keys)", self.step_rot_ds)
 
-        save_btn = QtWidgets.QPushButton("Save transformed float…")
+        save_btn = QtWidgets.QPushButton("Save transformed float")
         save_btn.clicked.connect(self._save_transformed_float)
         form.addRow(save_btn)
+
+        # Calculation controls
+        self.op_cb = QtWidgets.QComboBox()
+        self.op_cb.addItems(["+", "-", "*", "/", "Average"])
+        form.addRow("Operation", self.op_cb)
+
+        self.order_cb = QtWidgets.QComboBox()
+        self.order_cb.addItems(["Reference (left) / Float (right)", "Float (left) / Reference (right)"])
+        form.addRow("Operand order", self.order_cb)
+
+        calc_btn = QtWidgets.QPushButton("Compute & save result")
+        calc_btn.clicked.connect(self._compute_and_save)
+        form.addRow(calc_btn)
+
+        calc_hint = QtWidgets.QLabel("Interpolates float Z onto ref X/Y; unmatched points are dropped.")
+        calc_hint.setStyleSheet("color: #666;")
+        form.addRow("", calc_hint)
 
         left_box = QtWidgets.QVBoxLayout()
         left_box.addLayout(form)
@@ -1587,6 +1605,40 @@ class DataAlignmentTab(QtWidgets.QWidget):
         out[:, 0:2] = xy
         return out
 
+    def _interpolate_float_z(self, ref_xy: np.ndarray, float_pts: np.ndarray, k: int = 4) -> np.ndarray:
+        """
+        Inverse-distance interpolation of float Z values onto reference X/Y coordinates.
+        Returns an array aligned to ref_xy (np.nan where interpolation fails).
+        """
+        if ref_xy.size == 0:
+            return np.array([])
+        if float_pts is None or float_pts.size == 0:
+            return np.full(ref_xy.shape[0], np.nan, dtype=float)
+
+        fx, fy, fz = float_pts[:, 0], float_pts[:, 1], float_pts[:, 2]
+        k = max(1, min(int(k), float_pts.shape[0]))
+        out = np.full(ref_xy.shape[0], np.nan, dtype=float)
+
+        for i, (x, y) in enumerate(ref_xy):
+            d2 = (fx - x) ** 2 + (fy - y) ** 2
+            idx = np.argpartition(d2, k - 1)[:k]
+            sel_d2 = d2[idx]
+            sel_fz = fz[idx]
+
+            # Exact match: use that Z directly
+            exact_mask = sel_d2 <= 1e-16
+            if np.any(exact_mask):
+                out[i] = sel_fz[exact_mask][0]
+                continue
+
+            weights = 1.0 / np.maximum(sel_d2, 1e-12)
+            wsum = float(np.sum(weights))
+            if wsum == 0.0:
+                continue
+            out[i] = float(np.dot(weights, sel_fz) / wsum)
+
+        return out
+
     def _save_transformed_float(self):
         tf = self._transform_float_points()
         if tf is None:
@@ -1608,6 +1660,100 @@ class DataAlignmentTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.information(self, "Saved", f"Transformed float points saved to:\n{path}")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Save failed", str(e))
+
+    def _compute_and_save(self):
+        if self.ref_points is None or self.float_points is None:
+            QtWidgets.QMessageBox.warning(self, "Missing data", "Load both reference and float files first.")
+            return
+
+        tf = self._transform_float_points()
+        if tf is None or tf.size == 0:
+            QtWidgets.QMessageBox.warning(self, "Missing float points", "Float data is not available after transformation.")
+            return
+
+        ref_xy = self.ref_points[:, :2]
+        ref_z = self.ref_points[:, 2]
+        interp_z = self._interpolate_float_z(ref_xy, tf, k=4)
+        if interp_z.size == 0:
+            QtWidgets.QMessageBox.warning(self, "No points", "No reference points available for alignment.")
+            return
+
+        mask = ~np.isnan(interp_z)
+        matched = int(np.count_nonzero(mask))
+        dropped = int(len(interp_z) - matched)
+        if matched == 0:
+            QtWidgets.QMessageBox.warning(self, "No matches", "No matched points after interpolation (all dropped).")
+            return
+
+        x = ref_xy[mask, 0]
+        y = ref_xy[mask, 1]
+        ref_z_aligned = ref_z[mask]
+        float_z_aligned = interp_z[mask]
+
+        left_is_ref = (self.order_cb.currentIndex() == 0)
+        left_vals = ref_z_aligned if left_is_ref else float_z_aligned
+        right_vals = float_z_aligned if left_is_ref else ref_z_aligned
+
+        op = self.op_cb.currentText()
+        if op == "+":
+            result = left_vals + right_vals
+            op_label = "+"
+        elif op == "-":
+            result = left_vals - right_vals
+            op_label = "-"
+        elif op == "*":
+            result = left_vals * right_vals
+            op_label = "*"
+        elif op == "/":
+            result = np.full_like(left_vals, np.nan, dtype=float)
+            nonzero = np.abs(right_vals) > 1e-12
+            result[nonzero] = left_vals[nonzero] / right_vals[nonzero]
+            op_label = "/"
+        else:
+            result = (left_vals + right_vals) / 2.0
+            op_label = "avg"
+
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save aligned calculation",
+            "",
+            "CSV files (*.csv);;Text files (*.txt);;All files (*)",
+        )
+        if not path:
+            return
+
+        sep = "," if path.lower().endswith(".csv") else "\t"
+
+        def _fmt(val, blank_on_nan=False):
+            try:
+                if blank_on_nan and (val is None or (isinstance(val, float) and np.isnan(val))):
+                    return ""
+                return f"{float(val):.6f}"
+            except Exception:
+                return ""
+
+        try:
+            with open(path, "w", newline="") as f:
+                for row in zip(x, y, result):
+                    f.write(sep.join([
+                        _fmt(row[0]),
+                        _fmt(row[1]),
+                        _fmt(row[2], blank_on_nan=True),
+                    ]) + "\n")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Save failed", f"Failed to save output: {e}")
+            return
+
+        left_label = "Reference" if left_is_ref else "Float"
+        right_label = "Float" if left_is_ref else "Reference"
+        self.status_lbl.setText(
+            f"Saved {matched} rows (dropped {dropped}). {left_label} {op_label} {right_label} -> {path}"
+        )
+        QtWidgets.QMessageBox.information(
+            self,
+            "Saved",
+            f"Saved {matched} rows (dropped {dropped}).\n{left_label} {op_label} {right_label}\n{path}",
+        )
 
     def _set_equal_aspect(self):
         pts = []
@@ -1827,11 +1973,15 @@ TEST_SIZE     = __TEST_SIZE__
 RAND_STATE    = __RAND_STATE__
 LR_LOW        = __LR_LOW__
 LR_HIGH       = __LR_HIGH__
+EARLY_STOP_FILE = r"__EARLY_STOP_FILE__"
 # ====================================
 
 def _ensure_out(d):
     if not os.path.isdir(d):
         os.makedirs(d)
+
+def _early_stop_requested():
+    return os.path.exists(EARLY_STOP_FILE)
 
 def main():
     print("[TRAIN] Loading:", DATA_FILE)
@@ -1884,9 +2034,14 @@ def main():
         avg = (float(np.mean(s1)) + float(np.mean(s2))) / 2.0
         return -avg  # minimize
 
+    def _optuna_cb(study, trial):
+        if _early_stop_requested():
+            print("[TRAIN] Early-stop requested; stopping after current trial.")
+            study.stop()
+
     print("[TRAIN] Optuna trials:", N_TRIALS)
     study = optuna.create_study(direction='minimize')
-    study.optimize(objective, n_trials=N_TRIALS, n_jobs=-1)
+    study.optimize(objective, n_trials=N_TRIALS, n_jobs=-1, callbacks=[_optuna_cb])
     best = study.best_trial
     print("[TRAIN] Best params:", best.params)
 
@@ -1894,23 +2049,55 @@ def main():
     best_gb_1 = GradientBoostingRegressor(random_state=RAND_STATE, **best.params)
     best_gb_2 = GradientBoostingRegressor(random_state=RAND_STATE, **best.params)
 
-    # Learning curve
-    r2_1, r2_2, nlist = [], [], []
+    # Final eval (fit once with best params)
     maxN = int(best.params['n_estimators'])
-    step = 10 if maxN >= 20 else 1
-    for n in range(step, maxN+1, step):
-        best_gb_1.set_params(n_estimators=n); best_gb_2.set_params(n_estimators=n)
-        best_gb_1.fit(X_train, y_train[:,0]); best_gb_2.fit(X_train, y_train[:,1])
-        p1 = best_gb_1.predict(X_val); p2 = best_gb_2.predict(X_val)
-        r2_1.append(r2_score(y_val[:,0], p1)); r2_2.append(r2_score(y_val[:,1], p2)); nlist.append(n)
-
-    # Final eval
     best_gb_1.set_params(n_estimators=maxN); best_gb_2.set_params(n_estimators=maxN)
     best_gb_1.fit(X_train, y_train[:,0]); best_gb_2.fit(X_train, y_train[:,1])
     pv1 = best_gb_1.predict(X_val); pv2 = best_gb_2.predict(X_val)
     r21 = r2_score(y_val[:,0], pv1); r22 = r2_score(y_val[:,1], pv2)
     r2avg = (r21 + r22) / 2.0
     print("[TRAIN] Final R2 target1=%.4f target2=%.4f avg=%.4f" % (r21, r22, r2avg))
+
+    # Build artifact dict (save early so long learning-curve sweeps don't block)
+    feat_imp_1 = getattr(best_gb_1, 'feature_importances_', None)
+    feat_imp_2 = getattr(best_gb_2, 'feature_importances_', None)
+    artifact = {
+        'model1': best_gb_1,
+        'model2': best_gb_2,
+        'scaling': {'global_min': global_min, 'global_max': global_max},
+        'best_params': dict(best.params),
+        'val_r2': {'target1': float(r21), 'target2': float(r22), 'avg': float(r2avg)},
+        'n_features': int(X.shape[1]),
+        'feature_importances': {
+            'target1': feat_imp_1.tolist() if feat_imp_1 is not None else None,
+            'target2': feat_imp_2.tolist() if feat_imp_2 is not None else None
+        }
+    }
+
+    artifact_path = os.path.join(OUTPUT_DIR, ARTIFACT_NAME)
+    joblib.dump(artifact, artifact_path)
+    print("[TRAIN] Artifact saved:", artifact_path)
+
+    if _early_stop_requested():
+        print("[TRAIN] Early-stop flag detected; skipping learning-curve sweep.")
+        return
+
+    # Learning curve (guarded and short: <=20 points)
+    r2_1, r2_2, nlist = [], [], []
+    step = max(1, maxN // 20)
+    n_grid = list(range(step, maxN+1, step))
+    if n_grid[-1] != maxN:
+        n_grid.append(maxN)
+
+    for idx, n in enumerate(n_grid, 1):
+        print("[TRAIN] Learning curve %d/%d: n_estimators=%d" % (idx, len(n_grid), n))
+        if _early_stop_requested():
+            print("[TRAIN] Early-stop flag detected; aborting learning-curve sweep.")
+            break
+        best_gb_1.set_params(n_estimators=n); best_gb_2.set_params(n_estimators=n)
+        best_gb_1.fit(X_train, y_train[:,0]); best_gb_2.fit(X_train, y_train[:,1])
+        p1 = best_gb_1.predict(X_val); p2 = best_gb_2.predict(X_val)
+        r2_1.append(r2_score(y_val[:,0], p1)); r2_2.append(r2_score(y_val[:,1], p2)); nlist.append(n)
 
     # Plots
     plt.figure(figsize=(7,5))
@@ -1927,27 +2114,6 @@ def main():
         plt.xlabel('Actual'); plt.ylabel('Predicted'); plt.title('GBM Parity: %s' % name)
         plt.grid(True); plt.tight_layout()
         plt.savefig(os.path.join(OUTPUT_DIR, 'gbm_parity_%s.png' % name), dpi=160); plt.close()
-
-    # Build artifact dict
-    feat_imp_1 = getattr(best_gb_1, 'feature_importances_', None)
-    feat_imp_2 = getattr(best_gb_2, 'feature_importances_', None)
-    artifact = {
-        'model1': best_gb_1,
-        'model2': best_gb_2,
-        'scaling': {'global_min': global_min, 'global_max': global_max},
-        'best_params': dict(best.params),
-        'val_r2': {'target1': float(r21), 'target2': float(r22), 'avg': float(r2avg)},
-        'n_features': int(X.shape[1]),
-        'feature_importances': {
-            'target1': feat_imp_1.tolist() if feat_imp_1 is not None else None,
-            'target2': feat_imp_2.tolist() if feat_imp_2 is not None else None
-        }
-    }
-
-    # Save ONE artifact file
-    artifact_path = os.path.join(OUTPUT_DIR, ARTIFACT_NAME)
-    joblib.dump(artifact, artifact_path)
-    print("[TRAIN] Artifact saved:", artifact_path)
 
 if __name__ == "__main__":
     try:
@@ -2056,7 +2222,8 @@ if __name__ == "__main__":
 
         self.train_run_btn = QtWidgets.QPushButton("Train GB Models →"); self.train_run_btn.clicked.connect(self._run_train)
         self.train_stop_btn = QtWidgets.QPushButton("Stop"); self.train_stop_btn.setEnabled(False); self.train_stop_btn.clicked.connect(self._stop_train)
-        h_tr = QtWidgets.QHBoxLayout(); h_tr.addWidget(self.train_run_btn); h_tr.addWidget(self.train_stop_btn)
+        self.train_early_btn = QtWidgets.QPushButton("Early stop (save)"); self.train_early_btn.setEnabled(False); self.train_early_btn.clicked.connect(self._request_early_stop)
+        h_tr = QtWidgets.QHBoxLayout(); h_tr.addWidget(self.train_run_btn); h_tr.addWidget(self.train_stop_btn); h_tr.addWidget(self.train_early_btn)
         form_t.addRow(h_tr)
 
         self.train_log = QtWidgets.QPlainTextEdit(); self.train_log.setReadOnly(True)
@@ -2113,7 +2280,23 @@ if __name__ == "__main__":
         if hasattr(self, "_worker_train") and self._worker_train.isRunning():
             self.train_log.appendPlainText("[GUI] Stopping training ...")
             self.train_run_btn.setEnabled(True); self.train_stop_btn.setEnabled(False)
+            self.train_early_btn.setEnabled(False)
             self._worker_train.stop(kill_tree=True)
+        else:
+            self.train_log.appendPlainText("[GUI] No running training to stop.")
+
+    def _request_early_stop(self):
+        if not (hasattr(self, "_worker_train") and self._worker_train.isRunning()):
+            self.train_log.appendPlainText("[GUI] No running training to early-stop.")
+            return
+        if not self._early_stop_file:
+            self.train_log.appendPlainText("[GUI] Early-stop flag path missing; cannot signal.")
+            return
+        try:
+            Path(self._early_stop_file).write_text("stop", encoding="utf-8")
+            self.train_log.appendPlainText("[GUI] Early-stop requested. Training will finish current trial and save artifact.")
+        except Exception as e:
+            self.train_log.appendPlainText(f"[GUI] Failed to write early-stop flag: {e}")
 
     def _stop_predict(self):
         if hasattr(self, "_worker_pred") and self._worker_pred.isRunning():
@@ -2172,6 +2355,12 @@ if __name__ == "__main__":
         if not self._tmpdir:
             self._tmpdir = tempfile.TemporaryDirectory()
 
+        self._early_stop_file = str(Path(self._tmpdir.name) / "gbm_early_stop.flag")
+        try:
+            Path(self._early_stop_file).unlink(missing_ok=True)
+        except Exception:
+            pass
+
         reps = {
             r'__DATA_FILE__'     : Path(data).expanduser().resolve().as_posix(),
             r'__OUTPUT_DIR__'    : Path(outd).expanduser().resolve().as_posix(),
@@ -2181,6 +2370,7 @@ if __name__ == "__main__":
             r'__RAND_STATE__'    : "42",
             r'__LR_LOW__'        : str(float(self.lr_low_ds.value())),
             r'__LR_HIGH__'       : str(float(self.lr_high_ds.value())),
+            r'__EARLY_STOP_FILE__': self._early_stop_file,
         }
         run_py = self._write_script(self.TRAIN_TEMPLATE, reps, self._tmpdir.name, "gb_train_run.py")
 
@@ -2190,8 +2380,10 @@ if __name__ == "__main__":
         self._worker_train.output.connect(self.train_log.appendPlainText)
         def _finish(code):
             self.train_run_btn.setEnabled(True); self.train_stop_btn.setEnabled(False)
+            self.train_early_btn.setEnabled(False)
             self.train_log.appendPlainText("\n=== training finished (exit %s) ===" % code)
         self.train_run_btn.setEnabled(False); self.train_stop_btn.setEnabled(True)
+        self.train_early_btn.setEnabled(True)
         self._worker_train.finished.connect(_finish)
         self._worker_train.start()
 
