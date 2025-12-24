@@ -1131,6 +1131,11 @@ class DataExtractTab(QtWidgets.QWidget, LaunchMixin):
         row2 = QtWidgets.QHBoxLayout(); row2.addWidget(self.out_dir_le); row2.addWidget(b2)
         form.addRow("Output Folder:", row2)
 
+        # Flat data toggle (value_only CSV)
+        self.flat_chk = QtWidgets.QCheckBox("Flat data (detrend + zero-mean value_only CSV)")
+        self.flat_chk.setChecked(False)
+        form.addRow("", self.flat_chk)
+
         # --- NEW: Coordinate sampling (IDW) controls ---
         self.coord_file_le = QtWidgets.QLineEdit()
         b3 = QtWidgets.QPushButton("Pick…")
@@ -1264,6 +1269,7 @@ class DataExtractTab(QtWidgets.QWidget, LaunchMixin):
             r'^IDW_K\s*=.*':        'IDW_K = %d' % int(self.idw_k_sp.value()),
             r'^IDW_RADIUS\s*=.*':   'IDW_RADIUS = %s' % float(self.idw_radius_ds.value()),
             r'^IDW_POWER\s*=.*':    'IDW_POWER = %s' % float(self.idw_power_ds.value()),
+            r'^FLAT_DATA\s*=.*':    'FLAT_DATA = %s' % ("True" if self.flat_chk.isChecked() else "False"),
 
         }
         # force UTF-8 cookie if any other cookie is present

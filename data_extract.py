@@ -516,6 +516,8 @@ IDW_K        = 4        # number of nearest supports (max)
 IDW_RADIUS   = 1e-3     # search radius (model units). Only supports within this radius are used
 IDW_POWER    = 2.0      # power in inverse-distance weighting (2.0 = standard IDW)
 # -----------------------------------------------------------------------------------------
+# Flat toggle (GUI controlled): if True, value_only rows are detrended (zero-slope) and mean-centered.
+FLAT_DATA    = False
 
 from odbAccess import openOdb
 from abaqusConstants import NODAL, INTEGRATION_POINT, MISES
@@ -710,6 +712,73 @@ def _manual_nodal_average(ip_field, elem_conn):
         c = float(cnts.get(k, 1))
         avgs[k] = sums[k]/c
     return avgs
+
+def _as_float_list(values):
+    out = []
+    for v in values:
+        try:
+            fv = float(v)
+        except Exception:
+            try:
+                fv = float(v[0])
+            except Exception:
+                continue
+        if math.isnan(fv) or math.isinf(fv):
+            continue
+        out.append(fv)
+    return out
+
+def _detrend_and_center(vals):
+    """
+    Remove linear trend (per-row) and mean-center to zero.
+    vals: list of floats
+    """
+    n = len(vals)
+    if n == 0:
+        return []
+    if n == 1:
+        return [0.0]
+
+    xs = range(n)
+    mean_x = (n - 1) / 2.0
+    mean_y = sum(vals) / float(n)
+    var_x = sum((x - mean_x) ** 2 for x in xs)
+    if var_x <= 0.0:
+        slope = 0.0
+    else:
+        cov = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, vals))
+        slope = cov / var_x
+    intercept = mean_y - slope * mean_x
+
+    detr = []
+    for x, y in zip(xs, vals):
+        detr.append(y - (slope * x + intercept))
+
+    mean_det = sum(detr) / float(n)
+    return [y - mean_det for y in detr]
+
+def _format_aggregate_values(values_only, var_upper):
+    """
+    Prepare value_only row for aggregate CSV.
+    Applies flattening when FLAT_DATA is True; otherwise preserves legacy formatting.
+    """
+    nums = _as_float_list(values_only)
+    if not nums:
+        return []
+
+    if FLAT_DATA:
+        nums = _detrend_and_center(nums)
+
+    if FLAT_DATA or var_upper in ('U1', 'U2', 'U3', 'UMAG'):
+        return ["{:.6f}".format(v) for v in nums]
+
+    rounded = []
+    for v in nums:
+        try:
+            rounded.append(int(round(v)))
+        except Exception:
+            continue
+    return rounded
 
 # ---------- IDW core ----------
 def _idw_value(q, supports, values, k, radius, power):
@@ -1074,32 +1143,9 @@ def main():
                 axis_name=axis_name
             )
 
-            if values_only:
-                if var_upper in ('U1', 'U2', 'U3', 'UMAG'):
-                    six_dec = []
-                    for v in values_only:
-                        try:
-                            fv = float(v)
-                        except:
-                            try:
-                                fv = float(v[0])
-                            except:
-                                continue
-                        six_dec.append("{:.6f}".format(fv))
-                    row = [first, second] + six_dec
-                else:
-                    rounded = []
-                    for v in values_only:
-                        try:
-                            iv = int(round(float(v)))
-                        except:
-                            try:
-                                iv = int(round(float(v[0])))
-                            except:
-                                continue
-                        rounded.append(iv)
-                    row = [first, second] + rounded
-                aggregate_rows.append(row)
+            formatted = _format_aggregate_values(values_only, var_upper)
+            if formatted:
+                aggregate_rows.append([first, second] + formatted)
 
     else:
         # IDW coordinate sampling path
@@ -1121,32 +1167,9 @@ def main():
                 queries=queries
             )
 
-            if values_only:
-                if var_upper in ('U1', 'U2', 'U3', 'UMAG'):
-                    six_dec = []
-                    for v in values_only:
-                        try:
-                            fv = float(v)
-                        except:
-                            try:
-                                fv = float(v[0])
-                            except:
-                                continue
-                        six_dec.append("{:.6f}".format(fv))
-                    row = [first, second] + six_dec
-                else:
-                    rounded = []
-                    for v in values_only:
-                        try:
-                            iv = int(round(float(v)))
-                        except:
-                            try:
-                                iv = int(round(float(v[0])))
-                            except:
-                                continue
-                        rounded.append(iv)
-                    row = [first, second] + rounded
-                aggregate_rows.append(row)
+            formatted = _format_aggregate_values(values_only, var_upper)
+            if formatted:
+                aggregate_rows.append([first, second] + formatted)
 
     # Write aggregate CSV (no header). Py2 Windows ⇒ 'wb'
     f = open(aggregate_path, 'wb')
