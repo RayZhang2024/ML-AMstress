@@ -89,7 +89,7 @@ for x in range (temp_step):
             fid.write("      SUBROUTINE UTEMP(TEMP,NSECPT,KSTEP,KINC,TIME,NODE,COORDS)\n")
             fid.write("      INCLUDE 'ABA_PARAM.INC'\n")
             fid.write("      DIMENSION TEMP(NSECPT), TIME(2), COORDS(3)\n")
-            fid.write("      TS=80.0\n")
+            fid.write("      TS=400.0\n")
             fid.write("      CC=-1.5\n")
             fid.write("      HC=-4.0\n")
             fid.write("      TEMPT=0.0\n")
