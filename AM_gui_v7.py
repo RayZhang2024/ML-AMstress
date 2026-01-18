@@ -53,6 +53,63 @@ DEFAULT_MESH_SCRIPT   = SCRIPT_DIR / "apply_meshing.py"
 # NEW: boundary template
 DEFAULT_APPLY_BC_SCRIPT = SCRIPT_DIR / "apply_boundary.py"
 
+I18N_DIR = SCRIPT_DIR / "i18n"
+DEFAULT_UI_LANGUAGE = "en"
+SUPPORTED_UI_LANGS = {
+    "en": "English",
+    "zh": "Chinese",
+}
+UI_LANGUAGE_CHOICES = [
+    ("English", "en"),
+    ("Chinese", "zh"),
+]
+_CURRENT_UI_LANG = DEFAULT_UI_LANGUAGE
+_I18N_MAP = {}
+
+
+def _load_i18n(lang: str) -> dict:
+    path = I18N_DIR / f"{lang}.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        fixed = {}
+        for k, v in data.items():
+            k_fix = _decode_escaped_unicode(k) if isinstance(k, str) else k
+            v_fix = _decode_escaped_unicode(v) if isinstance(v, str) else v
+            fixed[k_fix] = v_fix
+        return fixed
+    except Exception:
+        return {}
+
+
+def _decode_escaped_unicode(text: str) -> str:
+    if "\\u" in text or "\\U" in text:
+        try:
+            return text.encode("utf-8").decode("unicode_escape")
+        except Exception:
+            return text
+    return text
+
+
+def set_language(lang: str) -> None:
+    global _CURRENT_UI_LANG, _I18N_MAP
+    if lang not in SUPPORTED_UI_LANGS:
+        lang = DEFAULT_UI_LANGUAGE
+    _CURRENT_UI_LANG = lang
+    _I18N_MAP = _load_i18n(lang)
+
+
+def tr(text: str, **kwargs) -> str:
+    if _CURRENT_UI_LANG != DEFAULT_UI_LANGUAGE:
+        text = _I18N_MAP.get(text, text)
+    if kwargs:
+        try:
+            return text.format(**kwargs)
+        except Exception:
+            return text
+    return text
+
 
 # ---------------------------- Worker (kill process tree) ----------------------------
 class Worker(QtCore.QThread):
@@ -113,7 +170,7 @@ class LaunchMixin:
     def _launch(self, cmd, cwd, log, run_button, stop_button=None, on_finished_extra=None, clear_log=False):
         exe = cmd[0]
         if shutil.which(exe) is None:
-            QtWidgets.QMessageBox.critical(self, "Executable not found",
+            QtWidgets.QMessageBox.critical(self, tr("Executable not found"),
                                             f"'{exe}' 不在 PATH。请在【设置】里配置正确的 Abaqus 命令。")
             return
 
@@ -173,47 +230,49 @@ class BuildModelTab(QtWidgets.QWidget, LaunchMixin):
 
         # Mode
         self.mode_cb = QtWidgets.QComboBox()
-        self.mode_cb.addItems(["Create primitive (parametric)", "Import CAD (STEP/IGES/SAT)"])
+        self.mode_cb.addItems([tr("Create primitive (parametric)"), tr("Import CAD (STEP/IGES/SAT)")])
         self.mode_cb.currentIndexChanged.connect(self._toggle_mode)
-        form.addRow("Model source", self.mode_cb)
+        form.addRow(tr("Model source"), self.mode_cb)
 
         # Parametric inputs
-        self.shape_cb = QtWidgets.QComboBox(); self.shape_cb.addItems(self.shapes.keys())
-        form.addRow("Shape", self.shape_cb)
+        self.shape_cb = QtWidgets.QComboBox()
+        for shape_name in self.shapes.keys():
+            self.shape_cb.addItem(tr(shape_name), shape_name)
+        form.addRow(tr("Shape"), self.shape_cb)
 
         self.height_sp = QtWidgets.QDoubleSpinBox()
         self.height_sp.setRange(1.0, 3000.0); self.height_sp.setSuffix(" mm"); self.height_sp.setValue(12.0)
-        form.addRow("Build height", self.height_sp)
+        form.addRow(tr("Build height"), self.height_sp)
 
         self.layer_sp = QtWidgets.QDoubleSpinBox()
         self.layer_sp.setDecimals(3); self.layer_sp.setRange(0.01, 5.0); self.layer_sp.setSuffix(" mm"); self.layer_sp.setValue(0.5)
-        form.addRow("Layer thickness", self.layer_sp)
+        form.addRow(tr("Layer thickness"), self.layer_sp)
 
         self.bottom_remove_sp = QtWidgets.QSpinBox()
         self.bottom_remove_sp.setRange(0, 10)
         self.bottom_remove_sp.setValue(int(self.settings.get("bottom_layers_remove", 0)))
-        form.addRow("Bottom layers to remove (0-10)", self.bottom_remove_sp)
+        form.addRow(tr("Bottom layers to remove (0-10)"), self.bottom_remove_sp)
 
         # Import inputs
         self.geom_le = QtWidgets.QLineEdit()
         self.geom_btn = QtWidgets.QPushButton("…"); self.geom_btn.clicked.connect(self._pick_geom)
         hlg = QtWidgets.QHBoxLayout(); hlg.addWidget(self.geom_le); hlg.addWidget(self.geom_btn)
-        form.addRow("Geometry file", hlg)
+        form.addRow(tr("Geometry file"), hlg)
 
         self.scale_sp = QtWidgets.QDoubleSpinBox()
         self.scale_sp.setDecimals(6); self.scale_sp.setRange(1e-6, 1e6); self.scale_sp.setValue(1.0)
-        form.addRow("Import scale", self.scale_sp)
+        form.addRow(tr("Import scale"), self.scale_sp)
 
         # Material XLSX pickers (optional)
         self.base_xlsx_le = QtWidgets.QLineEdit(self.settings.get("base_xlsx", ""))
         btn_bx = QtWidgets.QPushButton("…"); btn_bx.clicked.connect(lambda: self._pick_xlsx(self.base_xlsx_le))
         hlbx = QtWidgets.QHBoxLayout(); hlbx.addWidget(self.base_xlsx_le); hlbx.addWidget(btn_bx)
-        form.addRow("Base material .xlsx", hlbx)
+        form.addRow(tr("Base material .xlsx"), hlbx)
 
         self.build_xlsx_le = QtWidgets.QLineEdit(self.settings.get("build_xlsx", ""))
         btn_bu = QtWidgets.QPushButton("…"); btn_bu.clicked.connect(lambda: self._pick_xlsx(self.build_xlsx_le))
         hlbu = QtWidgets.QHBoxLayout(); hlbu.addWidget(self.build_xlsx_le); hlbu.addWidget(btn_bu)
-        form.addRow("Build material .xlsx", hlbu)
+        form.addRow(tr("Build material .xlsx"), hlbu)
         
         # --- BuildModelTab.__init__ (add after the BC checkbox row) ---
         # Field output sampling interval for F-Output-1
@@ -223,39 +282,39 @@ class BuildModelTab(QtWidgets.QWidget, LaunchMixin):
         self.fout_dt.setSingleStep(0.05)
         self.fout_dt.setSuffix(" (time units)")
         self.fout_dt.setValue(0.8)
-        form.addRow("Field output interval (≤ 4.0):", self.fout_dt)
+        form.addRow(tr("Field output interval (≤ 4.0):"), self.fout_dt)
 
 
         # Meshing controls (Import mode)
         self.base_seed_sp = QtWidgets.QDoubleSpinBox()
         self.base_seed_sp.setDecimals(3); self.base_seed_sp.setRange(1e-3, 1e6); self.base_seed_sp.setValue(3.0)
-        form.addRow("Base seed size", self.base_seed_sp)
+        form.addRow(tr("Base seed size"), self.base_seed_sp)
 
         self.build_seed_sp = QtWidgets.QDoubleSpinBox()
         self.build_seed_sp.setDecimals(3); self.build_seed_sp.setRange(1e-3, 1e6); self.build_seed_sp.setValue(0.5)
-        form.addRow("Build seed size", self.build_seed_sp)
+        form.addRow(tr("Build seed size"), self.build_seed_sp)
 
         # Build direction (axis) and zero plane
         self.axis_cb = QtWidgets.QComboBox()
         self.axis_cb.addItems(["Y", "X", "Z"])  # default Y for back-compat
         self.axis_cb.setCurrentText(self.settings.get("build_axis", "Y"))
-        form.addRow("Build axis", self.axis_cb)
+        form.addRow(tr("Build axis"), self.axis_cb)
         
         self.axis_zero_sp = QtWidgets.QDoubleSpinBox()
         self.axis_zero_sp.setRange(-1e9, 1e9)
         self.axis_zero_sp.setDecimals(6)
         self.axis_zero_sp.setSingleStep(0.1)
         self.axis_zero_sp.setValue(float(self.settings.get("axis_zero", 0.0)))
-        form.addRow("Axis zero (plane)", self.axis_zero_sp)
+        form.addRow(tr("Axis zero (plane)"), self.axis_zero_sp)
 
 
         # NEW: Boundary condition toggle
-        self.bc_chk = QtWidgets.QCheckBox("Apply anti-rigid-body BCs (U1/U2/U3)")
+        self.bc_chk = QtWidgets.QCheckBox(tr("Apply anti-rigid-body BCs (U1/U2/U3)"))
         self.bc_chk.setChecked(True)
         form.addRow("", self.bc_chk)
 
         # Post heat treatment (Build Model scope ONLY: creates extra step in apply_materials)
-        self.ht_build_chk = QtWidgets.QCheckBox("Post heat treatment (adds final step in model)")
+        self.ht_build_chk = QtWidgets.QCheckBox(tr("Post heat treatment (adds final step in model)"))
         self.ht_build_chk.setChecked(bool(self.settings.get("ht_build_enabled", False)))
         form.addRow("", self.ht_build_chk)
 
@@ -264,11 +323,11 @@ class BuildModelTab(QtWidgets.QWidget, LaunchMixin):
         self.dir_le = QtWidgets.QLineEdit(self.settings.get("default_save_dir", str(SCRIPT_DIR)))
         btn = QtWidgets.QPushButton("…"); btn.clicked.connect(self._pick_dir)
         hl = QtWidgets.QHBoxLayout(); hl.addWidget(self.dir_le); hl.addWidget(btn)
-        form.addRow("Save dir", hl)
+        form.addRow(tr("Save dir"), hl)
 
         # Run / Stop / Log
-        self.run_btn = QtWidgets.QPushButton("Generate CAE →"); self.run_btn.clicked.connect(self._run)
-        self.stop_btn = QtWidgets.QPushButton("Stop"); self.stop_btn.setEnabled(False); self.stop_btn.clicked.connect(self._stop_running)
+        self.run_btn = QtWidgets.QPushButton(tr("Generate CAE →")); self.run_btn.clicked.connect(self._run)
+        self.stop_btn = QtWidgets.QPushButton(tr("Stop")); self.stop_btn.setEnabled(False); self.stop_btn.clicked.connect(self._stop_running)
         hb = QtWidgets.QHBoxLayout(); hb.addWidget(self.run_btn); hb.addWidget(self.stop_btn)
 
         self.log = QtWidgets.QPlainTextEdit(); self.log.setReadOnly(True)
@@ -305,19 +364,19 @@ class BuildModelTab(QtWidgets.QWidget, LaunchMixin):
   
 
     def _pick_dir(self):
-        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select directory")
+        d = QtWidgets.QFileDialog.getExistingDirectory(self, tr("Select directory"))
         if d:
             self.dir_le.setText(d); self.settings["default_save_dir"] = d
 
     def _pick_geom(self):
-        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select CAD file", "",
-                                                      "CAD files (*.stp *.step *.igs *.iges *.sat);;All files (*)")
+        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, tr("Select CAD file"), "",
+                                                      tr("CAD files (*.stp *.step *.igs *.iges *.sat);;All files (*)"))
         if f:
             self.geom_le.setText(f)
 
     def _pick_xlsx(self, line):
-        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select Excel file", "",
-                                                      "Excel files (*.xlsx);;All files (*)")
+        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, tr("Select Excel file"), "",
+                                                      tr("Excel files (*.xlsx);;All files (*)"))
         if f:
             line.setText(f)
             if line is self.base_xlsx_le:
@@ -436,8 +495,9 @@ class BuildModelTab(QtWidgets.QWidget, LaunchMixin):
             tpl = self._build_tpl.read_text("utf-8")
             warnings = []
 
+            shape_key = self.shape_cb.currentData() or self.shape_cb.currentText()
             txt, n1 = re.subn(r"shape_index\s*=.*",
-                              f"shape_index = {self.shapes[self.shape_cb.currentText()]}",
+                              f"shape_index = {self.shapes[shape_key]}",
                               tpl, count=1)
             if n1 == 0: warnings.append("未找到 'shape_index ='，将采用末尾兜底块。")
 
@@ -461,7 +521,7 @@ class BuildModelTab(QtWidgets.QWidget, LaunchMixin):
                 txt5 += f"""
 
 # ===== GUI injected parameters (fallback) =====
-shape_index     = {self.shapes[self.shape_cb.currentText()]}
+shape_index     = {self.shapes[shape_key]}
 build_height    = {self.height_sp.value()}
 layer_thickness = {self.layer_sp.value()}
 savepathName    = r'{save_dir.as_posix()}/'
@@ -651,7 +711,7 @@ class InputAndUtempTab(QtWidgets.QWidget, LaunchMixin):
         self.cae_le = QtWidgets.QLineEdit()
         cae_btn = QtWidgets.QPushButton("…"); cae_btn.clicked.connect(self._pick_cae)
         hl_cae = QtWidgets.QHBoxLayout(); hl_cae.addWidget(self.cae_le); hl_cae.addWidget(cae_btn)
-        form.addRow("CAE file", hl_cae)
+        form.addRow(tr("CAE file"), hl_cae)
 
         # --- Add this right after the CAE file picker rows in InputAndUtempTab.__init__ ---
         
@@ -667,11 +727,11 @@ class InputAndUtempTab(QtWidgets.QWidget, LaunchMixin):
         self.axis_zero_sp.setSingleStep(0.1)
         self.axis_zero_sp.setValue(float(self.settings.get("axis_zero", 0.0)))
         
-        form.addRow("Build axis (UTEMP)", self.axis_cb)
-        form.addRow("Axis zero (plane)", self.axis_zero_sp)
+        form.addRow(tr("Build axis (UTEMP)"), self.axis_cb)
+        form.addRow(tr("Axis zero (plane)"), self.axis_zero_sp)
 
         # ---- Post Heat Treatment (UTEMP scope ONLY) ----
-        self.ht_input_chk = QtWidgets.QCheckBox("Enable post heat treatment in UTEMP")
+        self.ht_input_chk = QtWidgets.QCheckBox(tr("Enable post heat treatment in UTEMP"))
         self.ht_input_chk.setChecked(bool(self.settings.get("ht_input_enabled", False)))
         form.addRow("", self.ht_input_chk)
         
@@ -680,7 +740,7 @@ class InputAndUtempTab(QtWidgets.QWidget, LaunchMixin):
         self.ht_temp_ds.setSuffix(" °C")
         self.ht_temp_ds.setValue(float(self.settings.get("ht_temp_c", 650.0)))
         self.ht_temp_ds.setEnabled(self.ht_input_chk.isChecked())
-        form.addRow("HT soak temperature", self.ht_temp_ds)
+        form.addRow(tr("HT soak temperature"), self.ht_temp_ds)
         
         def _toggle_ht_input(on):
             self.ht_temp_ds.setEnabled(on)
@@ -688,37 +748,37 @@ class InputAndUtempTab(QtWidgets.QWidget, LaunchMixin):
         _toggle_ht_input(self.ht_input_chk.isChecked())
 
         self.temp_step = QtWidgets.QSpinBox(); self.temp_step.setRange(1, 100); self.temp_step.setValue(5)
-        form.addRow("Temperature step", self.temp_step)
+        form.addRow(tr("Temperature step"), self.temp_step)
 
         self.temp_initial = QtWidgets.QSpinBox(); self.temp_initial.setRange(300, 2500); self.temp_initial.setValue(1100)
-        form.addRow("Temperature start", self.temp_initial)
+        form.addRow(tr("Temperature start"), self.temp_initial)
 
         self.temp_interval = QtWidgets.QSpinBox(); self.temp_interval.setRange(1, 200); self.temp_interval.setValue(50)
-        form.addRow("Temperature interval", self.temp_interval)
+        form.addRow(tr("Temperature interval"), self.temp_interval)
 
         self.grad_step = QtWidgets.QSpinBox(); self.grad_step.setRange(1, 100); self.grad_step.setValue(5)
-        form.addRow("T_gradient step", self.grad_step)
+        form.addRow(tr("T_gradient step"), self.grad_step)
 
         self.grad_initial = QtWidgets.QSpinBox(); self.grad_initial.setRange(10, 500); self.grad_initial.setValue(100)
-        form.addRow("T_gradient start", self.grad_initial)
+        form.addRow(tr("T_gradient start"), self.grad_initial)
 
         self.grad_interval = QtWidgets.QSpinBox(); self.grad_interval.setRange(1, 50); self.grad_interval.setValue(5)
-        form.addRow("T_gradient interval", self.grad_interval)
+        form.addRow(tr("T_gradient interval"), self.grad_interval)
 
         self.layer_n = QtWidgets.QSpinBox(); self.layer_n.setRange(1, 1000); self.layer_n.setValue(24)
-        form.addRow("Layer number", self.layer_n)
+        form.addRow(tr("Layer number"), self.layer_n)
 
         self.layer_sp = QtWidgets.QDoubleSpinBox()
         self.layer_sp.setDecimals(2); self.layer_sp.setRange(0.01, 5.0); self.layer_sp.setSuffix(" mm"); self.layer_sp.setValue(0.5)
-        form.addRow("Layer thickness", self.layer_sp)
+        form.addRow(tr("Layer thickness"), self.layer_sp)
 
         self.dir_le = QtWidgets.QLineEdit(self.settings.get("default_save_dir", str(SCRIPT_DIR)))
         btn = QtWidgets.QPushButton("…"); btn.clicked.connect(self._pick_dir)
         hl = QtWidgets.QHBoxLayout(); hl.addWidget(self.dir_le); hl.addWidget(btn)
-        form.addRow("Output dir", hl)
+        form.addRow(tr("Output dir"), hl)
 
-        self.run_btn = QtWidgets.QPushButton("Generate Input & UTEMP →"); self.run_btn.clicked.connect(self._run_all)
-        self.stop_btn = QtWidgets.QPushButton("Stop"); self.stop_btn.setEnabled(False); self.stop_btn.clicked.connect(self._stop_running)
+        self.run_btn = QtWidgets.QPushButton(tr("Generate Input & UTEMP →")); self.run_btn.clicked.connect(self._run_all)
+        self.stop_btn = QtWidgets.QPushButton(tr("Stop")); self.stop_btn.setEnabled(False); self.stop_btn.clicked.connect(self._stop_running)
         hb = QtWidgets.QHBoxLayout(); hb.addWidget(self.run_btn); hb.addWidget(self.stop_btn)
 
         self.log = QtWidgets.QPlainTextEdit(); self.log.setReadOnly(True)
@@ -731,11 +791,11 @@ class InputAndUtempTab(QtWidgets.QWidget, LaunchMixin):
         self._tmpdir = None
 
     def _pick_cae(self):
-        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select CAE file", "", "CAE files (*.cae);;All files (*)")
+        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, tr("Select CAE file"), "", tr("CAE files (*.cae);;All files (*)"))
         if f: self.cae_le.setText(f)
 
     def _pick_dir(self):
-        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select directory")
+        d = QtWidgets.QFileDialog.getExistingDirectory(self, tr("Select directory"))
         if d: self.dir_le.setText(d)
 
     def _stop_running(self):
@@ -750,7 +810,7 @@ class InputAndUtempTab(QtWidgets.QWidget, LaunchMixin):
         out_dir = Path(self.dir_le.text()).expanduser().resolve(); out_dir.mkdir(parents=True, exist_ok=True)
         cae_file = self.cae_le.text().strip()
         if not cae_file:
-            QtWidgets.QMessageBox.critical(self, "No CAE file", "请先选择 .cae 文件。"); return
+            QtWidgets.QMessageBox.critical(self, tr("No CAE file"), "请先选择 .cae 文件。"); return
 
         self._tmpdir = tempfile.TemporaryDirectory()
         patched = Path(self._tmpdir.name) / "create_input_patched.py"
@@ -832,27 +892,31 @@ from pathlib import Path
 class GridBuilderDialog(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Grid builder")
+        self.setWindowTitle(tr("Grid builder"))
         form = QtWidgets.QFormLayout(self)
 
         self.normal_cb = QtWidgets.QComboBox()
         self.normal_cb.addItems(["X", "Y", "Z"])
-        form.addRow("Plane normal", self.normal_cb)
+        form.addRow(tr("Plane normal"), self.normal_cb)
 
         self.plane_ds = QtWidgets.QDoubleSpinBox()
         self.plane_ds.setRange(-1e9, 1e9)
         self.plane_ds.setDecimals(6)
         self.plane_ds.setValue(0.0)
-        form.addRow("Plane value", self.plane_ds)
+        form.addRow(tr("Plane value"), self.plane_ds)
 
         def _make_range(label_prefix):
             start = QtWidgets.QDoubleSpinBox(); start.setRange(-1e9, 1e9); start.setDecimals(6); start.setValue(0.0)
             end   = QtWidgets.QDoubleSpinBox(); end.setRange(-1e9, 1e9); end.setDecimals(6); end.setValue(1.0)
             step  = QtWidgets.QDoubleSpinBox(); step.setRange(1e-9, 1e9); step.setDecimals(6); step.setValue(0.1)
-            row = QtWidgets.QHBoxLayout(); row.addWidget(QtWidgets.QLabel("Start")); row.addWidget(start)
-            row.addWidget(QtWidgets.QLabel("End")); row.addWidget(end)
-            row.addWidget(QtWidgets.QLabel("Step")); row.addWidget(step)
-            return start, end, step, row, f"{label_prefix} range (start/end/step)"
+            row = QtWidgets.QHBoxLayout()
+            row.addWidget(QtWidgets.QLabel(tr("Start")))
+            row.addWidget(start)
+            row.addWidget(QtWidgets.QLabel(tr("End")))
+            row.addWidget(end)
+            row.addWidget(QtWidgets.QLabel(tr("Step")))
+            row.addWidget(step)
+            return start, end, step, row, tr("{axis} range (start/end/step)", axis=label_prefix)
 
         self.x_start, self.x_end, self.x_step, rowx, labx = _make_range("X")
         form.addRow(labx, rowx)
@@ -885,7 +949,7 @@ class GridBuilderDialog(QtWidgets.QDialog):
         # Validate steps
         def _vec(start, end, step):
             if step <= 0:
-                raise ValueError("Step must be > 0")
+                raise ValueError(tr("Step must be > 0"))
             # Include end if it aligns within half a step
             return np.arange(start, end + step * 0.5, step)
 
@@ -909,53 +973,53 @@ class GridBuilderDialog(QtWidgets.QDialog):
             coords = np.column_stack([X.ravel(), np.full(X.size, yy), Z.ravel()])
 
         if coords.size == 0:
-            raise ValueError("Empty grid (check ranges and steps).")
+            raise ValueError(tr("Empty grid (check ranges and steps)."))
         return coords
 
 
 class BuildMeasurementDialog(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Build measurement")
+        self.setWindowTitle(tr("Build measurement"))
         form = QtWidgets.QFormLayout(self)
 
         self.meas_le = QtWidgets.QLineEdit()
-        b_meas = QtWidgets.QPushButton("Pick")
+        b_meas = QtWidgets.QPushButton(tr("Pick"))
         b_meas.clicked.connect(lambda: self._pick_file(self.meas_le, is_measure=True))
         row_meas = QtWidgets.QHBoxLayout(); row_meas.addWidget(self.meas_le); row_meas.addWidget(b_meas)
-        form.addRow("Measurement CSV (x,y,value):", row_meas)
+        form.addRow(tr("Measurement CSV (x,y,value):"), row_meas)
 
         self.grid_le = QtWidgets.QLineEdit()
-        b_grid = QtWidgets.QPushButton("Pick")
+        b_grid = QtWidgets.QPushButton(tr("Pick"))
         b_grid.clicked.connect(lambda: self._pick_file(self.grid_le, is_measure=False))
         row_grid = QtWidgets.QHBoxLayout(); row_grid.addWidget(self.grid_le); row_grid.addWidget(b_grid)
-        form.addRow("Grid file (from Grid builder):", row_grid)
+        form.addRow(tr("Grid file (from Grid builder):"), row_grid)
 
         self.out_dir_le = QtWidgets.QLineEdit()
-        b_out = QtWidgets.QPushButton("Select")
+        b_out = QtWidgets.QPushButton(tr("Select"))
         b_out.clicked.connect(self._pick_out_dir)
         row_out = QtWidgets.QHBoxLayout(); row_out.addWidget(self.out_dir_le); row_out.addWidget(b_out)
-        form.addRow("Output folder:", row_out)
+        form.addRow(tr("Output folder:"), row_out)
 
-        self.run_btn = QtWidgets.QPushButton("Extract && Save")
+        self.run_btn = QtWidgets.QPushButton(tr("Extract && Save"))
         self.run_btn.clicked.connect(self._run_extraction)
-        b_close = QtWidgets.QPushButton("Close"); b_close.clicked.connect(self.reject)
+        b_close = QtWidgets.QPushButton(tr("Close")); b_close.clicked.connect(self.reject)
         row_btns = QtWidgets.QHBoxLayout(); row_btns.addWidget(self.run_btn); row_btns.addWidget(b_close)
         form.addRow("", row_btns)
 
         self.log = QtWidgets.QPlainTextEdit(); self.log.setReadOnly(True)
-        self.log.setPlaceholderText("Status and file paths will appear here...")
-        form.addRow("Log:", self.log)
+        self.log.setPlaceholderText(tr("Status and file paths will appear here..."))
+        form.addRow(tr("Log:"), self.log)
 
     def _pick_file(self, line, is_measure=False):
-        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select file", "", "CSV/TXT (*.csv *.txt);;All files (*)")
+        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, tr("Select file"), "", tr("CSV/TXT (*.csv *.txt);;All files (*)"))
         if f:
             line.setText(f)
             if is_measure and not self.out_dir_le.text().strip():
                 self.out_dir_le.setText(str(Path(f).parent))
 
     def _pick_out_dir(self):
-        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select output folder")
+        d = QtWidgets.QFileDialog.getExistingDirectory(self, tr("Select output folder"))
         if d:
             self.out_dir_le.setText(d)
 
@@ -963,28 +1027,28 @@ class BuildMeasurementDialog(QtWidgets.QDialog):
         import pandas as pd
         df = pd.read_csv(path, header=None, sep=None, engine="python", comment="#")
         if df.shape[1] < 3:
-            raise ValueError("Expected at least 3 columns (x,y,value) in measurement CSV.")
+            raise ValueError(tr("Expected at least 3 columns (x,y,value) in measurement CSV."))
         df = df.iloc[:, :3]
         df.columns = ["x", "y", "value"]
         for c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
         df = df.dropna()
         if df.empty:
-            raise ValueError("No numeric rows found in measurement CSV.")
+            raise ValueError(tr("No numeric rows found in measurement CSV."))
         return df
 
     def _load_grid(self, path):
         import pandas as pd
         df = pd.read_csv(path, header=None, sep=None, engine="python", comment="#")
         if df.shape[1] < 2:
-            raise ValueError("Grid file must have at least two columns (x,y).")
+            raise ValueError(tr("Grid file must have at least two columns (x,y)."))
         df = df.iloc[:, :2]
         df.columns = ["x", "y"]
         df["x"] = pd.to_numeric(df["x"], errors="coerce")
         df["y"] = pd.to_numeric(df["y"], errors="coerce")
         df = df.dropna()
         if df.empty:
-            raise ValueError("No numeric rows found in grid file.")
+            raise ValueError(tr("No numeric rows found in grid file."))
         return df
 
     def _run_extraction(self):
@@ -994,16 +1058,16 @@ class BuildMeasurementDialog(QtWidgets.QDialog):
             import csv
             import numpy as np
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Missing dependency", f"pandas or csv import failed: {e}")
+            QtWidgets.QMessageBox.critical(self, tr("Missing dependency"), tr("pandas or csv import failed: {error}", error=e))
             return
 
         meas_path = Path(self.meas_le.text().strip())
         grid_path = Path(self.grid_le.text().strip())
         if not meas_path.is_file():
-            QtWidgets.QMessageBox.warning(self, "Missing measurement file", "Please select a measurement CSV (x,y,value).")
+            QtWidgets.QMessageBox.warning(self, tr("Missing measurement file"), tr("Please select a measurement CSV (x,y,value)."))
             return
         if not grid_path.is_file():
-            QtWidgets.QMessageBox.warning(self, "Missing grid file", "Please select a grid file generated by Grid Builder.")
+            QtWidgets.QMessageBox.warning(self, tr("Missing grid file"), tr("Please select a grid file generated by Grid Builder."))
             return
 
         out_dir_txt = self.out_dir_le.text().strip()
@@ -1011,14 +1075,14 @@ class BuildMeasurementDialog(QtWidgets.QDialog):
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Cannot create output folder", str(e))
+            QtWidgets.QMessageBox.critical(self, tr("Cannot create output folder"), str(e))
             return
 
         try:
             meas_df = self._load_measurement(meas_path)
             grid_df = self._load_grid(grid_path)
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Load error", str(e))
+            QtWidgets.QMessageBox.critical(self, tr("Load error"), str(e))
             return
 
         round_dec = 6  # align with grid builder output formatting
@@ -1058,7 +1122,7 @@ class BuildMeasurementDialog(QtWidgets.QDialog):
                 for x, y, v in rows:
                     w.writerow([x, y, v])
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Save error", f"Failed to write sampled CSV: {e}")
+            QtWidgets.QMessageBox.critical(self, tr("Save error"), tr("Failed to write sampled CSV: {error}", error=e))
             return
 
         formatted_vals = []
@@ -1078,15 +1142,18 @@ class BuildMeasurementDialog(QtWidgets.QDialog):
                 w = csv.writer(f)
                 w.writerow(["", ""] + formatted_vals)
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Save error", f"Failed to write values-only CSV: {e}")
+            QtWidgets.QMessageBox.critical(self, tr("Save error"), tr("Failed to write values-only CSV: {error}", error=e))
             return
 
-        self.log.appendPlainText(f"Measurement rows: {len(meas_df)} | Grid points: {len(grid_df)} | Exact matches: {len(values_only) - approx} | Nearest-neighbour: {approx}")
-        self.log.appendPlainText(f"Saved sampled CSV -> {table_path}")
-        self.log.appendPlainText(f"Saved values-only CSV -> {values_only_path}")
+        self.log.appendPlainText(tr("Measurement rows: {meas} | Grid points: {grid} | Exact matches: {exact} | Nearest-neighbour: {approx}",
+                                    meas=len(meas_df), grid=len(grid_df), exact=len(values_only) - approx, approx=approx))
+        self.log.appendPlainText(tr("Saved sampled CSV -> {path}", path=table_path))
+        self.log.appendPlainText(tr("Saved values-only CSV -> {path}", path=values_only_path))
         if approx:
-            self.log.appendPlainText("[INFO] Some grid points used nearest-neighbour lookup (no exact x,y match).")
-        QtWidgets.QMessageBox.information(self, "Build measurement", f"Done.\nSampled CSV:\n{table_path}\nValues-only CSV:\n{values_only_path}")
+            self.log.appendPlainText(tr("[INFO] Some grid points used nearest-neighbour lookup (no exact x,y match)."))
+        QtWidgets.QMessageBox.information(self, tr("Build measurement"),
+                                          tr("Done.\nSampled CSV:\n{sample}\nValues-only CSV:\n{values}",
+                                             sample=table_path, values=values_only_path))
 
 class DataExtractTab(QtWidgets.QWidget, LaunchMixin):
     def __init__(self, settings):
@@ -1101,64 +1168,64 @@ class DataExtractTab(QtWidgets.QWidget, LaunchMixin):
 
         # ODB folder
         self.odb_dir_le = QtWidgets.QLineEdit()
-        b1 = QtWidgets.QPushButton("Select ODB Folder…"); b1.clicked.connect(self._pick_odb_dir)
+        b1 = QtWidgets.QPushButton(tr("Select ODB Folder…")); b1.clicked.connect(self._pick_odb_dir)
         row1 = QtWidgets.QHBoxLayout(); row1.addWidget(self.odb_dir_le); row1.addWidget(b1)
-        form.addRow("ODB Folder:", row1)
+        form.addRow(tr("ODB Folder:"), row1)
 
         # Plane, position, tolerance
         self.plane_cb = QtWidgets.QComboBox(); self.plane_cb.addItems(["XY","XZ","YZ"])
         self.pos_sb = QtWidgets.QDoubleSpinBox(); self.pos_sb.setRange(-1e12, 1e12); self.pos_sb.setDecimals(6); self.pos_sb.setValue(0.0)
         self.tol_sb = QtWidgets.QDoubleSpinBox(); self.tol_sb.setRange(0.0, 1e6); self.tol_sb.setDecimals(6); self.tol_sb.setValue(1e-3)
-        form.addRow("Plane:", self.plane_cb)
-        form.addRow("Plane position (model units):", self.pos_sb)
-        form.addRow("Plane tolerance:", self.tol_sb)
+        form.addRow(tr("Plane:"), self.plane_cb)
+        form.addRow(tr("Plane position (model units):"), self.pos_sb)
+        form.addRow(tr("Plane tolerance:"), self.tol_sb)
 
         # Variable & position
         self.var_cb = QtWidgets.QComboBox(); self.var_cb.addItems(["NT11","Mises","S11","S22","S33", "U1", "U2", "U3", "UMAG"])
         self.posn_cb = QtWidgets.QComboBox(); self.posn_cb.addItems(["Unique Nodal","Integration Point"])
-        form.addRow("Output Variable:", self.var_cb)
-        form.addRow("Variable Position:", self.posn_cb)
+        form.addRow(tr("Output Variable:"), self.var_cb)
+        form.addRow(tr("Variable Position:"), self.posn_cb)
 
         # Step / Frame
         self.step_le = QtWidgets.QLineEdit("last")   # allow "last" | name | index
         self.frame_le = QtWidgets.QLineEdit("last")  # allow "last" | index
-        form.addRow("Step (last | name | index):", self.step_le)
-        form.addRow("Frame (last | index):", self.frame_le)
+        form.addRow(tr("Step (last | name | index):"), self.step_le)
+        form.addRow(tr("Frame (last | index):"), self.frame_le)
 
         # Output folder
         self.out_dir_le = QtWidgets.QLineEdit()
-        b2 = QtWidgets.QPushButton("Select Output Folder…"); b2.clicked.connect(self._pick_out_dir)
+        b2 = QtWidgets.QPushButton(tr("Select Output Folder…")); b2.clicked.connect(self._pick_out_dir)
         row2 = QtWidgets.QHBoxLayout(); row2.addWidget(self.out_dir_le); row2.addWidget(b2)
-        form.addRow("Output Folder:", row2)
+        form.addRow(tr("Output Folder:"), row2)
 
         # Flat data toggle (value_only CSV)
-        self.flat_chk = QtWidgets.QCheckBox("Flat data (detrend + zero-mean value_only CSV)")
+        self.flat_chk = QtWidgets.QCheckBox(tr("Flat data (detrend + zero-mean value_only CSV)"))
         self.flat_chk.setChecked(False)
         form.addRow("", self.flat_chk)
 
         # --- NEW: Coordinate sampling (IDW) controls ---
         self.coord_file_le = QtWidgets.QLineEdit()
-        b3 = QtWidgets.QPushButton("Pick…")
+        b3 = QtWidgets.QPushButton(tr("Pick…"))
         b3.clicked.connect(lambda: self._pick_file(self.coord_file_le))
-        b3b = QtWidgets.QPushButton("Grid builder…")
+        b3b = QtWidgets.QPushButton(tr("Grid builder…"))
         b3b.clicked.connect(self._open_grid_builder)
         row3 = QtWidgets.QHBoxLayout(); row3.addWidget(self.coord_file_le); row3.addWidget(b3); row3.addWidget(b3b)
-        form.addRow("Coordinate file (x,y,z per line):", row3)
+        form.addRow(tr("Coordinate file (x,y,z per line):"), row3)
         
         self.idw_k_sp = QtWidgets.QSpinBox()
         self.idw_k_sp.setRange(1, 64); self.idw_k_sp.setValue(4)
-        form.addRow("IDW K (neighbours):", self.idw_k_sp)
+        form.addRow(tr("IDW K (neighbours):"), self.idw_k_sp)
         
         self.idw_radius_ds = QtWidgets.QDoubleSpinBox()
         self.idw_radius_ds.setDecimals(6); self.idw_radius_ds.setRange(0.0, 1e9); self.idw_radius_ds.setValue(1e-3)
-        form.addRow("IDW radius (model units):", self.idw_radius_ds)
+        form.addRow(tr("IDW radius (model units):"), self.idw_radius_ds)
         
         self.idw_power_ds = QtWidgets.QDoubleSpinBox()
         self.idw_power_ds.setDecimals(2); self.idw_power_ds.setRange(0.1, 10.0); self.idw_power_ds.setValue(2.0)
-        form.addRow("IDW power (p):", self.idw_power_ds)
+        form.addRow(tr("IDW power (p):"), self.idw_power_ds)
         
         # Small hint so users know plane inputs are ignored when coord file is set
-        hint = QtWidgets.QLabel("Hint: If a coordinate file is selected, plane selection is ignored (IDW mode).")
+        hint = QtWidgets.QLabel(tr("Hint: If a coordinate file is selected, plane selection is ignored (IDW mode)."))
         hint.setStyleSheet("color: #888;")
         form.addRow("", hint)
         # -----------------------------------------------
@@ -1179,32 +1246,32 @@ class DataExtractTab(QtWidgets.QWidget, LaunchMixin):
 
 
         # Run/Stop
-        self.run_btn = QtWidgets.QPushButton("Extract (one CSV per ODB)"); self.run_btn.clicked.connect(self._run_extraction)
-        self.stop_btn = QtWidgets.QPushButton("Stop"); self.stop_btn.setEnabled(False); self.stop_btn.clicked.connect(self._stop_running)
+        self.run_btn = QtWidgets.QPushButton(tr("Extract (one CSV per ODB)")); self.run_btn.clicked.connect(self._run_extraction)
+        self.stop_btn = QtWidgets.QPushButton(tr("Stop")); self.stop_btn.setEnabled(False); self.stop_btn.clicked.connect(self._stop_running)
         hb = QtWidgets.QHBoxLayout(); hb.addWidget(self.run_btn); hb.addWidget(self.stop_btn)
 
         self.log = QtWidgets.QPlainTextEdit(); self.log.setReadOnly(True)
 
-        self.build_measure_btn = QtWidgets.QPushButton("Build measurement")
+        self.build_measure_btn = QtWidgets.QPushButton(tr("Build measurement"))
         self.build_measure_btn.clicked.connect(self._open_measurement_dialog)
         hb.addWidget(self.build_measure_btn)
 
         v = QtWidgets.QVBoxLayout(self); v.addLayout(form); v.addLayout(hb); v.addWidget(self.log, 1)
 
     def _pick_odb_dir(self):
-        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select folder with .odb files")
+        d = QtWidgets.QFileDialog.getExistingDirectory(self, tr("Select folder with .odb files"))
         if d:
             self.odb_dir_le.setText(d)
             if not self.out_dir_le.text():
                 self.out_dir_le.setText(d)
 
     def _pick_out_dir(self):
-        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select output folder for CSVs")
+        d = QtWidgets.QFileDialog.getExistingDirectory(self, tr("Select output folder for CSVs"))
         if d:
             self.out_dir_le.setText(d)
 
     def _pick_file(self, line):
-        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select file", "", "Text/CSV (*.txt *.csv);;All files (*)")
+        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, tr("Select file"), "", tr("Text/CSV (*.txt *.csv);;All files (*)"))
         if f:
             line.setText(f)
 
@@ -1214,10 +1281,10 @@ class DataExtractTab(QtWidgets.QWidget, LaunchMixin):
             try:
                 coords = dlg.build_grid()
             except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "Grid error", str(e))
+                QtWidgets.QMessageBox.critical(self, tr("Grid error"), str(e))
                 return
             path, _ = QtWidgets.QFileDialog.getSaveFileName(
-                self, "Save generated grid", "", "CSV files (*.csv);;Text files (*.txt);;All files (*)"
+                self, tr("Save generated grid"), "", tr("CSV files (*.csv);;Text files (*.txt);;All files (*)")
             )
             if not path:
                 return
@@ -1228,7 +1295,7 @@ class DataExtractTab(QtWidgets.QWidget, LaunchMixin):
                     np.savetxt(path, coords, fmt="%.6f")
                 self.coord_file_le.setText(path)
             except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "Save failed", str(e))
+                QtWidgets.QMessageBox.critical(self, tr("Save failed"), str(e))
 
     def _open_measurement_dialog(self):
         dlg = BuildMeasurementDialog(self)
@@ -1285,21 +1352,24 @@ class DataExtractTab(QtWidgets.QWidget, LaunchMixin):
         odb_dir = self.odb_dir_le.text().strip()
         out_dir = self.out_dir_le.text().strip()
         if not os.path.isdir(odb_dir):
-            QtWidgets.QMessageBox.warning(self, "Missing ODB folder", "Please select a valid folder containing .odb files.")
+            QtWidgets.QMessageBox.warning(self, tr("Missing ODB folder"),
+                                          tr("Please select a valid folder containing .odb files."))
             return
         if not out_dir:
-            QtWidgets.QMessageBox.warning(self, "Missing output folder", "Please select an output folder for CSVs.")
+            QtWidgets.QMessageBox.warning(self, tr("Missing output folder"),
+                                          tr("Please select an output folder for CSVs."))
             return
         if not os.path.isdir(out_dir):
             try:
                 os.makedirs(out_dir)
             except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "Cannot create folder", str(e))
+                QtWidgets.QMessageBox.critical(self, tr("Cannot create folder"), str(e))
                 return
 
         tpl_path = (Path(__file__).resolve().parent / "data_extract.py")
         if not tpl_path.exists():
-            QtWidgets.QMessageBox.critical(self, "Missing file", "data_extract.py not found next to the GUI script.")
+            QtWidgets.QMessageBox.critical(self, tr("Missing file"),
+                                           tr("data_extract.py not found next to the GUI script."))
             return
 
         if not self._tmpdir:
@@ -1332,26 +1402,26 @@ class DataAlignmentTab(QtWidgets.QWidget):
         form = QtWidgets.QFormLayout()
 
         self.ref_le = QtWidgets.QLineEdit()
-        self.ref_le.setPlaceholderText("No reference file selected")
+        self.ref_le.setPlaceholderText(tr("No reference file selected"))
         self.ref_le.setReadOnly(True)
-        btn_ref = QtWidgets.QPushButton("Upload ref")
+        btn_ref = QtWidgets.QPushButton(tr("Upload ref"))
         btn_ref.clicked.connect(lambda: self._load_file(is_ref=True))
         hl_ref = QtWidgets.QHBoxLayout()
         hl_ref.addWidget(self.ref_le)
         hl_ref.addWidget(btn_ref)
-        form.addRow("Reference (.txt)", hl_ref)
+        form.addRow(tr("Reference (.txt)"), hl_ref)
 
         self.float_le = QtWidgets.QLineEdit()
-        self.float_le.setPlaceholderText("No float file selected")
+        self.float_le.setPlaceholderText(tr("No float file selected"))
         self.float_le.setReadOnly(True)
-        btn_float = QtWidgets.QPushButton("Upload float")
+        btn_float = QtWidgets.QPushButton(tr("Upload float"))
         btn_float.clicked.connect(lambda: self._load_file(is_ref=False))
         hl_float = QtWidgets.QHBoxLayout()
         hl_float.addWidget(self.float_le)
         hl_float.addWidget(btn_float)
-        form.addRow("Float (.txt)", hl_float)
+        form.addRow(tr("Float (.txt)"), hl_float)
 
-        self.status_lbl = QtWidgets.QLabel("Load reference and float .txt files (x y z columns).")
+        self.status_lbl = QtWidgets.QLabel(tr("Load reference and float .txt files (x y z columns)."))
         self.status_lbl.setWordWrap(True)
         form.addRow(self.status_lbl)
 
@@ -1361,14 +1431,14 @@ class DataAlignmentTab(QtWidgets.QWidget):
         self.ref_size_sp.setValue(self._ref_size)
         self.ref_size_sp.setSuffix(" pt")
         self.ref_size_sp.valueChanged.connect(self._update_plot)
-        form.addRow("Ref marker size", self.ref_size_sp)
+        form.addRow(tr("Ref marker size"), self.ref_size_sp)
 
         self.float_size_sp = QtWidgets.QSpinBox()
         self.float_size_sp.setRange(2, 128)
         self.float_size_sp.setValue(self._float_size)
         self.float_size_sp.setSuffix(" pt")
         self.float_size_sp.valueChanged.connect(self._update_plot)
-        form.addRow("Float marker size", self.float_size_sp)
+        form.addRow(tr("Float marker size"), self.float_size_sp)
 
         # Float transform controls
         self.shift_x_ds = QtWidgets.QDoubleSpinBox()
@@ -1376,14 +1446,14 @@ class DataAlignmentTab(QtWidgets.QWidget):
         self.shift_x_ds.setDecimals(4)
         self.shift_x_ds.setSingleStep(0.1)
         self.shift_x_ds.valueChanged.connect(self._update_plot)
-        form.addRow("Float shift X", self.shift_x_ds)
+        form.addRow(tr("Float shift X"), self.shift_x_ds)
 
         self.shift_y_ds = QtWidgets.QDoubleSpinBox()
         self.shift_y_ds.setRange(-1e9, 1e9)
         self.shift_y_ds.setDecimals(4)
         self.shift_y_ds.setSingleStep(0.1)
         self.shift_y_ds.valueChanged.connect(self._update_plot)
-        form.addRow("Float shift Y", self.shift_y_ds)
+        form.addRow(tr("Float shift Y"), self.shift_y_ds)
 
         self.scale_x_ds = QtWidgets.QDoubleSpinBox()
         self.scale_x_ds.setRange(0.001, 1e6)
@@ -1391,7 +1461,7 @@ class DataAlignmentTab(QtWidgets.QWidget):
         self.scale_x_ds.setSingleStep(0.05)
         self.scale_x_ds.setValue(self._scale_x)
         self.scale_x_ds.valueChanged.connect(self._update_plot)
-        form.addRow("Float scale X", self.scale_x_ds)
+        form.addRow(tr("Float scale X"), self.scale_x_ds)
 
         self.scale_y_ds = QtWidgets.QDoubleSpinBox()
         self.scale_y_ds.setRange(0.001, 1e6)
@@ -1399,9 +1469,9 @@ class DataAlignmentTab(QtWidgets.QWidget):
         self.scale_y_ds.setSingleStep(0.05)
         self.scale_y_ds.setValue(self._scale_y)
         self.scale_y_ds.valueChanged.connect(self._update_plot)
-        form.addRow("Float scale Y", self.scale_y_ds)
+        form.addRow(tr("Float scale Y"), self.scale_y_ds)
 
-        self.colorbar_chk = QtWidgets.QCheckBox("Color by Z (show colorbar)")
+        self.colorbar_chk = QtWidgets.QCheckBox(tr("Color by Z (show colorbar)"))
         self.colorbar_chk.setChecked(True)
         self.colorbar_chk.toggled.connect(self._update_plot)
         form.addRow("", self.colorbar_chk)
@@ -1412,7 +1482,7 @@ class DataAlignmentTab(QtWidgets.QWidget):
         self.rot_deg_ds.setSingleStep(1.0)
         self.rot_deg_ds.setSuffix(" °")
         self.rot_deg_ds.valueChanged.connect(self._update_plot)
-        form.addRow("Float rotate Z", self.rot_deg_ds)
+        form.addRow(tr("Float rotate Z"), self.rot_deg_ds)
 
         # Step sizes for keyboard nudges
         self.step_xy_ds = QtWidgets.QDoubleSpinBox()
@@ -1420,7 +1490,7 @@ class DataAlignmentTab(QtWidgets.QWidget):
         self.step_xy_ds.setDecimals(4)
         self.step_xy_ds.setSingleStep(0.1)
         self.step_xy_ds.setValue(0.1)
-        form.addRow("Shift step (keys)", self.step_xy_ds)
+        form.addRow(tr("Shift step (keys)"), self.step_xy_ds)
 
         self.step_rot_ds = QtWidgets.QDoubleSpinBox()
         self.step_rot_ds.setRange(0.001, 360.0)
@@ -1428,26 +1498,26 @@ class DataAlignmentTab(QtWidgets.QWidget):
         self.step_rot_ds.setSingleStep(1.0)
         self.step_rot_ds.setValue(1.0)
         self.step_rot_ds.setSuffix(" °")
-        form.addRow("Rotate step (keys)", self.step_rot_ds)
+        form.addRow(tr("Rotate step (keys)"), self.step_rot_ds)
 
-        save_btn = QtWidgets.QPushButton("Save transformed float")
+        save_btn = QtWidgets.QPushButton(tr("Save transformed float"))
         save_btn.clicked.connect(self._save_transformed_float)
         form.addRow(save_btn)
 
         # Calculation controls
         self.op_cb = QtWidgets.QComboBox()
-        self.op_cb.addItems(["+", "-", "*", "/", "Average"])
-        form.addRow("Operation", self.op_cb)
+        self.op_cb.addItems(["+", "-", "*", "/", tr("Average")])
+        form.addRow(tr("Operation"), self.op_cb)
 
         self.order_cb = QtWidgets.QComboBox()
-        self.order_cb.addItems(["Reference (left) / Float (right)", "Float (left) / Reference (right)"])
-        form.addRow("Operand order", self.order_cb)
+        self.order_cb.addItems([tr("Reference (left) / Float (right)"), tr("Float (left) / Reference (right)")])
+        form.addRow(tr("Operand order"), self.order_cb)
 
-        calc_btn = QtWidgets.QPushButton("Compute & save result")
+        calc_btn = QtWidgets.QPushButton(tr("Compute & save result"))
         calc_btn.clicked.connect(self._compute_and_save)
         form.addRow(calc_btn)
 
-        calc_hint = QtWidgets.QLabel("Interpolates float Z onto ref X/Y; unmatched points are dropped.")
+        calc_hint = QtWidgets.QLabel(tr("Interpolates float Z onto ref X/Y; unmatched points are dropped."))
         calc_hint.setStyleSheet("color: #666;")
         form.addRow("", calc_hint)
 
@@ -1456,7 +1526,7 @@ class DataAlignmentTab(QtWidgets.QWidget):
         left_box.addStretch(1)
 
         # Shortcut hint
-        hint = QtWidgets.QLabel("Keys: arrows to shift float (X/Y), [ ] to rotate Z, 0 to reset.")
+        hint = QtWidgets.QLabel(tr("Keys: arrows to shift float (X/Y), [ ] to rotate Z, 0 to reset."))
         hint.setStyleSheet("color: #666;")
         left_box.addWidget(hint)
 
@@ -1470,7 +1540,7 @@ class DataAlignmentTab(QtWidgets.QWidget):
         self._colorbar = self.fig.colorbar(
             self._mappable, ax=self.ax, orientation="horizontal", fraction=0.05, pad=0.12
         )
-        self._colorbar.set_label("Z value")
+        self._colorbar.set_label(tr("Z value"))
 
         # Default to a 3D view (can still rotate with mouse/toolbar)
         try:
@@ -1482,7 +1552,7 @@ class DataAlignmentTab(QtWidgets.QWidget):
         # Quick projection and clear buttons
         view_btns = QtWidgets.QHBoxLayout()
         for label in ["View X", "View Y", "View Z"]:
-            b = QtWidgets.QPushButton(label)
+            b = QtWidgets.QPushButton(tr(label))
             if label.endswith("X"):
                 b.clicked.connect(lambda _, axis="X": self._set_view(axis))
             elif label.endswith("Y"):
@@ -1490,7 +1560,7 @@ class DataAlignmentTab(QtWidgets.QWidget):
             else:
                 b.clicked.connect(lambda _, axis="Z": self._set_view(axis))
             view_btns.addWidget(b)
-        clear_btn = QtWidgets.QPushButton("Clear plot")
+        clear_btn = QtWidgets.QPushButton(tr("Clear plot"))
         clear_btn.clicked.connect(self._clear_plot)
         view_btns.addWidget(clear_btn)
 
@@ -1569,31 +1639,31 @@ class DataAlignmentTab(QtWidgets.QWidget):
         if arr.ndim == 1:
             arr = arr.reshape(1, -1)
         if arr.shape[1] != 3:
-            raise ValueError("Expected 3 columns (x y z).")
+            raise ValueError(tr("Expected 3 columns (x y z)."))
         return arr.astype(float)
 
     def _load_file(self, is_ref: bool):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Select data file", "", "Data files (*.txt *.csv);;All files (*)"
+            self, tr("Select data file"), "", tr("Data files (*.txt *.csv);;All files (*)")
         )
         if not path:
             return
         try:
             pts = self._read_xyz(path)
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Invalid file", str(e))
+            QtWidgets.QMessageBox.critical(self, tr("Invalid file"), str(e))
             return
 
         if is_ref:
             self.ref_points = pts
             self.ref_le.setText(path)
-            which = "reference"
+            which = tr("reference")
         else:
             self.float_points = pts
             self.float_le.setText(path)
-            which = "float"
+            which = tr("float")
 
-        self.status_lbl.setText(f"Loaded {pts.shape[0]} points from {which} file.")
+        self.status_lbl.setText(tr("Loaded {count} points from {which} file.", count=pts.shape[0], which=which))
         self._update_plot()
 
     def _transform_float_points(self):
@@ -1648,13 +1718,13 @@ class DataAlignmentTab(QtWidgets.QWidget):
     def _save_transformed_float(self):
         tf = self._transform_float_points()
         if tf is None:
-            QtWidgets.QMessageBox.information(self, "No float data", "Load a float file first.")
+            QtWidgets.QMessageBox.information(self, tr("No float data"), tr("Load a float file first."))
             return
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
-            "Save transformed float",
+            tr("Save transformed float"),
             "",
-            "CSV files (*.csv);;Text files (*.txt);;All files (*)",
+            tr("CSV files (*.csv);;Text files (*.txt);;All files (*)"),
         )
         if not path:
             return
@@ -1663,32 +1733,35 @@ class DataAlignmentTab(QtWidgets.QWidget):
                 np.savetxt(path, tf, fmt="%.6f", delimiter=",")
             else:
                 np.savetxt(path, tf, fmt="%.6f")
-            QtWidgets.QMessageBox.information(self, "Saved", f"Transformed float points saved to:\n{path}")
+            QtWidgets.QMessageBox.information(self, tr("Saved"),
+                                              tr("Transformed float points saved to:\n{path}", path=path))
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Save failed", str(e))
+            QtWidgets.QMessageBox.critical(self, tr("Save failed"), str(e))
 
     def _compute_and_save(self):
         if self.ref_points is None or self.float_points is None:
-            QtWidgets.QMessageBox.warning(self, "Missing data", "Load both reference and float files first.")
+            QtWidgets.QMessageBox.warning(self, tr("Missing data"), tr("Load both reference and float files first."))
             return
 
         tf = self._transform_float_points()
         if tf is None or tf.size == 0:
-            QtWidgets.QMessageBox.warning(self, "Missing float points", "Float data is not available after transformation.")
+            QtWidgets.QMessageBox.warning(self, tr("Missing float points"),
+                                          tr("Float data is not available after transformation."))
             return
 
         ref_xy = self.ref_points[:, :2]
         ref_z = self.ref_points[:, 2]
         interp_z = self._interpolate_float_z(ref_xy, tf, k=4)
         if interp_z.size == 0:
-            QtWidgets.QMessageBox.warning(self, "No points", "No reference points available for alignment.")
+            QtWidgets.QMessageBox.warning(self, tr("No points"), tr("No reference points available for alignment."))
             return
 
         mask = ~np.isnan(interp_z)
         matched = int(np.count_nonzero(mask))
         dropped = int(len(interp_z) - matched)
         if matched == 0:
-            QtWidgets.QMessageBox.warning(self, "No matches", "No matched points after interpolation (all dropped).")
+            QtWidgets.QMessageBox.warning(self, tr("No matches"),
+                                          tr("No matched points after interpolation (all dropped)."))
             return
 
         x = ref_xy[mask, 0]
@@ -1721,9 +1794,9 @@ class DataAlignmentTab(QtWidgets.QWidget):
 
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
-            "Save aligned calculation",
+            tr("Save aligned calculation"),
             "",
-            "CSV files (*.csv);;Text files (*.txt);;All files (*)",
+            tr("CSV files (*.csv);;Text files (*.txt);;All files (*)"),
         )
         if not path:
             return
@@ -1747,18 +1820,20 @@ class DataAlignmentTab(QtWidgets.QWidget):
                         _fmt(row[2], blank_on_nan=True),
                     ]) + "\n")
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Save failed", f"Failed to save output: {e}")
+            QtWidgets.QMessageBox.critical(self, tr("Save failed"), tr("Failed to save output: {error}", error=e))
             return
 
-        left_label = "Reference" if left_is_ref else "Float"
-        right_label = "Float" if left_is_ref else "Reference"
+        left_label = tr("Reference") if left_is_ref else tr("Float")
+        right_label = tr("Float") if left_is_ref else tr("Reference")
         self.status_lbl.setText(
-            f"Saved {matched} rows (dropped {dropped}). {left_label} {op_label} {right_label} -> {path}"
+            tr("Saved {matched} rows (dropped {dropped}). {left} {op} {right} -> {path}",
+               matched=matched, dropped=dropped, left=left_label, op=op_label, right=right_label, path=path)
         )
         QtWidgets.QMessageBox.information(
             self,
-            "Saved",
-            f"Saved {matched} rows (dropped {dropped}).\n{left_label} {op_label} {right_label}\n{path}",
+            tr("Saved"),
+            tr("Saved {matched} rows (dropped {dropped}).\n{left} {op} {right}\n{path}",
+               matched=matched, dropped=dropped, left=left_label, op=op_label, right=right_label, path=path),
         )
 
     def _set_equal_aspect(self):
@@ -1843,7 +1918,7 @@ class DataAlignmentTab(QtWidgets.QWidget):
             self.ax.text2D(
                 0.5,
                 0.5,
-                "Load reference and float files to view points",
+                tr("Load reference and float files to view points"),
                 transform=self.ax.transAxes,
                 ha="center",
                 va="center",
@@ -1855,7 +1930,7 @@ class DataAlignmentTab(QtWidgets.QWidget):
             self._mappable.set_norm(norm)
             self._colorbar.ax.set_visible(True)
             self._colorbar.update_normal(self._mappable)
-            self._colorbar.set_label("Z value")
+            self._colorbar.set_label(tr("Z value"))
         else:
             self._colorbar.ax.set_visible(False)
 
@@ -1871,10 +1946,10 @@ class BatchSubmitTab(QtWidgets.QWidget, LaunchMixin):
         self.bat_le = QtWidgets.QLineEdit()
         bat_btn = QtWidgets.QPushButton("…"); bat_btn.clicked.connect(self._pick_bat)
         hl_bat = QtWidgets.QHBoxLayout(); hl_bat.addWidget(self.bat_le); hl_bat.addWidget(bat_btn)
-        form.addRow("Batch file (.bat)", hl_bat)
+        form.addRow(tr("Batch file (.bat)"), hl_bat)
 
-        self.run_btn = QtWidgets.QPushButton("Submit Jobs →"); self.run_btn.clicked.connect(self._run_bat)
-        self.stop_btn = QtWidgets.QPushButton("Stop"); self.stop_btn.setEnabled(False); self.stop_btn.clicked.connect(self._stop_bat)
+        self.run_btn = QtWidgets.QPushButton(tr("Submit Jobs →")); self.run_btn.clicked.connect(self._run_bat)
+        self.stop_btn = QtWidgets.QPushButton(tr("Stop")); self.stop_btn.setEnabled(False); self.stop_btn.clicked.connect(self._stop_bat)
         hb = QtWidgets.QHBoxLayout(); hb.addWidget(self.run_btn); hb.addWidget(self.stop_btn)
 
         self.log = QtWidgets.QPlainTextEdit(); self.log.setReadOnly(True)
@@ -1885,15 +1960,15 @@ class BatchSubmitTab(QtWidgets.QWidget, LaunchMixin):
         layout.addWidget(self.log, 1)
 
     def _pick_bat(self):
-        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select batch file", "", "Batch files (*.bat);;All files (*)")
+        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, tr("Select batch file"), "", tr("Batch files (*.bat);;All files (*)"))
         if f: self.bat_le.setText(f)
 
     def _run_bat(self):
         bat = self.bat_le.text().strip()
         if not bat:
-            QtWidgets.QMessageBox.critical(self, "No file", "请先选择 .bat 文件。"); return
+            QtWidgets.QMessageBox.critical(self, tr("No file"), "请先选择 .bat 文件。"); return
         if not Path(bat).exists():
-            QtWidgets.QMessageBox.critical(self, "Not found", f"文件不存在：\n{bat}"); return
+            QtWidgets.QMessageBox.critical(self, tr("Not found"), f"文件不存在：\n{bat}"); return
 
         ifortvars = r"C:\Program Files (x86)\IntelSWTools\compilers_and_libraries_2020.1.216\windows\bin\ifortvars.bat"
         wrapper = Path(bat).parent / "run_with_intel_env.bat"
@@ -2199,36 +2274,36 @@ if __name__ == "__main__":
         layout.addWidget(tabs, 1)
 
         # --- Train pane ---
-        train = QtWidgets.QWidget(); tabs.addTab(train, "Train GBM")
+        train = QtWidgets.QWidget(); tabs.addTab(train, tr("Train GBM"))
         form_t = QtWidgets.QFormLayout(train)
 
         self.train_data_le = QtWidgets.QLineEdit()
-        bt_td = QtWidgets.QPushButton("…"); bt_td.clicked.connect(lambda: self._pick_file(self.train_data_le, "CSV files (*.csv)"))
+        bt_td = QtWidgets.QPushButton("…"); bt_td.clicked.connect(lambda: self._pick_file(self.train_data_le, tr("CSV files (*.csv)")))
         h_td = QtWidgets.QHBoxLayout(); h_td.addWidget(self.train_data_le); h_td.addWidget(bt_td)
-        form_t.addRow("Training CSV", h_td)
+        form_t.addRow(tr("Training CSV"), h_td)
 
         self.train_outdir_le = QtWidgets.QLineEdit(self.settings.get("default_save_dir", str(SCRIPT_DIR)))
         bt_to = QtWidgets.QPushButton("…"); bt_to.clicked.connect(lambda: self._pick_dir(self.train_outdir_le))
         h_to = QtWidgets.QHBoxLayout(); h_to.addWidget(self.train_outdir_le); h_to.addWidget(bt_to)
-        form_t.addRow("Output dir", h_to)
+        form_t.addRow(tr("Output dir"), h_to)
 
         self.artifact_name_le = QtWidgets.QLineEdit("gbm_artifact.pkl")
-        form_t.addRow("Artifact filename", self.artifact_name_le)
+        form_t.addRow(tr("Artifact filename"), self.artifact_name_le)
 
         self.n_trials_sp = QtWidgets.QSpinBox(); self.n_trials_sp.setRange(1, 5000); self.n_trials_sp.setValue(50)
-        form_t.addRow("Optuna trials", self.n_trials_sp)
+        form_t.addRow(tr("Optuna trials"), self.n_trials_sp)
 
         self.test_size_ds = QtWidgets.QDoubleSpinBox(); self.test_size_ds.setRange(0.05, 0.95); self.test_size_ds.setSingleStep(0.05); self.test_size_ds.setValue(0.2)
-        form_t.addRow("Validation fraction", self.test_size_ds)
+        form_t.addRow(tr("Validation fraction"), self.test_size_ds)
 
         self.lr_low_ds  = QtWidgets.QDoubleSpinBox(); self.lr_low_ds.setDecimals(4); self.lr_low_ds.setRange(1e-4, 1.0); self.lr_low_ds.setValue(0.01)
         self.lr_high_ds = QtWidgets.QDoubleSpinBox(); self.lr_high_ds.setDecimals(3); self.lr_high_ds.setRange(1e-4, 1.0); self.lr_high_ds.setValue(0.1)
-        h_lr = QtWidgets.QHBoxLayout(); h_lr.addWidget(self.lr_low_ds); h_lr.addWidget(QtWidgets.QLabel("to")); h_lr.addWidget(self.lr_high_ds)
-        form_t.addRow("Learning rate range (log)", h_lr)
+        h_lr = QtWidgets.QHBoxLayout(); h_lr.addWidget(self.lr_low_ds); h_lr.addWidget(QtWidgets.QLabel(tr("to"))); h_lr.addWidget(self.lr_high_ds)
+        form_t.addRow(tr("Learning rate range (log)"), h_lr)
 
-        self.train_run_btn = QtWidgets.QPushButton("Train GB Models →"); self.train_run_btn.clicked.connect(self._run_train)
-        self.train_stop_btn = QtWidgets.QPushButton("Stop"); self.train_stop_btn.setEnabled(False); self.train_stop_btn.clicked.connect(self._stop_train)
-        self.train_early_btn = QtWidgets.QPushButton("Early stop (save)"); self.train_early_btn.setEnabled(False); self.train_early_btn.clicked.connect(self._request_early_stop)
+        self.train_run_btn = QtWidgets.QPushButton(tr("Train GB Models →")); self.train_run_btn.clicked.connect(self._run_train)
+        self.train_stop_btn = QtWidgets.QPushButton(tr("Stop")); self.train_stop_btn.setEnabled(False); self.train_stop_btn.clicked.connect(self._stop_train)
+        self.train_early_btn = QtWidgets.QPushButton(tr("Early stop (save)")); self.train_early_btn.setEnabled(False); self.train_early_btn.clicked.connect(self._request_early_stop)
         h_tr = QtWidgets.QHBoxLayout(); h_tr.addWidget(self.train_run_btn); h_tr.addWidget(self.train_stop_btn); h_tr.addWidget(self.train_early_btn)
         form_t.addRow(h_tr)
 
@@ -2236,33 +2311,33 @@ if __name__ == "__main__":
         form_t.addRow(self.train_log)
 
         # --- Predict pane ---
-        pred = QtWidgets.QWidget(); tabs.addTab(pred, "Predict")
+        pred = QtWidgets.QWidget(); tabs.addTab(pred, tr("Predict"))
         form_p = QtWidgets.QFormLayout(pred)
 
         self.artifact_le = QtWidgets.QLineEdit()
-        b_art = QtWidgets.QPushButton("…"); b_art.clicked.connect(lambda: self._pick_file(self.artifact_le, "Pickle files (*.pkl)"))
+        b_art = QtWidgets.QPushButton("…"); b_art.clicked.connect(lambda: self._pick_file(self.artifact_le, tr("Pickle files (*.pkl)")))
         h_art = QtWidgets.QHBoxLayout(); h_art.addWidget(self.artifact_le); h_art.addWidget(b_art)
-        form_p.addRow("Artifact (.pkl)", h_art)
+        form_p.addRow(tr("Artifact (.pkl)"), h_art)
 
         # Auto-show best params & metrics when artifact is chosen
         self.artifact_info = QtWidgets.QPlainTextEdit(); self.artifact_info.setReadOnly(True); self.artifact_info.setMaximumHeight(160)
-        form_p.addRow("Best model summary", self.artifact_info)
+        form_p.addRow(tr("Best model summary"), self.artifact_info)
         self.artifact_le.textChanged.connect(self._preview_artifact)
 
-        self.pred_csv_le = QtWidgets.QLineEdit(); b_pc = QtWidgets.QPushButton("…"); b_pc.clicked.connect(lambda: self._pick_file(self.pred_csv_le, "CSV files (*.csv)"))
+        self.pred_csv_le = QtWidgets.QLineEdit(); b_pc = QtWidgets.QPushButton("…"); b_pc.clicked.connect(lambda: self._pick_file(self.pred_csv_le, tr("CSV files (*.csv)")))
         h_pc = QtWidgets.QHBoxLayout(); h_pc.addWidget(self.pred_csv_le); h_pc.addWidget(b_pc)
-        form_p.addRow("Measured CSV", h_pc)
+        form_p.addRow(tr("Measured CSV"), h_pc)
 
         self.pred_out_le = QtWidgets.QLineEdit()
         b_po = QtWidgets.QPushButton("…"); b_po.clicked.connect(lambda: self._pick_save_csv(self.pred_out_le))
         h_po = QtWidgets.QHBoxLayout(); h_po.addWidget(self.pred_out_le); h_po.addWidget(b_po)
-        form_p.addRow("Save predictions to", h_po)
+        form_p.addRow(tr("Save predictions to"), h_po)
 
-        self.header_chk = QtWidgets.QCheckBox("Write header"); self.header_chk.setChecked(True)
+        self.header_chk = QtWidgets.QCheckBox(tr("Write header")); self.header_chk.setChecked(True)
         form_p.addRow("", self.header_chk)
 
-        self.pred_run_btn = QtWidgets.QPushButton("Predict →"); self.pred_run_btn.clicked.connect(self._run_predict)
-        self.pred_stop_btn = QtWidgets.QPushButton("Stop"); self.pred_stop_btn.setEnabled(False); self.pred_stop_btn.clicked.connect(self._stop_predict)
+        self.pred_run_btn = QtWidgets.QPushButton(tr("Predict →")); self.pred_run_btn.clicked.connect(self._run_predict)
+        self.pred_stop_btn = QtWidgets.QPushButton(tr("Stop")); self.pred_stop_btn.setEnabled(False); self.pred_stop_btn.clicked.connect(self._stop_predict)
         h_pr = QtWidgets.QHBoxLayout(); h_pr.addWidget(self.pred_run_btn); h_pr.addWidget(self.pred_stop_btn)
         form_p.addRow(h_pr)
 
@@ -2271,15 +2346,15 @@ if __name__ == "__main__":
 
     # ---- helpers ----
     def _pick_file(self, line, pattern_desc):
-        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select file", "", pattern_desc + ";;All files (*)")
+        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, tr("Select file"), "", pattern_desc + ";;" + tr("All files (*)"))
         if f: line.setText(f)
 
     def _pick_dir(self, line):
-        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select directory")
+        d = QtWidgets.QFileDialog.getExistingDirectory(self, tr("Select directory"))
         if d: line.setText(d)
 
     def _pick_save_csv(self, line):
-        f, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save CSV as", "", "CSV files (*.csv)")
+        f, _ = QtWidgets.QFileDialog.getSaveFileName(self, tr("Save CSV as"), "", tr("CSV files (*.csv)"))
         if f: line.setText(f)
 
     def _stop_train(self):
@@ -2352,10 +2427,10 @@ if __name__ == "__main__":
         outd = self.train_outdir_le.text().strip()
         aname = self.artifact_name_le.text().strip() or "gbm_artifact.pkl"
         if not data:
-            QtWidgets.QMessageBox.warning(self, "Missing", "Select a training CSV.")
+            QtWidgets.QMessageBox.warning(self, tr("Missing"), tr("Select a training CSV."))
             return
         if not outd:
-            QtWidgets.QMessageBox.warning(self, "Missing", "Select an output directory.")
+            QtWidgets.QMessageBox.warning(self, tr("Missing"), tr("Select an output directory."))
             return
 
         if not self._tmpdir:
@@ -2399,7 +2474,7 @@ if __name__ == "__main__":
         out = self.pred_out_le.text().strip()
 
         if not (art and df):
-            QtWidgets.QMessageBox.warning(self, "Missing", "Select an artifact (.pkl) and a measured CSV.")
+            QtWidgets.QMessageBox.warning(self, tr("Missing"), tr("Select an artifact (.pkl) and a measured CSV."))
             return
         if not out:
             out = str(Path(df).with_suffix("")) + "__gb_predictions.csv"
@@ -2433,23 +2508,24 @@ if __name__ == "__main__":
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("AM Simulation GUI")
-        self.resize(1040, 720)
-
         self._settings_path = SCRIPT_DIR / "am_gui_settings.json"
         self.settings = self._load_settings()
+        set_language(self.settings.get("ui_language", DEFAULT_UI_LANGUAGE))
+
+        self.setWindowTitle(tr("AM Simulation GUI"))
+        self.resize(1040, 720)
 
         tabs = QtWidgets.QTabWidget(); self.setCentralWidget(tabs)
-        tabs.addTab(BuildModelTab(self.settings), "Build Model")
-        tabs.addTab(InputAndUtempTab(self.settings), "Input & UTEMP")
-        tabs.addTab(DataExtractTab(self.settings), "Data Extract")  # NEW
-        tabs.addTab(DataAlignmentTab(self.settings), "Data alignment")
-        tabs.addTab(BatchSubmitTab(self.settings), "Submit Jobs")
-        tabs.addTab(MachineLearningTab(self.settings), "ML (GBM)")
+        tabs.addTab(BuildModelTab(self.settings), tr("Build Model"))
+        tabs.addTab(InputAndUtempTab(self.settings), tr("Input & UTEMP"))
+        tabs.addTab(DataExtractTab(self.settings), tr("Data Extract"))  # NEW
+        tabs.addTab(DataAlignmentTab(self.settings), tr("Data alignment"))
+        tabs.addTab(BatchSubmitTab(self.settings), tr("Submit Jobs"))
+        tabs.addTab(MachineLearningTab(self.settings), tr("ML (GBM)"))
 
 
-        tb = self.addToolBar("Tools")
-        act = QtWidgets.QAction("Settings", self); act.triggered.connect(self._edit_settings)
+        tb = self.addToolBar(tr("Tools"))
+        act = QtWidgets.QAction(tr("Settings"), self); act.triggered.connect(self._edit_settings)
         tb.addAction(act)
 
     def _load_settings(self):
@@ -2464,6 +2540,7 @@ class MainWindow(QtWidgets.QMainWindow):
             s.setdefault("apply_meshing_script", str(DEFAULT_MESH_SCRIPT))
             s.setdefault("apply_boundary_script", str(DEFAULT_APPLY_BC_SCRIPT))  # NEW
             s.setdefault("default_save_dir", str(SCRIPT_DIR))
+            s.setdefault("ui_language", DEFAULT_UI_LANGUAGE)
             s.setdefault("base_xlsx", "")
             s.setdefault("build_xlsx", "")
             s.setdefault("build_axis", "Y")
@@ -2490,6 +2567,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "apply_meshing_script": str(DEFAULT_MESH_SCRIPT),
             "apply_boundary_script": str(DEFAULT_APPLY_BC_SCRIPT),  # NEW
             "default_save_dir": str(SCRIPT_DIR),
+            "ui_language": DEFAULT_UI_LANGUAGE,
             "base_xlsx": "",
             "build_xlsx": "",
             "build_axis": "Y",
@@ -2508,58 +2586,76 @@ class MainWindow(QtWidgets.QMainWindow):
         super().closeEvent(ev)
 
     def _edit_settings(self):
+        old_lang = self.settings.get("ui_language", DEFAULT_UI_LANGUAGE)
         dlg = SettingsDialog(self.settings, self)
         if dlg.exec_():
             self.settings.update(dlg.values)
+            new_lang = self.settings.get("ui_language", DEFAULT_UI_LANGUAGE)
+            if new_lang != old_lang:
+                set_language(new_lang)
+                QtWidgets.QMessageBox.information(
+                    self,
+                    tr("Language changed"),
+                    tr("Please restart the application to apply the language change."),
+                )
 
 
 class SettingsDialog(QtWidgets.QDialog):
     def __init__(self, current, parent=None):
         super().__init__(parent)
         self.values = current.copy()
-        self.setWindowTitle("Settings")
+        self.setWindowTitle(tr("Settings"))
         form = QtWidgets.QFormLayout(self)
 
+        self.lang_cb = QtWidgets.QComboBox()
+        for label, code in UI_LANGUAGE_CHOICES:
+            self.lang_cb.addItem(tr(label), code)
+        current_lang = self.values.get("ui_language", DEFAULT_UI_LANGUAGE)
+        idx = self.lang_cb.findData(current_lang)
+        if idx >= 0:
+            self.lang_cb.setCurrentIndex(idx)
+        form.addRow(tr("Language"), self.lang_cb)
+
         self.abaqus_le = QtWidgets.QLineEdit(self.values.get("abaqus_cmd", DEFAULT_ABAQUS_CMD))
-        form.addRow("Abaqus command", self.abaqus_le)
+        form.addRow(tr("Abaqus command"), self.abaqus_le)
 
         self.build_le = QtWidgets.QLineEdit(self.values.get("build_script", str(DEFAULT_BUILD_SCRIPT)))
         b_btn = QtWidgets.QPushButton("…"); b_btn.clicked.connect(lambda: self._pick(self.build_le))
         hl1 = QtWidgets.QHBoxLayout(); hl1.addWidget(self.build_le); hl1.addWidget(b_btn)
-        form.addRow("build_cae script", hl1)
+        form.addRow(tr("build_cae script"), hl1)
 
         self.input_le = QtWidgets.QLineEdit(self.values.get("input_script", str(DEFAULT_INPUT_SCRIPT)))
         i_btn = QtWidgets.QPushButton("…"); i_btn.clicked.connect(lambda: self._pick(self.input_le))
         hl2 = QtWidgets.QHBoxLayout(); hl2.addWidget(self.input_le); hl2.addWidget(i_btn)
-        form.addRow("create_input script", hl2)
+        form.addRow(tr("create_input script"), hl2)
 
         self.import_le = QtWidgets.QLineEdit(self.values.get("import_script", str(DEFAULT_IMPORT_SCRIPT)))
         im_btn = QtWidgets.QPushButton("…"); im_btn.clicked.connect(lambda: self._pick(self.import_le))
         hl3 = QtWidgets.QHBoxLayout(); hl3.addWidget(self.import_le); hl3.addWidget(im_btn)
-        form.addRow("import_and_partition script", hl3)
+        form.addRow(tr("import_and_partition script"), hl3)
 
         self.apply_le = QtWidgets.QLineEdit(self.values.get("apply_materials_script", str(DEFAULT_APPLY_MAT_SCRIPT)))
         ap_btn = QtWidgets.QPushButton("…"); ap_btn.clicked.connect(lambda: self._pick(self.apply_le))
         hl4 = QtWidgets.QHBoxLayout(); hl4.addWidget(self.apply_le); hl4.addWidget(ap_btn)
-        form.addRow("apply_materials script", hl4)
+        form.addRow(tr("apply_materials script"), hl4)
 
         self.mesh_le = QtWidgets.QLineEdit(self.values.get("apply_meshing_script", str(DEFAULT_MESH_SCRIPT)))
         me_btn = QtWidgets.QPushButton("…"); me_btn.clicked.connect(lambda: self._pick(self.mesh_le))
         hl5 = QtWidgets.QHBoxLayout(); hl5.addWidget(self.mesh_le); hl5.addWidget(me_btn)
-        form.addRow("apply_meshing script", hl5)
+        form.addRow(tr("apply_meshing script"), hl5)
 
         # NEW: boundary script picker
         self.bc_le = QtWidgets.QLineEdit(self.values.get("apply_boundary_script", str(DEFAULT_APPLY_BC_SCRIPT)))
         bc_btn = QtWidgets.QPushButton("…"); bc_btn.clicked.connect(lambda: self._pick(self.bc_le))
         hl6 = QtWidgets.QHBoxLayout(); hl6.addWidget(self.bc_le); hl6.addWidget(bc_btn)
-        form.addRow("apply_boundary script", hl6)
+        form.addRow(tr("apply_boundary script"), hl6)
 
         bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
         form.addRow(bb)
 
     def _pick(self, line):
-        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Python file", line.text())
+        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, tr("Python file"), line.text())
         if f: line.setText(f)
 
     def accept(self):
@@ -2570,6 +2666,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.values["apply_materials_script"] = self.apply_le.text().strip() or str(DEFAULT_APPLY_MAT_SCRIPT)
         self.values["apply_meshing_script"] = self.mesh_le.text().strip() or str(DEFAULT_MESH_SCRIPT)
         self.values["apply_boundary_script"] = self.bc_le.text().strip() or str(DEFAULT_APPLY_BC_SCRIPT)
+        self.values["ui_language"] = self.lang_cb.currentData() or DEFAULT_UI_LANGUAGE
         super().accept()
 
 

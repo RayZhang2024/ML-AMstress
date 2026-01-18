@@ -14,5 +14,6 @@
   "ht_build_enabled": false,
   "ht_input_enabled": false,
   "ht_temp_c": 650.0,
-  "bottom_layers_remove": 2
+  "bottom_layers_remove": 2,
+  "ui_language": "zh"
 }
