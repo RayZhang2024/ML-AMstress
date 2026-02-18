@@ -6,14 +6,14 @@
   "apply_materials_script": "D:\\1_Project\\AM_modelGUI\\GUI\\ML-AMstress\\apply_materials.py",
   "apply_meshing_script": "D:\\1_Project\\AM_modelGUI\\GUI\\ML-AMstress\\apply_meshing.py",
   "apply_boundary_script": "D:\\1_Project\\AM_modelGUI\\GUI\\ML-AMstress\\apply_boundary.py",
-  "default_save_dir": "D:/1_Project/AM_modelGUI/GUI/sample_list/5_calibration_block/TA15/run_files_2layer_removed",
-  "base_xlsx": "D:/1_Project/AM_modelGUI/GUI/sample_list/material_properties/base_properties.xlsx",
-  "build_xlsx": "D:/1_Project/AM_modelGUI/GUI/sample_list/material_properties/Ti_properties.xlsx",
+  "default_save_dir": "D:/1_Project/AM_modelGUI/restart_trial",
+  "base_xlsx": "E:/0_STFC_work/A_Projects/own/Simulation/properties/base_properties.xlsx",
+  "build_xlsx": "E:/0_STFC_work/A_Projects/own/Simulation/properties/CX_properties.xlsx",
   "build_axis": "Y",
   "axis_zero": 0.0,
   "ht_build_enabled": false,
   "ht_input_enabled": false,
   "ht_temp_c": 650.0,
-  "bottom_layers_remove": 2,
-  "ui_language": "zh"
+  "bottom_layers_remove": 0,
+  "ui_language": "en"
 }
