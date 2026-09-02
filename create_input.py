@@ -92,6 +92,20 @@ def _validation_log(message):
             print(message)
         except Exception:
             pass
+    try:
+        report_file = VALIDATION_REPORT_FILE
+    except NameError:
+        report_file = None
+    if report_file:
+        try:
+            report_stream = open(report_file, 'a')
+            try:
+                report_stream.write("%s\n" % message)
+                report_stream.flush()
+            finally:
+                report_stream.close()
+        except Exception:
+            pass
 
 
 def _set_membership(set_obj):
