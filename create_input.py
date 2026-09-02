@@ -44,6 +44,118 @@ session.viewports['Viewport: 1'].setValues(displayedObject=None)
 openMdb(pathName=CAE_FILE)
 
 
+def _imported_set_indices(assembly):
+    """Return numeric indices for lower-case imported assembly sets."""
+    indices = []
+    for name in assembly.sets.keys():
+        if not name.startswith('set-'):
+            continue
+        try:
+            index = int(name[4:])
+        except (TypeError, ValueError):
+            continue
+        if index >= 0:
+            indices.append(index)
+    return sorted(set(indices))
+
+
+def _set_element_count(set_obj):
+    """Read an assembly set's mesh-element count without treating cells as elements."""
+    try:
+        elements = set_obj.elements
+    except Exception as exc:
+        return None, "cannot read elements (%s)" % str(exc)
+    try:
+        return len(elements), None
+    except Exception as exc:
+        return None, "cannot count elements (%s)" % str(exc)
+
+
+def validate_imported_model_ready():
+    """Validate the imported-CAD set/mesh contract before generating any output."""
+    model = mdb.models['Model-1']
+    if 'ImportedPart' not in model.parts.keys():
+        print("[VALIDATION] Legacy/non-imported model detected; imported-CAD readiness check not applied.")
+        return
+
+    print("[VALIDATION] Imported model readiness check")
+    assembly = model.rootAssembly
+    indices = _imported_set_indices(assembly)
+    errors = []
+
+    if not indices:
+        errors.append("No lower-case imported assembly sets named set-0, set-1, ... were found.")
+        max_index = -1
+    else:
+        max_index = max(indices)
+
+    if 0 not in indices:
+        errors.append("Missing required base set: set-0.")
+
+    if max_index < 2:
+        errors.append("Missing required build-layer and aggregate sets; expected at least set-1 and set-2.")
+
+    if max_index >= 0:
+        missing = []
+        for index in range(0, max_index + 1):
+            if index not in indices:
+                missing.append('set-%d' % index)
+        if missing:
+            errors.append("Missing/non-contiguous imported sets: %s." % ', '.join(missing))
+
+    actual_layers = max_index - 1
+    if actual_layers >= 1:
+        aggregate_name = 'set-%d' % max_index
+        print("[VALIDATION] Detected build layers: %d" % actual_layers)
+        for index in range(0, max_index + 1):
+            set_name = 'set-%d' % index
+            if set_name not in assembly.sets.keys():
+                continue
+            count, count_error = _set_element_count(assembly.sets[set_name])
+            label = " (BUILD_ALL)" if index == max_index else ""
+            if count_error is not None:
+                print("[VALIDATION] %s%s: elements=unavailable" % (set_name, label))
+                errors.append("%s%s." % (set_name, count_error))
+            else:
+                print("[VALIDATION] %s%s: elements=%d" % (set_name, label, count))
+                if count == 0:
+                    errors.append("%s has zero mesh elements." % set_name)
+    else:
+        aggregate_name = None
+
+    try:
+        requested_layers = int(layer_n)
+    except NameError:
+        requested_layers = None
+        errors.append("Input & UTEMP layer_n was not provided.")
+    except (TypeError, ValueError):
+        requested_layers = None
+        errors.append("Input & UTEMP layer_n is not a valid integer: %s." % str(layer_n))
+
+    if requested_layers is not None:
+        if actual_layers != requested_layers:
+            print("[VALIDATION] layer_n: %d [MISMATCH]" % requested_layers)
+            errors.append("Layer count mismatch: CAE has %d build layers, Input & UTEMP layer_n is %d." %
+                          (actual_layers, requested_layers))
+            expected_aggregate = 'set-%d' % (requested_layers + 1)
+            if (expected_aggregate not in assembly.sets.keys() and
+                    all(('set-%d' % index) in assembly.sets.keys()
+                        for index in range(0, requested_layers + 1))):
+                errors.append("Missing expected aggregate set: %s." % expected_aggregate)
+        else:
+            print("[VALIDATION] layer_n: %d [OK]" % requested_layers)
+
+    if errors:
+        for error in errors:
+            print("[VALIDATION][ERROR] %s" % error)
+        raise RuntimeError("[VALIDATION] FAIL - model is not ready for input generation.")
+
+    print("[VALIDATION] PASS - model is ready for input generation")
+
+
+validate_imported_model_ready()
+
+
 def create_input (temp_step, temp_initial,temp_interval, grad_step, grad_initial, grad_interval):
     for x in range (temp_step):
     
