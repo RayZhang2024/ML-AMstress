@@ -226,34 +226,92 @@ def _resolve_heat_treatment_step(model, layer_count):
                 continue
             prefixes.setdefault(prefix, []).append(index)
 
-    candidates = []
     first_post_removal = int(layer_count) + 4
+    step_sequences = {}
     for prefix, indices in prefixes.items():
         indices = sorted(set(indices))
         if any(index not in indices for index in range(1, first_post_removal)):
             continue
         post_removal = [index for index in indices if index >= first_post_removal]
-        if not post_removal or post_removal != list(range(first_post_removal, max(post_removal) + 1)):
-            continue
+        if post_removal and post_removal == list(range(first_post_removal, max(post_removal) + 1)):
+            step_sequences[prefix] = (indices, post_removal)
+
+    def _created_step_name(interaction):
+        try:
+            history = list(interaction.history)
+            step_names = list(model.steps.keys())
+        except Exception:
+            return None
+        try:
+            created_state = CREATED
+        except NameError:
+            created_state = None
+        for history_index, state in enumerate(history):
+            try:
+                is_created = str(state) == 'CREATED'
+            except Exception:
+                is_created = False
+            if created_state is not None:
+                try:
+                    is_created = is_created or state == created_state
+                except Exception:
+                    pass
+            if not is_created or history_index >= len(step_names):
+                continue
+            return step_names[history_index]
+        return None
+
+    # ModelChange history is the source of truth for the final removal step.
+    # This is required for BStep-* fallback sequences, whose generated steps
+    # use the default time period and therefore have no unique HT period marker.
+    removal_steps = {}
+    try:
+        for interaction_name in model.interactions.keys():
+            is_base_removal = interaction_name == 'Int-%d' % (int(layer_count) + 2)
+            is_bottom_removal = interaction_name.startswith('Int-bottom-')
+            if not (is_base_removal or is_bottom_removal):
+                continue
+            step_name = _created_step_name(model.interactions[interaction_name])
+            if step_name is None:
+                continue
+            for prefix in ('Step', 'BStep'):
+                marker = prefix + '-'
+                if not step_name.startswith(marker):
+                    continue
+                try:
+                    index = int(step_name[len(marker):])
+                except (TypeError, ValueError):
+                    continue
+                removal_steps.setdefault(prefix, []).append(index)
+    except Exception:
+        removal_steps = {}
+
+    candidates = []
+    for prefix, sequence in step_sequences.items():
+        indices, post_removal = sequence
         candidate_index = max(post_removal)
         candidate_name = '%s-%d' % (prefix, candidate_index)
+        referenced_removals = sorted(set(removal_steps.get(prefix, [])))
+        if referenced_removals:
+            # The base removal must be present, and the HT step must be the
+            # distinct final step immediately following all CAE removals.
+            if int(layer_count) + 3 not in referenced_removals:
+                continue
+            if candidate_index != max(referenced_removals) + 1:
+                continue
+            candidates.append((prefix, candidate_index))
+            continue
+
+        # Normal Step-* models created by apply_materials.py carry the
+        # explicit 0.05 HT marker. Keep this compatibility path, but still
+        # require the marker to be the final post-removal step.
+        if prefix != 'Step':
+            continue
         try:
             candidate_period = float(model.steps[candidate_name].timePeriod)
         except Exception:
             continue
-        if abs(candidate_period - 0.05) > 1.0e-9:
-            continue
-        removal_periods_valid = True
-        for index in post_removal[:-1]:
-            try:
-                period = float(model.steps['%s-%d' % (prefix, index)].timePeriod)
-            except Exception:
-                removal_periods_valid = False
-                break
-            if abs(period - 1.0) > 1.0e-9:
-                removal_periods_valid = False
-                break
-        if removal_periods_valid:
+        if abs(candidate_period - 0.05) <= 1.0e-9:
             candidates.append((prefix, candidate_index))
 
     if len(candidates) == 1:
@@ -261,9 +319,8 @@ def _resolve_heat_treatment_step(model, layer_count):
     if len(candidates) > 1:
         return None, "multiple compatible heat-treatment step sequences were found: %s" % \
             ', '.join('%s-%d' % candidate for candidate in candidates)
-    return None, "no compatible heat-treatment step was found after the CAE removal sequence (expected a final %s-%d-style step with timePeriod=0.05)" % \
+    return None, "no distinct post-removal heat-treatment step was found in the CAE model (expected the final %s-%d-style step after the removal interactions)" % \
         ('Step', first_post_removal)
-
 
 
 def validate_imported_model_ready():
