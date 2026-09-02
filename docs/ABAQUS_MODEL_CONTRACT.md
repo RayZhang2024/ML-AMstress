@@ -17,7 +17,7 @@ The intended imported-material sequence is:
 3. `Step-(N+2)` is cooling.
 4. `Step-(N+3)` releases/deactivates the base (`set-0`).
 5. Optional additional steps deactivate bottom build layers `set-1` onward, as requested.
-6. Optional heat treatment is intended to follow those removals. Current scripts have a known mismatch: `apply_materials.py` creates the HT step at `N + 4 + rem_layers`, while `create_input.py` writes the UTEMP HT branch at `KSTEP == layer_n + 4`; Input & UTEMP does not inject the bottom-removal count. When both features are enabled, the scripts therefore do not share the same HT step index.
+6. Optional heat treatment is intended to follow those removals. `apply_materials.py` creates the HT step at `N + 4 + rem_layers` with a normalized `timePeriod=1.0`, `initialInc=maxInc=0.05`, `maxNumInc=10000`, and `minInc=0.0002`, so the existing UTEMP ramp/hold/cool profile can reach its `TIME(1)` transitions. The same settings are applied to the final step in the supported `BStep-*` fallback. The separate Issue #9 behavior remains: `create_input.py` currently writes the UTEMP HT branch at `KSTEP == layer_n + 4`; Input & UTEMP does not inject the bottom-removal count, so index alignment is handled independently there.
 
 `Int-1` initially deactivates the whole-build aggregate (`set-(N+1)` where detected). `Int-2` through `Int-(N+1)` activate layer 1 through N in order. The base-removal interaction is created at the base-removal step; optional bottom-layer interactions deactivate the requested lowest layers afterward. The material script can detect an aggregate by set size and correct to `set-(N+1)`, so documentation and future validation must treat detection as an implementation detail, not permission to reorder layers.
 

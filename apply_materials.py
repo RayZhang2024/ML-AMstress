@@ -193,7 +193,8 @@ def main():
 
     if int(HT_ENABLED) == 1:
         # Heat-treatment step index shifts by rem_layers
-        prev = _mk_step(layer_number+4+rem_layers, prev, 0.05, 1.0, 10000, 0.0002, 0.05)    
+        # Keep the normalized 0..1 time domain used by the UTEMP ramp/hold/cool profile.
+        prev = _mk_step(layer_number+4+rem_layers, prev, 0.05, 0.05, 10000, 0.0002, 1.0)
 
     _ti = float(TIME_INTERVAL if TIME_INTERVAL is not None else 0.8)
     if _ti < 0.0: _ti = 0.8
@@ -233,8 +234,19 @@ def main():
         for i in range(1, need+1):
             nm = '%s-%d' % (use_prefix, i)
             if nm not in m.steps.keys():
-                m.StaticStep(name=nm, previous=prev)
+                if int(ht_enabled) == 1 and i == int(total_layers) + 4 + int(rem_layers):
+                    m.StaticStep(name=nm, previous=prev, timePeriod=1.0,
+                                 initialInc=0.05, maxInc=0.05,
+                                 maxNumInc=10000, minInc=0.0002)
+                else:
+                    m.StaticStep(name=nm, previous=prev)
             prev = nm
+
+        if int(ht_enabled) == 1:
+            ht_name = '%s-%d' % (use_prefix, int(total_layers) + 4 + int(rem_layers))
+            m.steps[ht_name].setValues(timePeriod=1.0, initialInc=0.05,
+                                       maxInc=0.05, maxNumInc=10000,
+                                       minInc=0.0002)
     
         def _step(i):  # 1-based accessor
             return '%s-%d' % (use_prefix, i)
