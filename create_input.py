@@ -62,10 +62,15 @@ def _imported_set_indices(assembly):
 def _cell_key(cell):
     """Return a stable key for an Abaqus geometry cell when available."""
     try:
-        return ('index', int(cell.index))
+        instance_name = str(cell.instanceName)
+    except Exception:
+        instance_name = ''
+    try:
+        return ('index', instance_name, int(cell.index))
     except Exception:
         try:
-            return ('point', tuple(float(value) for value in cell.pointOn[0]))
+            return ('point', instance_name,
+                    tuple(float(value) for value in cell.pointOn[0]))
         except Exception:
             return None
 
@@ -108,25 +113,42 @@ def _validation_log(message):
             pass
 
 
-def _set_membership(set_obj):
-    """Collect geometry-cell and direct mesh-element membership separately."""
+def _assembly_cell_is_meshed(model, assembly_cell):
+    """Resolve a dependent assembly cell to its part cell and inspect mesh stats."""
+    instance_name = getattr(assembly_cell, 'instanceName', None)
+    if not instance_name:
+        raise RuntimeError("assembly cell has no instanceName")
+    instance = model.rootAssembly.instances[instance_name]
+    part_name = getattr(instance, 'partName', None)
+    if not part_name:
+        raise RuntimeError("instance %s has no partName" % instance_name)
+    part = model.parts[part_name]
+    cell_index = int(assembly_cell.index)
+    part_cell = part.cells[cell_index]
+    stats = part.getMeshStats(regions=(part_cell,))
+    return int(stats.numMeshedRegions) > 0
+
+
+def _set_membership(set_obj, model):
+    """Collect direct mesh membership and per-cell mesh completeness separately."""
     element_keys = set()
     cell_keys = set()
     errors = []
+    meshed_cell_count = 0
+    unverified_cell_count = 0
+    direct_mesh_status = 'ok'
 
     try:
         direct_elements = set_obj.elements
     except Exception as exc:
+        direct_mesh_status = 'access_error'
         errors.append("cannot access direct mesh elements; inspect set.elements (%s)" % str(exc))
     else:
-        try:
-            direct_count = len(direct_elements)
-        except Exception:
-            direct_count = None
         try:
             for element in direct_elements:
                 element_keys.add(_element_key(element))
         except Exception as exc:
+            direct_mesh_status = 'iterate_error'
             errors.append("cannot iterate direct mesh elements; inspect set.elements (%s)" % str(exc))
 
     try:
@@ -143,11 +165,20 @@ def _set_membership(set_obj):
             if key is None:
                 errors.append("cannot identify a geometry cell")
                 continue
+            if key in cell_keys:
+                continue
             cell_keys.add(key)
+            try:
+                if _assembly_cell_is_meshed(model, cell):
+                    meshed_cell_count += 1
+            except Exception as exc:
+                unverified_cell_count += 1
+                errors.append("geometry cell mesh association could not be verified (%s)" % str(exc))
     except Exception as exc:
         errors.append("cannot iterate geometry cells (%s)" % str(exc))
 
-    return cell_keys, element_keys, errors
+    return (cell_keys, element_keys, meshed_cell_count,
+            unverified_cell_count, direct_mesh_status, errors)
 
 
 def validate_imported_model_ready():
@@ -185,8 +216,11 @@ def validate_imported_model_ready():
     membership = {}
     for index in indices:
         set_name = 'set-%d' % index
-        cell_keys, element_keys, membership_errors = _set_membership(assembly.sets[set_name])
-        membership[index] = (cell_keys, element_keys)
+        (cell_keys, element_keys, meshed_cell_count,
+         unverified_cell_count, direct_mesh_status,
+         membership_errors) = _set_membership(assembly.sets[set_name], model)
+        membership[index] = (cell_keys, element_keys, meshed_cell_count,
+                             unverified_cell_count, direct_mesh_status)
         for detail in membership_errors:
             errors.append("%s: %s." % (set_name, detail))
 
@@ -250,10 +284,23 @@ def validate_imported_model_ready():
         if set_name not in assembly.sets.keys():
             continue
         element_count = len(membership[index][1])
+        cell_count = len(membership[index][0])
+        meshed_cell_count = membership[index][2]
+        unverified_cell_count = membership[index][3]
+        direct_mesh_status = membership[index][4]
         label = " (BUILD_ALL)" if aggregate_index is not None and index == aggregate_index else ""
-        _validation_log("[VALIDATION] %s%s: elements=%d" % (set_name, label, element_count))
-        if element_count == 0:
+        _validation_log("[VALIDATION] %s%s: cells=%d, meshed_cells=%d, elements=%d" %
+                        (set_name, label, cell_count, meshed_cell_count, element_count))
+        if direct_mesh_status == 'ok' and element_count == 0:
             errors.append("%s has zero mesh elements." % set_name)
+        if unverified_cell_count == 0 and cell_count > 0 and meshed_cell_count < cell_count:
+            missing_cell_count = cell_count - meshed_cell_count
+            if meshed_cell_count > 0:
+                errors.append("%s is partially meshed: %d of %d geometry cells has no mesh elements." %
+                              (set_name, missing_cell_count, cell_count))
+            elif element_count > 0:
+                errors.append("%s is completely unmeshed by per-cell mesh association: %d geometry cells have no mesh elements." %
+                              (set_name, cell_count))
 
     try:
         requested_layers = int(layer_n)
