@@ -42,6 +42,10 @@ class HeatTreatmentStepTests(unittest.TestCase):
         model.steps['Step-6'].timePeriod = 0.05
         self.assertEqual(resolve_heat_treatment_step(model, 2), (6, None))
 
+    def test_normal_step_uses_modelchange_history(self):
+        model = MockModel('Step', 6, {'Int-4': 5}, period=1.0)
+        self.assertEqual(resolve_heat_treatment_step(model, 2), (6, None))
+
     def test_bstep_uses_modelchange_removal_history(self):
         model = MockModel('BStep', 8, {
             'Int-4': 5,
