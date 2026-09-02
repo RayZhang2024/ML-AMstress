@@ -11,7 +11,7 @@ The Abaqus-side scripts run in the Abaqus/CAE 2021 environment, not in the GUI's
 - `build_cae.py`: legacy parametric model creation, including geometry, sets, steps, interactions, mesh, and temperatures.
 - `import_and_partition.py`: imports STEP/IGES/SAT geometry, partitions consecutive layer slabs, and creates the imported-model sets.
 - `apply_materials.py`: reads CSV law tables, creates sections, infers layers, creates steps, and adds `ModelChange` interactions.
-- `apply_meshing.py`: seeds and meshes an imported part; the current implementation requests sweep/hex C3D8R by default and has tetrahedral fallback paths.
+- `apply_meshing.py`: seeds and meshes an imported part with active `FREE + TET` controls and C3D10 by default (C3D4 only when explicitly requested). Earlier sweep/hex C3D8R and mixed strategies in the file are commented-out legacy code, not the active imported path.
 - `apply_boundary.py`: adds the temperature fields and axis-aware anti-rigid-body constraints after a mesh exists.
 - `create_input.py`: writes Abaqus input files and generated UTEMP Fortran plus `submit.bat`.
 - `data_extract.py`: Abaqus ODB extraction script used by the Data Extract tab.
@@ -36,7 +36,7 @@ The Data Extract tab injects ODB directory, output, plane/IDW, variable, step/fr
 
 ## Settings and regex patching
 
-Settings are loaded from the user configuration (with repository defaults in `am_gui_settings.json`) and include Abaqus command and helper-script paths. Runtime values are injected by line-oriented `re.sub`/`re.subn` replacements, with fallback parameter blocks and warnings when anchors are absent. This is current behavior and technical debt, not a new interface guarantee.
+The current `MainWindow` directly loads and saves `SCRIPT_DIR / "am_gui_settings.json"`, where `SCRIPT_DIR` is the bundled/repository script directory. The file contains machine-specific command and helper-script paths, which is technical debt; the current code does not yet provide a separate user-config abstraction. Runtime values are injected by line-oriented `re.sub`/`re.subn` replacements, with fallback parameter blocks and warnings when anchors are absent.
 
 ## Technical debt and target direction
 

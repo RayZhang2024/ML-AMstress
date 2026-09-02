@@ -2,7 +2,7 @@
 
 ## Environments
 
-The GUI requires a normal Python 3 environment with the packages in `requirements.txt` (PyQt5, pandas, NumPy, matplotlib, openpyxl, scikit-learn, Optuna, and joblib). Install them with `python -m pip install -r requirements.txt` and launch with `python AM_gui_v7.py`. A packaged Windows build can be run from `dist/AM_simulation_GUI/AM_simulation_GUI.exe`.
+The GUI requires a normal Python 3 environment with the packages in `requirements.txt` (PyQt5, pandas, NumPy, matplotlib, openpyxl, scikit-learn, Optuna, and joblib). Install them with `python -m pip install -r requirements.txt` and launch with `python AM_gui_v7.py`.
 
 Abaqus automation is a separate runtime. Use the configured Abaqus/CAE 2021 command (for example `abq2021.bat`) for `cae noGUI` scripts and solver jobs. Do not install GUI dependencies into Abaqus's Python environment or assume that normal Python can import Abaqus modules.
 

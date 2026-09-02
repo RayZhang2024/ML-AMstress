@@ -41,7 +41,7 @@ Before modifying production code, identify the concrete problem or evidence, exp
 - Layer sets must be contiguous. Never silently skip a missing required layer.
 - Before input generation, every required layer set must exist and contain mesh elements, not only geometry cells.
 - Do not create `ModelChange` interactions that reference an undefined or empty required element set.
-- For arbitrary imported CAD, the robust C3D10 direction is `FREE + TET + C3D10`; changing the current implementation to make that the default requires an explicit issue. Do not silently introduce mixed C3D8R/C3D10 meshes.
+- The active imported-CAD mesher uses `FREE + TET + C3D10` by default (C3D4 only when explicitly requested). Earlier C3D8R/mixed strategies in `apply_meshing.py` are commented-out legacy implementations, not active behavior. Do not silently reintroduce mixed C3D8R/C3D10 meshes.
 - Critical model-generation failures must not be swallowed with `except: pass`.
 
 ## Architecture and configuration direction

@@ -1,12 +1,12 @@
 # Abaqus model contract
 
-This is the contract implied by the current model-building scripts. It is descriptive for existing behavior; changing an invariant requires a separate issue.
+This document separates current implementation behavior from engineering invariants that are not yet fully enforced. The latter are Phase-1 safety targets; changing an invariant requires an explicit issue.
 
 ## Sets
 
 At part level, imported models use `BASE` for cells at or below the build-axis zero and `BUILD_ALL` for the build region. At assembly level, `set-0` is the base, `set-1` through `set-N` are consecutive build-layer slabs, and `set-(N+1)` is the aggregate whole-build region. The legacy parametric script uses equivalent capitalized `Set-*` names in places, so callers must preserve the naming convention of the path they invoke.
 
-Layer sets are created from consecutive slab edges. Their numbering must be contiguous and must cover the intended layers. A geometry set is not sufficient for input generation: after meshing, every required layer set must exist and contain elements. Missing or empty required sets must be diagnosed rather than silently skipped, and required `ModelChange` regions must never be undefined or empty.
+Current code creates layer sets from consecutive slab edges and the material script infers layer counts. It can warn and continue when a required assembly set is missing; there is no completed pre-input validation layer, and geometry-only sets can exist before meshing. The engineering invariant/Phase-1 target is that numbering is contiguous, every required layer exists and contains elements after meshing, missing or empty sets produce clear diagnostics, and invalid input generation is prevented. Required `ModelChange` regions must not be undefined or empty once that safety layer exists.
 
 ## Steps and ModelChange interactions
 
@@ -17,19 +17,19 @@ The intended imported-material sequence is:
 3. `Step-(N+2)` is cooling.
 4. `Step-(N+3)` releases/deactivates the base (`set-0`).
 5. Optional additional steps deactivate bottom build layers `set-1` onward, as requested.
-6. Optional heat treatment follows those removals when enabled; the current implementation shifts its step index by the number of removed bottom layers.
+6. Optional heat treatment is intended to follow those removals. Current scripts have a known mismatch: `apply_materials.py` creates the HT step at `N + 4 + rem_layers`, while `create_input.py` writes the UTEMP HT branch at `KSTEP == layer_n + 4`; Input & UTEMP does not inject the bottom-removal count. When both features are enabled, the scripts therefore do not share the same HT step index.
 
 `Int-1` initially deactivates the whole-build aggregate (`set-(N+1)` where detected). `Int-2` through `Int-(N+1)` activate layer 1 through N in order. The base-removal interaction is created at the base-removal step; optional bottom-layer interactions deactivate the requested lowest layers afterward. The material script can detect an aggregate by set size and correct to `set-(N+1)`, so documentation and future validation must treat detection as an implementation detail, not permission to reorder layers.
 
-The legacy parametric script follows the same conceptual sequence but has older `Set-*` capitalization and an optional half-build set/removal block that is currently not implemented.
+The legacy parametric script follows the same conceptual sequence but has older `Set-*` capitalization and an optional half-build set/removal block that is currently not implemented. In the Input & UTEMP tab, `layer_n` is user-entered (the current default is 24), not inferred from or validated against the CAE layer count.
 
 ## Meshing
 
-The active imported-CAD mesher globally seeds with `BASE_SEED`, applies build/base directional reseeding, and currently requests sweep + HEX with C3D8R by default; if sweep/hex is unsuitable it has mixed/fallback tetrahedral paths using C3D10 (or explicitly requested C3D4). This means the current code is not a universal C3D10-only policy. For arbitrary imported CAD, the robust engineering direction is `FREE + TET + C3D10`; adopting it as runtime default is out of scope here. Never silently introduce mixed C3D8R/C3D10 elements, and always validate element membership in required layer sets before writing inputs.
+The active imported-CAD mesher globally seeds with `BASE_SEED`, applies build/base directional reseeding, sets `FREE + TET` controls for all cells, and assigns C3D10 by default (or C3D4 when explicitly requested). Earlier sweep/hex C3D8R and mixed strategies in the file are commented-out legacy implementations. The active all-tet strategy is the robust default for arbitrary imported CAD. The Phase-1 safety target is to validate element membership in every required layer before writing inputs; that validation is not yet implemented.
 
 ## Boundary conditions and temperature
 
-`apply_boundary.py` applies a uniform 25°C initial predefined temperature and a USER_DEFINED temperature field beginning in Step-1 over `TEMP_ALL`. It derives axis-aware anti-rigid-body constraints from bottom nodes: BC-1 constrains one displacement component, BC-2 constrains a second component at selected corners, and BC-3 constrains the remaining component/hold location. The exact component mapping follows the selected build axis and must remain axis-aware.
+`apply_boundary.py` applies a uniform 25°C initial predefined temperature and a USER_DEFINED temperature field beginning in Step-1 over `TEMP_ALL`. Bottom-node and corner selection is axis-aware, using the selected build axis and geometry. The displacement components are not remapped by axis: BC-1 is fixed global U1, BC-2 is fixed global U2, and BC-3 is fixed global U3. Axis-dependent component remapping, if desired, is a separate behavior change.
 
 ## Invariants
 
@@ -38,5 +38,5 @@ The active imported-CAD mesher globally seeds with `BASE_SEED`, applies build/ba
 - Do not treat geometry-only sets as meshed element regions.
 - Do not create interactions for missing or empty required regions.
 - Preserve the current step ordering and optional-removal/heat-treatment ordering.
-- Keep one coherent element-type policy per meshing operation; any C3D10 default change needs an explicit issue.
+- Keep the active all-tet `FREE + TET + C3D10` imported meshing policy; any element-type or meshing-strategy change needs an explicit issue.
 - Keep failures visible; do not swallow critical generation errors.
