@@ -26,7 +26,7 @@ The imported partitioner creates assembly `set-0`, consecutive per-layer sets, a
 
 ## Input/UTEMP and jobs
 
-The Input & UTEMP tab prepends runtime constants (CAE path, coordinate index, axis zero, heat-treatment flags, CPU/GPU counts), rewrites `openMdb`, injects grid parameters, and invokes `create_input(...)` under Abaqus. `create_input.py` creates jobs and writes `.inp` files, one UTEMP `.for` file per temperature/gradient combination, and a batch file using `abq2021`, `cpus=`, `gpus=`, and `user=`.
+The Input & UTEMP tab prepends runtime constants such as the CAE path, coordinate index, axis zero, and heat-treatment flags, rewrites `openMdb`, injects the temperature/gradient/layer grid parameters, and invokes `create_input(...)` under Abaqus. CPU/GPU values are currently hard-coded in `create_input.py` and in the generated `submit.bat`, not configured by the Input & UTEMP GUI. `create_input.py` creates jobs and writes `.inp` files, one UTEMP `.for` file per temperature/gradient combination, and a batch file using `abq2021`, `cpus=`, `gpus=`, and `user=`.
 
 The Submit Jobs tab runs a selected batch file. Intel Fortran/Visual Studio setup is external and is needed when Abaqus must compile a user subroutine.
 
