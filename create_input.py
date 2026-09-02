@@ -181,6 +181,31 @@ def _set_membership(set_obj, model):
             unverified_cell_count, direct_mesh_status, errors)
 
 
+def _mesh_quality_summary(assembly):
+    """Return Abaqus Verify Mesh analysis-check counts for an assembly."""
+    try:
+        quality = assembly.verifyMeshQuality(ANALYSIS_CHECKS)
+    except Exception as exc:
+        return None, "cannot run Abaqus analysis mesh checks (%s)" % str(exc)
+    if not isinstance(quality, dict):
+        return None, "Abaqus analysis mesh checks returned an unexpected result (%s)" % type(quality)
+
+    try:
+        total_elements = int(quality['numElements'])
+    except Exception as exc:
+        return None, "Abaqus analysis mesh checks did not return numElements (%s)" % str(exc)
+
+    counts = {'total_elements': total_elements}
+    for result_key, count_key in (('failedElements', 'analysis_errors'),
+                                  ('warningElements', 'analysis_warnings'),
+                                  ('naElements', 'not_applicable')):
+        try:
+            counts[count_key] = len(quality[result_key])
+        except Exception as exc:
+            return None, "Abaqus analysis mesh checks did not return %s (%s)" % (result_key, str(exc))
+    return counts, None
+
+
 def validate_imported_model_ready():
     """Validate the imported-CAD set/mesh contract before generating any output."""
     model = mdb.models['Model-1']
@@ -325,6 +350,27 @@ def validate_imported_model_ready():
                 errors.append("Missing expected aggregate set: %s." % expected_aggregate)
         else:
             _validation_log("[VALIDATION] layer_n: %d [OK]" % requested_layers)
+
+    quality, quality_error = _mesh_quality_summary(assembly)
+    if quality_error is not None:
+        errors.append("Mesh analysis checks unavailable: %s." % quality_error)
+    else:
+        total_elements = quality['total_elements']
+        analysis_errors = quality['analysis_errors']
+        analysis_warnings = quality['analysis_warnings']
+        not_applicable = quality['not_applicable']
+        _validation_log("[MESH] Total elements: %d" % total_elements)
+        _validation_log("[MESH] Analysis errors: %d [%s]" %
+                        (analysis_errors, 'FAIL' if analysis_errors else 'OK'))
+        _validation_log("[MESH] Analysis warnings: %d [%s]" %
+                        (analysis_warnings, 'WARNING' if analysis_warnings else 'OK'))
+        if total_elements > 0:
+            _validation_log("[MESH] Warning fraction: %.2f%%" %
+                            (100.0 * analysis_warnings / total_elements))
+        if not_applicable:
+            _validation_log("[MESH] Not-applicable elements: %d" % not_applicable)
+        if analysis_errors:
+            errors.append("Mesh contains %d elements that fail Abaqus analysis checks." % analysis_errors)
 
     if errors:
         failure_lines = ["[VALIDATION] FAIL - model is not ready for input generation."]
