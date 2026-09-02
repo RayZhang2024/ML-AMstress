@@ -116,10 +116,12 @@ class Worker(QtCore.QThread):
     output = QtCore.pyqtSignal(str)
     finished = QtCore.pyqtSignal(int)
 
-    def __init__(self, cmd, cwd=None):
+    def __init__(self, cmd, cwd=None, failure_markers=None):
         super().__init__()
         self._cmd = cmd
         self._cwd = cwd
+        self._failure_markers = tuple(failure_markers or ())
+        self._saw_failure_marker = False
         self.proc = None
 
     def run(self):
@@ -140,10 +142,15 @@ class Worker(QtCore.QThread):
             return
 
         for line in self.proc.stdout:
+            if any(marker in line for marker in self._failure_markers):
+                self._saw_failure_marker = True
             self.output.emit(line.rstrip())
 
         self.proc.wait()
-        self.finished.emit(self.proc.returncode)
+        effective_code = self.proc.returncode
+        if effective_code == 0 and self._saw_failure_marker:
+            effective_code = 1
+        self.finished.emit(effective_code)
 
     def stop(self, kill_tree: bool = False):
         if not self.proc or self.proc.poll() is not None:
@@ -167,7 +174,8 @@ class Worker(QtCore.QThread):
             self.output.emit(f"[Worker] 停止失败：{e}")
 
 class LaunchMixin:
-    def _launch(self, cmd, cwd, log, run_button, stop_button=None, on_finished_extra=None, clear_log=False):
+    def _launch(self, cmd, cwd, log, run_button, stop_button=None, on_finished_extra=None,
+                clear_log=False, failure_markers=None, on_finished_always=None):
         exe = cmd[0]
         if shutil.which(exe) is None:
             QtWidgets.QMessageBox.critical(self, tr("Executable not found"),
@@ -191,7 +199,7 @@ class LaunchMixin:
         if stop_button is not None:
             stop_button.setEnabled(True)
 
-        self._worker = Worker(cmd, cwd)
+        self._worker = Worker(cmd, cwd, failure_markers=failure_markers)
         if hasattr(log, "appendPlainText"):
             self._worker.output.connect(log.appendPlainText)
         else:
@@ -205,6 +213,8 @@ class LaunchMixin:
                 log.appendPlainText(f"\n=== finished (exit {code}) ===\n")
             else:
                 log.append(f"\n=== finished (exit {code}) ===\n")
+            if callable(on_finished_always):
+                on_finished_always()
             if code == 0 and callable(on_finished_extra):
                 on_finished_extra()
 
@@ -790,6 +800,16 @@ class InputAndUtempTab(QtWidgets.QWidget, LaunchMixin):
 
         self._tmpdir = None
 
+    def _append_validation_report(self, report_path):
+        try:
+            report_text = report_path.read_text("utf-8")
+        except (IOError, OSError, UnicodeError):
+            return
+        if not report_text:
+            return
+        for line in report_text.splitlines():
+            self.log.appendPlainText(line)
+
     def _pick_cae(self):
         f, _ = QtWidgets.QFileDialog.getOpenFileName(self, tr("Select CAE file"), "", tr("CAE files (*.cae);;All files (*)"))
         if f: self.cae_le.setText(f)
@@ -814,6 +834,7 @@ class InputAndUtempTab(QtWidgets.QWidget, LaunchMixin):
 
         self._tmpdir = tempfile.TemporaryDirectory()
         patched = Path(self._tmpdir.name) / "create_input_patched.py"
+        validation_report = Path(self._tmpdir.name) / "validation_report.txt"
 
         # persist for this session
         self.settings["ht_input_enabled"] = bool(self.ht_input_chk.isChecked())
@@ -834,6 +855,7 @@ class InputAndUtempTab(QtWidgets.QWidget, LaunchMixin):
         self.settings["axis_zero"]  = axis_zero
         
         txt = (
+            f"VALIDATION_REPORT_FILE = {validation_report.as_posix()!r}\n"
             f"CAE_FILE = r'{cae_file}'\n"
             f"COORD_IDX = {coord_idx}\n"
             f"AXIS_ZERO = {axis_zero}\n"
@@ -880,7 +902,9 @@ layer_sp     = {self.layer_sp.value()}
         for w in warnings: self.log.appendPlainText("[警告] " + w)
 
         cmd = [self.settings.get("abaqus_cmd", DEFAULT_ABAQUS_CMD), "cae", f"noGUI={patched}"]
-        self._launch(cmd, out_dir, self.log, self.run_btn, stop_button=self.stop_btn)
+        self._launch(cmd, out_dir, self.log, self.run_btn, stop_button=self.stop_btn,
+                     failure_markers=("[VALIDATION] FAIL", "Abaqus Error:"),
+                     on_finished_always=lambda: self._append_validation_report(validation_report))
 
 
 # --------------------------- Data Extract Tab (NEW) ---------------------------

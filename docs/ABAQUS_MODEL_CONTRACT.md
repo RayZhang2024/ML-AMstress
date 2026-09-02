@@ -6,7 +6,7 @@ This document separates current implementation behavior from engineering invaria
 
 At part level, imported models use `BASE` for cells at or below the build-axis zero and `BUILD_ALL` for the build region. At assembly level, `set-0` is the base, `set-1` through `set-N` are consecutive build-layer slabs, and `set-(N+1)` is the aggregate whole-build region. The legacy parametric script uses equivalent capitalized `Set-*` names in places, so callers must preserve the naming convention of the path they invoke.
 
-Current code creates layer sets from consecutive slab edges and the material script infers layer counts. It can warn and continue when a required assembly set is missing; there is no completed pre-input validation layer, and geometry-only sets can exist before meshing. The engineering invariant/Phase-1 target is that numbering is contiguous, every required layer exists and contains elements after meshing, missing or empty sets produce clear diagnostics, and invalid input generation is prevented. Required `ModelChange` regions must not be undefined or empty once that safety layer exists.
+Current code creates layer sets from consecutive slab edges and the material script infers layer counts. For models containing `ImportedPart`, `create_input.py` now enforces a pre-input gate: it infers the lower-case assembly-set sequence, uses geometry-cell membership to verify the aggregate as the union of build-layer cells (with the one-layer `set-1`/`set-2` equal-geometry case handled explicitly), requires that aggregate to be named `set-(N+1)`, checks `set-0` and contiguous layer numbering, requires direct `set.elements` mesh membership for every required set, and compares the inferred count with GUI-injected `layer_n`. Geometry cells are used for membership and aggregate identification only; assembly-cell `Cell.getElements()` is not required. It raises before any `.inp`, UTEMP `.for`, or `submit.bat` output on failure; a terminal numbered set is never accepted as the aggregate without the geometry-union check. The gate deliberately does not impose the lower-case imported contract on legacy parametric models. Numerical mesh-quality validation and prevention of invalid `ModelChange` creation remain later Phase-1 work.
 
 ## Steps and ModelChange interactions
 
@@ -25,7 +25,7 @@ The legacy parametric script follows the same conceptual sequence but has older 
 
 ## Meshing
 
-The active imported-CAD mesher globally seeds with `BASE_SEED`, applies build/base directional reseeding, sets `FREE + TET` controls for all cells, and assigns C3D10 by default (or C3D4 when explicitly requested). Earlier sweep/hex C3D8R and mixed strategies in the file are commented-out legacy implementations. The active all-tet strategy is the robust default for arbitrary imported CAD. The Phase-1 safety target is to validate element membership in every required layer before writing inputs; that validation is not yet implemented.
+The active imported-CAD mesher globally seeds with `BASE_SEED`, applies build/base directional reseeding, sets `FREE + TET` controls for all cells, and assigns C3D10 by default (or C3D4 when explicitly requested). Earlier sweep/hex C3D8R and mixed strategies in the file are commented-out legacy implementations. The active all-tet strategy is the robust default for arbitrary imported CAD. `create_input.py` now validates element membership in every required imported layer before writing inputs; numerical mesh-quality checks remain out of scope.
 
 ## Boundary conditions and temperature
 
