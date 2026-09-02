@@ -262,9 +262,17 @@ def validate_imported_model_ready():
             print("[VALIDATION] layer_n: %d [OK]" % requested_layers)
 
     if errors:
+        failure_lines = ["[VALIDATION] FAIL - model is not ready for input generation."]
         for error in errors:
-            print("[VALIDATION][ERROR] %s" % error)
-        raise RuntimeError("[VALIDATION] FAIL - model is not ready for input generation.")
+            detail = "[VALIDATION][ERROR] %s" % error
+            print(detail)
+            failure_lines.append(detail)
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except Exception:
+                pass
+        raise RuntimeError("\n".join(failure_lines))
 
     print("[VALIDATION] PASS - model is ready for input generation")
 
