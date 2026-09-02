@@ -83,23 +83,28 @@ def _element_key(element):
 
 
 def _set_membership(set_obj):
-    """Collect both direct elements and elements associated with geometry cells."""
+    """Collect geometry-cell and direct mesh-element membership separately."""
     element_keys = set()
     cell_keys = set()
     errors = []
 
     try:
         direct_elements = set_obj.elements
-    except AttributeError:
-        direct_elements = ()
     except Exception as exc:
-        direct_elements = ()
-        errors.append("cannot read direct elements (%s)" % str(exc))
-    try:
-        for element in direct_elements:
-            element_keys.add(_element_key(element))
-    except Exception as exc:
-        errors.append("cannot iterate direct elements (%s)" % str(exc))
+        errors.append("cannot access direct mesh elements; inspect set.elements (%s)" % str(exc))
+    else:
+        try:
+            direct_count = len(direct_elements)
+        except Exception:
+            direct_count = None
+        try:
+            for element in direct_elements:
+                element_keys.add(_element_key(element))
+        except Exception as exc:
+            errors.append("cannot iterate direct mesh elements; inspect set.elements (%s)" % str(exc))
+        else:
+            if direct_count == 0 or (direct_count is None and not element_keys):
+                errors.append("has zero mesh elements")
 
     try:
         cells = set_obj.cells
@@ -116,16 +121,6 @@ def _set_membership(set_obj):
                 errors.append("cannot identify a geometry cell")
                 continue
             cell_keys.add(key)
-            try:
-                cell_elements = cell.getElements()
-            except Exception as exc:
-                errors.append("cell mesh lookup failed (%s)" % str(exc))
-                continue
-            try:
-                for element in cell_elements:
-                    element_keys.add(_element_key(element))
-            except Exception as exc:
-                errors.append("cannot iterate cell mesh elements (%s)" % str(exc))
     except Exception as exc:
         errors.append("cannot iterate geometry cells (%s)" % str(exc))
 
