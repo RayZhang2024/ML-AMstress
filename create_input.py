@@ -82,6 +82,18 @@ def _element_key(element):
         return (instance_name, id(element))
 
 
+def _validation_log(message):
+    """Write validation status to the GUI-captured Abaqus stream immediately."""
+    try:
+        sys.stderr.write("%s\n" % message)
+        sys.stderr.flush()
+    except Exception:
+        try:
+            print(message)
+        except Exception:
+            pass
+
+
 def _set_membership(set_obj):
     """Collect geometry-cell and direct mesh-element membership separately."""
     element_keys = set()
@@ -131,10 +143,10 @@ def validate_imported_model_ready():
     """Validate the imported-CAD set/mesh contract before generating any output."""
     model = mdb.models['Model-1']
     if 'ImportedPart' not in model.parts.keys():
-        print("[VALIDATION] Legacy/non-imported model detected; imported-CAD readiness check not applied.")
+        _validation_log("[VALIDATION] Legacy/non-imported model detected; imported-CAD readiness check not applied.")
         return
 
-    print("[VALIDATION] Imported model readiness check")
+    _validation_log("[VALIDATION] Imported model readiness check")
     assembly = model.rootAssembly
     indices = _imported_set_indices(assembly)
     errors = []
@@ -216,7 +228,7 @@ def validate_imported_model_ready():
                 errors.append("Could not independently identify an aggregate set as the union of build-layer geometry.")
 
     if actual_layers is not None:
-        print("[VALIDATION] Detected build layers: %d" % actual_layers)
+        _validation_log("[VALIDATION] Detected build layers: %d" % actual_layers)
 
     required_indices = [0] + positive_indices
     if aggregate_index is not None and aggregate_index in required_indices:
@@ -228,7 +240,7 @@ def validate_imported_model_ready():
             continue
         element_count = len(membership[index][1])
         label = " (BUILD_ALL)" if aggregate_index is not None and index == aggregate_index else ""
-        print("[VALIDATION] %s%s: elements=%d" % (set_name, label, element_count))
+        _validation_log("[VALIDATION] %s%s: elements=%d" % (set_name, label, element_count))
         if element_count == 0:
             errors.append("%s has zero mesh elements." % set_name)
 
@@ -245,7 +257,7 @@ def validate_imported_model_ready():
         if actual_layers is None:
             errors.append("Cannot compare layer_n until the CAE layer count and aggregate are established.")
         elif actual_layers != requested_layers:
-            print("[VALIDATION] layer_n: %d [MISMATCH]" % requested_layers)
+            _validation_log("[VALIDATION] layer_n: %d [MISMATCH]" % requested_layers)
             errors.append("Layer count mismatch: CAE has %d build layers, Input & UTEMP layer_n is %d." %
                           (actual_layers, requested_layers))
             expected_aggregate = 'set-%d' % (requested_layers + 1)
@@ -254,13 +266,14 @@ def validate_imported_model_ready():
                         for index in range(0, requested_layers + 1))):
                 errors.append("Missing expected aggregate set: %s." % expected_aggregate)
         else:
-            print("[VALIDATION] layer_n: %d [OK]" % requested_layers)
+            _validation_log("[VALIDATION] layer_n: %d [OK]" % requested_layers)
 
     if errors:
         failure_lines = ["[VALIDATION] FAIL - model is not ready for input generation."]
+        _validation_log(failure_lines[0])
         for error in errors:
             detail = "[VALIDATION][ERROR] %s" % error
-            print(detail)
+            _validation_log(detail)
             failure_lines.append(detail)
         for stream in (sys.stdout, sys.stderr):
             try:
@@ -269,7 +282,7 @@ def validate_imported_model_ready():
                 pass
         raise RuntimeError("\n".join(failure_lines))
 
-    print("[VALIDATION] PASS - model is ready for input generation")
+    _validation_log("[VALIDATION] PASS - model is ready for input generation")
 
 
 validate_imported_model_ready()
