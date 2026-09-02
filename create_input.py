@@ -128,9 +128,6 @@ def _set_membership(set_obj):
                 element_keys.add(_element_key(element))
         except Exception as exc:
             errors.append("cannot iterate direct mesh elements; inspect set.elements (%s)" % str(exc))
-        else:
-            if direct_count == 0 or (direct_count is None and not element_keys):
-                errors.append("has zero mesh elements")
 
     try:
         cells = set_obj.cells
