@@ -290,7 +290,6 @@ def _resolve_heat_treatment_step(model, layer_count):
     for prefix, sequence in step_sequences.items():
         indices, post_removal = sequence
         candidate_index = max(post_removal)
-        candidate_name = '%s-%d' % (prefix, candidate_index)
         referenced_removals = sorted(set(removal_steps.get(prefix, [])))
         if referenced_removals:
             # The base removal must be present, and the HT step must be the
@@ -299,19 +298,6 @@ def _resolve_heat_treatment_step(model, layer_count):
                 continue
             if candidate_index != max(referenced_removals) + 1:
                 continue
-            candidates.append((prefix, candidate_index))
-            continue
-
-        # Normal Step-* models created by apply_materials.py carry the
-        # explicit 0.05 HT marker. Keep this compatibility path, but still
-        # require the marker to be the final post-removal step.
-        if prefix != 'Step':
-            continue
-        try:
-            candidate_period = float(model.steps[candidate_name].timePeriod)
-        except Exception:
-            continue
-        if abs(candidate_period - 0.05) <= 1.0e-9:
             candidates.append((prefix, candidate_index))
 
     if len(candidates) == 1:

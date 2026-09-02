@@ -37,11 +37,6 @@ class MockModel(object):
 
 
 class HeatTreatmentStepTests(unittest.TestCase):
-    def test_normal_step_uses_explicit_heat_treatment_period(self):
-        model = MockModel('Step', 6, {}, period=1.0)
-        model.steps['Step-6'].timePeriod = 0.05
-        self.assertEqual(resolve_heat_treatment_step(model, 2), (6, None))
-
     def test_normal_step_uses_modelchange_history(self):
         model = MockModel('Step', 6, {'Int-4': 5}, period=1.0)
         self.assertEqual(resolve_heat_treatment_step(model, 2), (6, None))
@@ -60,6 +55,12 @@ class HeatTreatmentStepTests(unittest.TestCase):
             'Int-bottom-1': 6,
             'Int-bottom-2': 7,
         })
+        step, error = resolve_heat_treatment_step(model, 2)
+        self.assertIsNone(step)
+        self.assertIn('no distinct post-removal', error)
+
+    def test_missing_interaction_history_fails_even_with_unit_period(self):
+        model = MockModel('Step', 6, {}, period=1.0)
         step, error = resolve_heat_treatment_step(model, 2)
         self.assertIsNone(step)
         self.assertIn('no distinct post-removal', error)
