@@ -38,6 +38,19 @@ try:
 except NameError:
     # Legacy/non-imported models retain the historical layer_n + 4 behavior.
     HT_STEP_INDEX = None
+
+# Abaqus job/submission resources injected by the Input & UTEMP GUI.  These
+# conservative defaults keep direct/manual execution possible without making
+# the GUI's values dependent on hidden hardware detection.
+try:
+    NUM_CPUS
+except NameError:
+    NUM_CPUS = 1
+
+try:
+    NUM_GPUS
+except NameError:
+    NUM_GPUS = 0
 # ------------------------------------------------------
 
 
@@ -508,6 +521,11 @@ validate_imported_model_ready()
 
 
 def create_input (temp_step, temp_initial,temp_interval, grad_step, grad_initial, grad_interval):
+    # Start each generation with a fresh submission script.  The sweep below
+    # intentionally appends one command per generated job.
+    with open('submit.bat', 'w') as fid:
+        pass
+
     for x in range (temp_step):
     
         temp = temp_initial+temp_interval*(x)
@@ -519,8 +537,8 @@ def create_input (temp_step, temp_initial,temp_interval, grad_step, grad_initial
                  memoryUnits=PERCENTAGE, getMemoryFromAnalysis=True, 
                  explicitPrecision=SINGLE, nodalOutputPrecision=SINGLE, echoPrint=OFF, 
                  modelPrint=OFF, contactPrint=OFF, historyPrint=OFF, userSubroutine='', 
-                 scratch='', resultsFormat=ODB, multiprocessingMode=DEFAULT, numCpus=1, 
-                 numGPUs=0)
+                 scratch='', resultsFormat=ODB, multiprocessingMode=DEFAULT, numCpus=NUM_CPUS,
+                 numGPUs=NUM_GPUS)
             mdb.jobs[str(temp)+'-'+str(temp_gradient)].writeInput(consistencyChecking=OFF)
 
 
@@ -625,7 +643,7 @@ for x in range (temp_step):
             fid.write("      END\n")
             
         fid=open('submit.bat','a')
-        fid.write("call abq2021 job="+str(temp)+"-"+str(temp_gradient)+" user="+str(temp)+"-"+str(temp_gradient)+" cpus=14 gpus=1 int \n")
+        fid.write("call abq2021 job="+str(temp)+"-"+str(temp_gradient)+" user="+str(temp)+"-"+str(temp_gradient)+" cpus="+str(NUM_CPUS)+" gpus="+str(NUM_GPUS)+" int \n")
         fid.write("del "+str(temp)+"-"+str(temp_gradient)+".sta \n")
         # fid.write("del "+str(temp)+"-"+str(temp_gradient)+".dat \n")
         fid.write("del "+str(temp)+"-"+str(temp_gradient)+".prt \n")
