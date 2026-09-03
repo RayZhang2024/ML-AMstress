@@ -953,6 +953,20 @@ class InputAndUtempTab(QtWidgets.QWidget, LaunchMixin):
         hl_cae = QtWidgets.QHBoxLayout(); hl_cae.addWidget(self.cae_le); hl_cae.addWidget(cae_btn)
         form.addRow(tr("CAE file"), hl_cae)
 
+        # Abaqus execution resources for this Input & UTEMP generation run.
+        # The values are visible, editable, and persisted in normal GUI
+        # settings; _run_all snapshots these exact widget values for both
+        # create_input.py and the generated submit.bat.
+        self.cpu_count_sp = QtWidgets.QSpinBox()
+        self.cpu_count_sp.setRange(1, 1000000)
+        self.cpu_count_sp.setValue(int(self.settings.get("num_cpus", 1)))
+        form.addRow(tr("CPU count"), self.cpu_count_sp)
+
+        self.gpu_count_sp = QtWidgets.QSpinBox()
+        self.gpu_count_sp.setRange(0, 1000000)
+        self.gpu_count_sp.setValue(int(self.settings.get("num_gpus", 0)))
+        form.addRow(tr("GPU count (0 = CPU-only)"), self.gpu_count_sp)
+
         # --- Add this right after the CAE file picker rows in InputAndUtempTab.__init__ ---
         
         # Build axis + zero plane (for UTEMP)
@@ -1073,6 +1087,10 @@ class InputAndUtempTab(QtWidgets.QWidget, LaunchMixin):
         # persist for this session
         self.settings["ht_input_enabled"] = bool(self.ht_input_chk.isChecked())
         self.settings["ht_temp_c"] = float(self.ht_temp_ds.value())
+        num_cpus = int(self.cpu_count_sp.value())
+        num_gpus = int(self.gpu_count_sp.value())
+        self.settings["num_cpus"] = num_cpus
+        self.settings["num_gpus"] = num_gpus
 
 
         src = helper_paths["create_input.py"].read_text("utf-8")
@@ -1095,6 +1113,8 @@ class InputAndUtempTab(QtWidgets.QWidget, LaunchMixin):
             f"AXIS_ZERO = {axis_zero}\n"
             f"HT_ENABLED = {1 if self.ht_input_chk.isChecked() else 0}\n"
             f"HT_TEMP_C  = {float(self.ht_temp_ds.value())}\n"
+            f"NUM_CPUS = {num_cpus}\n"
+            f"NUM_GPUS = {num_gpus}\n"
             + src
         )
 
@@ -2804,6 +2824,8 @@ class MainWindow(QtWidgets.QMainWindow):
             s.setdefault("ht_build_enabled", False)
             s.setdefault("ht_input_enabled", False)
             s.setdefault("ht_temp_c", 650.0)
+            s.setdefault("num_cpus", 1)
+            s.setdefault("num_gpus", 0)
             
             # Back-compat: if old 'ht_enabled' exists, seed both (one-time effect)
             if "ht_enabled" in s:
@@ -2825,6 +2847,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "ht_build_enabled": False,
             "ht_input_enabled": False,
             "ht_temp_c": 650.0,
+            "num_cpus": 1,
+            "num_gpus": 0,
 
 
         }
