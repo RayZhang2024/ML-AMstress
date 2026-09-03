@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -35,6 +36,28 @@ class CpuGpuResourceTests(unittest.TestCase):
         self.assertIn('" cpus="+str(NUM_CPUS)+" gpus="+str(NUM_GPUS)',
                       self.input_source)
         self.assertNotIn("cpus=14 gpus=1", self.input_source)
+
+    def test_successive_generations_replace_submit_commands(self):
+        reset = self.input_source.index("with open('submit.bat', 'w')")
+        sweep = self.input_source.index("for x in range (temp_step):")
+        append = self.input_source.index("fid=open('submit.bat','a')")
+        self.assertLess(reset, sweep)
+        self.assertLess(sweep, append)
+
+        # Regression model for the two-run file lifecycle: truncation happens
+        # once before the current run's append-only sweep.
+        with tempfile.TemporaryDirectory() as tmp:
+            submit = Path(tmp) / "submit.bat"
+
+            def write_run(cpu, gpu):
+                submit.write_text("", encoding="utf-8")
+                with submit.open("a", encoding="utf-8") as fid:
+                    fid.write("cpus=%d gpus=%d\\n" % (cpu, gpu))
+
+            write_run(4, 0)
+            write_run(12, 1)
+            self.assertEqual(submit.read_text(encoding="utf-8"),
+                             "cpus=12 gpus=1\\n")
 
 
 if __name__ == "__main__":

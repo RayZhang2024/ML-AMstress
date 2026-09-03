@@ -521,6 +521,11 @@ validate_imported_model_ready()
 
 
 def create_input (temp_step, temp_initial,temp_interval, grad_step, grad_initial, grad_interval):
+    # Start each generation with a fresh submission script.  The sweep below
+    # intentionally appends one command per generated job.
+    with open('submit.bat', 'w') as fid:
+        pass
+
     for x in range (temp_step):
     
         temp = temp_initial+temp_interval*(x)
