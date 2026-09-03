@@ -1,0 +1,5 @@
+# Optional GUI-side visualization backend.  The core GUI remains usable
+# without these packages; VisualizationPanel shows an unavailable state.
+pyvista>=0.40
+pyvistaqt>=0.11
+vtk>=9.2

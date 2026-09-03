@@ -38,6 +38,7 @@ from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as Navigatio
 from matplotlib.figure import Figure
 
 from PyQt5 import QtCore, QtGui, QtWidgets
+from visualization_panel import VisualizationPanel
 
 
 
@@ -1809,6 +1810,7 @@ class DataAlignmentTab(QtWidgets.QWidget):
         left_box.addWidget(hint)
 
         # Right plot area
+        self.viewer = VisualizationPanel(self)
         self.fig = Figure(figsize=(6, 5))
         self.ax = self.fig.add_subplot(111, projection="3d")
         self.canvas = FigureCanvas(self.fig)
@@ -1841,14 +1843,26 @@ class DataAlignmentTab(QtWidgets.QWidget):
         clear_btn = QtWidgets.QPushButton(tr("Clear plot"))
         clear_btn.clicked.connect(self._clear_plot)
         view_btns.addWidget(clear_btn)
+        reset_viewer_btn = QtWidgets.QPushButton(tr("Reset viewer camera"))
+        reset_viewer_btn.clicked.connect(self.viewer.reset_camera)
+        view_btns.addWidget(reset_viewer_btn)
 
         right = QtWidgets.QVBoxLayout()
+        right.addWidget(self.viewer, 1)
         right.addLayout(view_btns)
         right.addWidget(self.toolbar)
-        right.addWidget(self.canvas, 1)
+        right.addWidget(self.canvas, 2)
 
-        layout.addLayout(left_box, 0)
-        layout.addLayout(right, 1)
+        left_widget = QtWidgets.QWidget()
+        left_widget.setLayout(left_box)
+        right_widget = QtWidgets.QWidget()
+        right_widget.setLayout(right)
+        self._splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self._splitter.addWidget(left_widget)
+        self._splitter.addWidget(right_widget)
+        self._splitter.setStretchFactor(0, 0)
+        self._splitter.setStretchFactor(1, 1)
+        layout.addWidget(self._splitter)
 
         self._setup_shortcuts()
         self._update_plot()
@@ -1898,6 +1912,7 @@ class DataAlignmentTab(QtWidgets.QWidget):
         self.float_points = None
         self.ref_le.clear()
         self.float_le.clear()
+        self.viewer.clear()
         self._update_plot()
 
     def _read_xyz(self, path: str) -> np.ndarray:
@@ -2213,6 +2228,15 @@ class DataAlignmentTab(QtWidgets.QWidget):
             self._colorbar.ax.set_visible(False)
 
         self.canvas.draw_idle()
+        point_sets = []
+        if self.ref_points is not None:
+            point_sets.append(self.ref_points)
+        if tf is not None:
+            point_sets.append(tf)
+        if point_sets:
+            self.viewer.show_points(np.vstack(point_sets))
+        else:
+            self.viewer.clear()
 # --------------------------- Batch Submit Tab ---------------------------
 class BatchSubmitTab(QtWidgets.QWidget, LaunchMixin):
     def __init__(self, settings):

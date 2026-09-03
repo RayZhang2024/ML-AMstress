@@ -4,7 +4,7 @@ This document describes the repository as it exists today. The final section is 
 
 ## Current components and runtime split
 
-`AM_gui_v7.py` is the Python 3/PyQt5 entry point. It owns the window and tabs, settings, process workers, temporary patched-script creation, file selection, plotting/alignment utilities, batch submission, and ML training/prediction orchestration. GUI-side data work uses pandas/NumPy/matplotlib and the ML tab uses scikit-learn, Optuna, and joblib.
+`AM_gui_v7.py` is the Python 3/PyQt5 entry point. It owns the window and tabs, settings, process workers, temporary patched-script creation, file selection, plotting/alignment utilities, batch submission, and ML training/prediction orchestration. GUI-side data work uses pandas/NumPy/matplotlib and the ML tab uses scikit-learn, Optuna, and joblib. The optional `VisualizationPanel` lives in `visualization_panel.py` so tabs can share viewer lifecycle behavior without sharing viewer state.
 
 The Abaqus-side scripts run in the Abaqus/CAE 2021 environment, not in the GUI's Python interpreter:
 
@@ -40,4 +40,15 @@ The current `MainWindow` loads and saves `SCRIPT_DIR / "am_gui_settings.json"`. 
 
 ## Technical debt and target direction
 
-The GUI is a large single module; workflow chaining, configuration injection, Abaqus execution, validation, visualization, and ML concerns are coupled. The intended direction is a structured configuration boundary, smaller orchestration modules, explicit validation before input generation, and a neutral Abaqus export consumed by a PyVista/PyVistaQt viewer. No such viewer or validation layer is implemented by Issue #1.
+The GUI remains a large single module; workflow chaining, configuration injection, Abaqus execution, validation, visualization, and ML concerns are still partly coupled. The shared viewer foundation now provides a reusable clear/reset/content-replacement API and a resizable left-controls/right-viewer `QSplitter` pattern in Data Alignment. PyVista/PyVistaQt/VTK are optional GUI-side dependencies listed in `requirements-visualization.txt`; if unavailable, the viewer reports an empty/unavailable state and existing calculations continue through the Matplotlib plot.
+
+## Visualization boundary
+
+`DataAlignmentTab` owns its `VisualizationPanel` instance and may display GUI-side point data through `show_points(...)`; it does not read Abaqus `.cae` files. Future model/mesh views should use an Abaqus-side exporter that writes a neutral format (for example `.vtu`/`.vtk` plus metadata), which the normal Python GUI can load into an independent panel:
+
+```text
+Abaqus helper/runtime -> visualization export (.vtu/.vtk + metadata)
+                       -> GUI VisualizationPanel (PyVista/PyVistaQt)
+```
+
+The current integration is intentionally limited to a simple point-cloud path, empty state, clear, camera reset, and safe replacement of displayed content.
