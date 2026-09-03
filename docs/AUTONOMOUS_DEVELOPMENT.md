@@ -5,6 +5,9 @@ ML-AMstress repository. It is governance and documentation only. It does not
 enable autonomous production-code execution, GitHub Actions, automatic merges,
 or any other automation.
 
+Deterministic issue labels, dependency syntax, eligibility checks, and state
+transitions are defined in [AUTONOMOUS_ORCHESTRATION.md](AUTONOMOUS_ORCHESTRATION.md).
+
 ## Work-unit rules
 
 - One issue per branch and pull request. Do not mix unrelated fixes or
