@@ -70,7 +70,7 @@ class AutonomousOrchestrationDocumentationTests(unittest.TestCase):
             self.assertIn(section, self.template)
         self.assertIn('labels: ""', self.template)
         self.assertIn("- none", self.template)
-        self.assertNotIn(".github/workflows", self.orchestration)
+        self.assertIn(".github/workflows/codex-green-worker.yml", self.orchestration)
         self.assertIn("does not activate Codex workers", self.orchestration)
 
 

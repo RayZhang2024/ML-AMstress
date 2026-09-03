@@ -34,6 +34,42 @@ heat-treatment, and governance regression modules. The compile check covers
 the Python 3 GUI and dual-runtime data-extraction entry point; it is not an
 Abaqus/CAE compatibility or solver check.
 
+## GREEN Codex worker (Issue #28)
+
+The first worker is intentionally narrow. It runs only from an `issues:
+labeled` event whose label is `agent:codex`; it then re-fetches the issue and
+fails closed unless the issue is open, has exactly `status:ready` and
+`risk:green`, has a valid autonomous contract, has satisfied dependencies, and
+has no competing branch or open PR. A deterministic `codex/issue-<number>-<slug>`
+ref is created as the claim lock before the issue is marked
+`status:in-progress`. The worker runs Codex on that branch, rejects any diff
+outside GREEN paths (`.github/`, `docs/`, `scripts/`, `tests/`, and the small
+governance-file allowlist), runs the normal-Python checks, pushes once, opens
+one PR against `main`, and changes the issue to `status:review` only after PR
+creation. Failures preserve the branch and report `status:blocked`; no merge or
+auto-merge operation is available.
+
+The workflow requires these names only (never their values):
+
+- `OPENAI_API_KEY` — GitHub Actions secret used by the Codex CLI. It is passed
+  only through the process environment and is never printed or placed in a
+  prompt/comment/PR.
+- `GITHUB_TOKEN` — GitHub's built-in token, supplied automatically. The
+  workflow requests `contents: write` to create/push the single claim branch,
+  `issues: write` to record labels/comments, and `pull-requests: write` to open
+  the review PR. No narrower GitHub permission can perform those three API
+  operations; the worker code has no merge endpoint.
+- `CODEX_CLI_PACKAGE` — repository variable naming a maintainer-approved,
+  pinned `@openai/codex` package version for `npm install`; it is configuration,
+  not a secret. The workflow fails before the worker if it is absent.
+
+Before enabling the label trigger, a maintainer must set the pinned package
+variable and `OPENAI_API_KEY`, verify organization secret policies, and run one
+controlled test issue that changes only documentation/tests. Do not use a
+personal broad-scope token or print credentials in Actions logs. The worker's
+automated tests use fakes and do not invoke Codex; this controlled integration
+test remains manual.
+
 ## Paths and reproducibility
 
 Do not add developer-specific absolute paths to source or default configuration. Use user-selected paths, repository-relative paths, or documented placeholders. The GUI may generate temporary absolute paths at runtime; those are artifacts, not defaults to commit.
