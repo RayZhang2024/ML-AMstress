@@ -34,9 +34,9 @@ The Submit Jobs tab runs a selected batch file. Intel Fortran/Visual Studio setu
 
 The Data Extract tab injects ODB directory, output, plane/IDW, variable, step/frame, and volume-averaging parameters into `data_extract.py`, then runs it with Abaqus. It produces CSV outputs. Data Alignment is GUI-side point-cloud transformation/interpolation and plotting. The ML tab writes and runs GUI-side training or prediction scripts and persists model artifacts through joblib.
 
-## Settings and regex patching
+## Settings and helper resolution
 
-The current `MainWindow` directly loads and saves `SCRIPT_DIR / "am_gui_settings.json"`, where `SCRIPT_DIR` is the bundled/repository script directory. The file contains machine-specific command and helper-script paths, which is technical debt; the current code does not yet provide a separate user-config abstraction. Runtime values are injected by line-oriented `re.sub`/`re.subn` replacements, with fallback parameter blocks and warnings when anchors are absent.
+The current `MainWindow` loads and saves `SCRIPT_DIR / "am_gui_settings.json"`. The six Abaqus helper scripts are application resources: normal execution resolves them from one runtime/resource directory associated with the running GUI. An advanced, explicit external-helper-directory override can resolve the complete fixed-name helper set from another directory; it is confirmed with Continue/Cancel before Abaqus starts. The GUI does not silently mix independently configured helper files. Existing six-path settings are archived and migrated only when they form one coherent directory; incomplete or mixed legacy values are inactive and reported, while unrelated settings are preserved. Missing required helper files fail before launch without falling back to another directory. Runtime values are still injected by line-oriented `re.sub`/`re.subn` replacements, with fallback parameter blocks and warnings when anchors are absent.
 
 ## Technical debt and target direction
 

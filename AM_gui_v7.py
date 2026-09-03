@@ -42,16 +42,131 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 
 __version__ = "0.6.0"
-SCRIPT_DIR = Path(__file__).resolve().parent
+HELPER_FILENAMES = (
+    "build_cae.py",
+    "create_input.py",
+    "import_and_partition.py",
+    "apply_materials.py",
+    "apply_meshing.py",
+    "apply_boundary.py",
+)
+HELPER_SETTING_KEYS = (
+    "build_script",
+    "input_script",
+    "import_script",
+    "apply_materials_script",
+    "apply_meshing_script",
+    "apply_boundary_script",
+)
+
+
+def _runtime_resource_dir():
+    """Return the directory containing the active GUI resources."""
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    if frozen_root:
+        return Path(frozen_root).expanduser().resolve()
+    return Path(__file__).resolve().parent
+
+
+SCRIPT_DIR = _runtime_resource_dir()
+DEFAULT_HELPER_ROOT = SCRIPT_DIR
 
 DEFAULT_ABAQUS_CMD    = "C:/SIMULIA/Commands/abq2021.bat"
-DEFAULT_BUILD_SCRIPT  = SCRIPT_DIR / "build_cae.py"
-DEFAULT_INPUT_SCRIPT  = SCRIPT_DIR / "create_input.py"
-DEFAULT_IMPORT_SCRIPT = SCRIPT_DIR / "import_and_partition.py"
-DEFAULT_APPLY_MAT_SCRIPT = SCRIPT_DIR / "apply_materials.py"
-DEFAULT_MESH_SCRIPT   = SCRIPT_DIR / "apply_meshing.py"
-# NEW: boundary template
-DEFAULT_APPLY_BC_SCRIPT = SCRIPT_DIR / "apply_boundary.py"
+
+
+def _setting_bool(value):
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+def _effective_helper_root(settings, runtime_dir=None):
+    runtime = Path(runtime_dir or DEFAULT_HELPER_ROOT).expanduser().resolve()
+    if _setting_bool(settings.get("use_external_helper_root", False)):
+        raw_root = str(settings.get("external_helper_root", "")).strip()
+        if not raw_root:
+            return None, True
+        return Path(raw_root).expanduser().resolve(), True
+    return runtime, False
+
+
+def _helper_paths_for_names(settings, names, runtime_dir=None):
+    root, external = _effective_helper_root(settings, runtime_dir)
+    if root is None:
+        return None, external
+    return [(name, root / name) for name in names], external
+
+
+def _build_helper_names(import_mode, materials_enabled=False, boundary_enabled=False):
+    if not import_mode:
+        return ["build_cae.py"]
+    names = ["import_and_partition.py", "apply_meshing.py"]
+    if materials_enabled:
+        names.insert(1, "apply_materials.py")
+    if boundary_enabled:
+        names.append("apply_boundary.py")
+    return names
+
+
+def _missing_helper_paths(script_paths):
+    return [(name, path) for name, path in script_paths if not path.is_file()]
+
+
+def _migrate_legacy_helper_settings(settings, runtime_dir=None):
+    """Retire six independent helper paths without making them authoritative."""
+    legacy = {
+        key: settings[key]
+        for key in HELPER_SETTING_KEYS
+        if key in settings
+    }
+    if not legacy:
+        return settings
+
+    # Keep an inspectable copy for recovery, but remove the old keys from the
+    # active settings dictionary so a mixed set cannot be used accidentally.
+    settings.setdefault("_legacy_helper_paths", dict(legacy))
+    expected = dict(zip(HELPER_SETTING_KEYS, HELPER_FILENAMES))
+    coherent = set(legacy.keys()) == set(HELPER_SETTING_KEYS)
+    root = None
+    if coherent:
+        parents = []
+        for key in HELPER_SETTING_KEYS:
+            raw_path = str(legacy.get(key, "")).strip()
+            if not raw_path:
+                coherent = False
+                break
+            try:
+                resolved = Path(raw_path).expanduser().resolve()
+            except Exception:
+                coherent = False
+                break
+            if resolved.name.lower() != expected[key].lower():
+                coherent = False
+                break
+            parents.append(resolved.parent)
+        if coherent and parents and all(parent == parents[0] for parent in parents):
+            root = parents[0]
+
+    runtime = Path(runtime_dir or DEFAULT_HELPER_ROOT).expanduser().resolve()
+    if coherent and root is not None:
+        settings.setdefault("use_external_helper_root", root != runtime)
+        if root != runtime:
+            settings.setdefault("external_helper_root", str(root))
+            settings["_legacy_helper_paths_warning"] = (
+                "Legacy helper paths were migrated to the explicit external "
+                "helper directory: %s" % root
+            )
+        settings["_legacy_helper_paths_migrated"] = True
+    else:
+        settings.setdefault("use_external_helper_root", False)
+        settings["_legacy_helper_paths_warning"] = (
+            "Legacy helper paths were not a complete, coherent helper set and "
+            "are inactive. Application-relative helpers are now selected."
+        )
+
+    for key in legacy:
+        settings.pop(key, None)
+    return settings
 
 
 def _external_helper_paths(script_paths, runtime_dir=None):
@@ -198,19 +313,26 @@ class Worker(QtCore.QThread):
             self.output.emit(f"[Worker] 停止失败：{e}")
 
 class LaunchMixin:
-    def _confirm_helper_paths(self, workflow_name, script_paths):
+    def _confirm_helper_paths(self, workflow_name, script_paths, force=False):
         runtime_dir, mismatches = _external_helper_paths(script_paths)
-        if not mismatches:
+        if not mismatches and not force:
             return True
 
+        effective_root = Path(script_paths[0][1]).parent if script_paths else runtime_dir
         lines = [
             "GUI/runtime directory:",
             "  %s" % runtime_dir,
             "",
+            "Effective helper directory:",
+            "  %s" % effective_root,
+            "",
             "Configured helper scripts outside that directory:",
         ]
-        lines.extend("  %s: %s" % (label, path)
-                     for label, path in mismatches)
+        if mismatches:
+            lines.extend("  %s: %s" % (label, path)
+                         for label, path in mismatches)
+        else:
+            lines.append("  (external helper directory override is active)")
         lines.extend([
             "",
             "Continue to use these custom paths, or Cancel before Abaqus starts.",
@@ -226,6 +348,36 @@ class LaunchMixin:
         box.setDefaultButton(cancel_button)
         box.exec_()
         return box.clickedButton() is continue_button
+
+    def _prepare_helper_paths(self, workflow_name, names):
+        script_paths, external = _helper_paths_for_names(self.settings, names)
+        if script_paths is None:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Missing Abaqus helper directory",
+                "External helper directory override is enabled, but no directory is configured.\n"
+                "Choose a directory in Settings or disable the override.",
+            )
+            return None
+
+        missing = _missing_helper_paths(script_paths)
+        if missing:
+            details = "\n".join("  %s: %s" % item for item in missing)
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Missing Abaqus helper scripts",
+                "The %s workflow cannot start because required helper files are missing.\n\n%s"
+                % (workflow_name, details),
+            )
+            return None
+
+        legacy_warning = self.settings.get("_legacy_helper_paths_warning")
+        if legacy_warning and hasattr(self, "log"):
+            self.log.appendPlainText("[Helper paths] " + str(legacy_warning))
+
+        if not self._confirm_helper_paths(workflow_name, script_paths, force=external):
+            return None
+        return dict(script_paths)
 
     def _launch(self, cmd, cwd, log, run_button, stop_button=None, on_finished_extra=None,
                 clear_log=False, failure_markers=None, on_finished_always=None):
@@ -282,12 +434,6 @@ class BuildModelTab(QtWidgets.QWidget, LaunchMixin):
     def __init__(self, settings):
         super().__init__()
         self.settings = settings
-        self._build_tpl  = Path(self.settings.get("build_script", str(DEFAULT_BUILD_SCRIPT)))
-        self._import_tpl = Path(self.settings.get("import_script", str(DEFAULT_IMPORT_SCRIPT)))
-        self._apply_tpl  = Path(self.settings.get("apply_materials_script", str(DEFAULT_APPLY_MAT_SCRIPT)))
-        self._mesh_tpl   = Path(self.settings.get("apply_meshing_script", str(DEFAULT_MESH_SCRIPT)))
-        # NEW: boundary template path
-        self._apply_bc_tpl = Path(self.settings.get("apply_boundary_script", str(DEFAULT_APPLY_BC_SCRIPT)))
 
         form = QtWidgets.QFormLayout()
 
@@ -542,23 +688,21 @@ class BuildModelTab(QtWidgets.QWidget, LaunchMixin):
         return out_csv
 
     # ---- main run ----
-    def _helper_paths_for_run(self):
-        if self.mode_cb.currentIndex() == 0:
-            return [("build_cae.py", self._build_tpl)]
-
-        paths = [
-            ("import_and_partition.py", self._import_tpl),
-            ("apply_meshing.py", self._mesh_tpl),
-        ]
-        if self.base_xlsx_le.text().strip() and self.build_xlsx_le.text().strip():
-            paths.insert(1, ("apply_materials.py", self._apply_tpl))
-        if self.bc_chk.isChecked():
-            paths.append(("apply_boundary.py", self._apply_bc_tpl))
-        return paths
+    def _helper_names_for_run(self):
+        import_mode = self.mode_cb.currentIndex() == 1
+        materials_enabled = bool(
+            self.base_xlsx_le.text().strip() and self.build_xlsx_le.text().strip()
+        )
+        return _build_helper_names(
+            import_mode,
+            materials_enabled=materials_enabled,
+            boundary_enabled=self.bc_chk.isChecked(),
+        )
 
     def _run(self):
         import_mode = (self.mode_cb.currentIndex() == 1)
-        if not self._confirm_helper_paths("Build Model", self._helper_paths_for_run()):
+        helper_paths = self._prepare_helper_paths("Build Model", self._helper_names_for_run())
+        if helper_paths is None:
             return
 
         save_dir = Path(self.dir_le.text()).expanduser().resolve()
@@ -572,7 +716,7 @@ class BuildModelTab(QtWidgets.QWidget, LaunchMixin):
 
         if not import_mode:
             # ---- parametric path (patch your template) ----
-            tpl = self._build_tpl.read_text("utf-8")
+            tpl = helper_paths["build_cae.py"].read_text("utf-8")
             warnings = []
 
             shape_key = self.shape_cb.currentData() or self.shape_cb.currentText()
@@ -653,7 +797,7 @@ BOTTOM_LAYER_REMOVAL = {int(self.bottom_remove_sp.value())}
         axis_zero = float(self.axis_zero_sp.value())
 
         # Patch import template constants
-        tpl = self._import_tpl.read_text("utf-8")
+        tpl = helper_paths["import_and_partition.py"].read_text("utf-8")
         tpl = re.sub(r'^CAD_FILE\s*=.*',  'CAD_FILE = r"%s"' % ascii_cad.as_posix(), tpl, flags=re.M)
         tpl = re.sub(r'^SCALE\s*=.*',     'SCALE = %s' % float(self.scale_sp.value()), tpl, flags=re.M)
         tpl = re.sub(r'^LAYER_THK\s*=.*', 'LAYER_THK = %s' % float(self.layer_sp.value()), tpl, flags=re.M)
@@ -675,7 +819,7 @@ BOTTOM_LAYER_REMOVAL = {int(self.bottom_remove_sp.value())}
                 if not self.bc_chk.isChecked():
                     return
                 try:
-                    tpl3 = self._apply_bc_tpl.read_text("utf-8")
+                    tpl3 = helper_paths["apply_boundary.py"].read_text("utf-8")
                 except Exception as e:
                     self.log.appendPlainText("[边界条件] 无法读取 apply_boundary 脚本：" + str(e))
                     return
@@ -700,7 +844,7 @@ BOTTOM_LAYER_REMOVAL = {int(self.bottom_remove_sp.value())}
             # --- inner: run meshing (chains to BC) ---
             def _run_mesh():
                 try:
-                    tplm = self._mesh_tpl.read_text("utf-8")
+                    tplm = helper_paths["apply_meshing.py"].read_text("utf-8")
                 except Exception as e:
                     self.log.appendPlainText("[网格] 无法读取 apply_meshing 脚本：" + str(e))
                     # 即便网格脚本不存在，也尝试直接跑边界，但边界脚本需要网格节点，通常会失败
@@ -747,7 +891,7 @@ BOTTOM_LAYER_REMOVAL = {int(self.bottom_remove_sp.value())}
                 return
 
             # Patch apply-materials template
-            tpl2 = self._apply_tpl.read_text("utf-8")
+            tpl2 = helper_paths["apply_materials.py"].read_text("utf-8")
             tpl2 = re.sub(r'^CAE_FILE\s*=.*',      'CAE_FILE = r"%s"' % self._last_cae.as_posix(), tpl2, flags=re.M)
             tpl2 = re.sub(r'^BASE_CSV\s*=.*',      'BASE_CSV = r"%s"' % base_csv.as_posix(), tpl2, flags=re.M)
             tpl2 = re.sub(r'^BUILD_CSV\s*=.*',     'BUILD_CSV = r"%s"' % build_csv.as_posix(), tpl2, flags=re.M)
@@ -784,7 +928,6 @@ class InputAndUtempTab(QtWidgets.QWidget, LaunchMixin):
     def __init__(self, settings):
         super().__init__()
         self.settings = settings
-        self._tpl = Path(self.settings.get("input_script", str(DEFAULT_INPUT_SCRIPT)))
 
         form = QtWidgets.QFormLayout()
 
@@ -900,7 +1043,8 @@ class InputAndUtempTab(QtWidgets.QWidget, LaunchMixin):
         cae_file = self.cae_le.text().strip()
         if not cae_file:
             QtWidgets.QMessageBox.critical(self, tr("No CAE file"), "请先选择 .cae 文件。"); return
-        if not self._confirm_helper_paths("Input & UTEMP", [("create_input.py", self._tpl)]):
+        helper_paths = self._prepare_helper_paths("Input & UTEMP", ["create_input.py"])
+        if helper_paths is None:
             return
 
         out_dir = Path(self.dir_le.text()).expanduser().resolve(); out_dir.mkdir(parents=True, exist_ok=True)
@@ -914,7 +1058,7 @@ class InputAndUtempTab(QtWidgets.QWidget, LaunchMixin):
         self.settings["ht_temp_c"] = float(self.ht_temp_ds.value())
 
 
-        src = self._tpl.read_text("utf-8")
+        src = helper_paths["create_input.py"].read_text("utf-8")
         warnings = []
 
         # Map axis → Abaqus coordinate index (1-based)
@@ -2628,14 +2772,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _load_settings(self):
         if self._settings_path.exists():
             s = json.loads(self._settings_path.read_text("utf-8"))
+            s = _migrate_legacy_helper_settings(s)
             # back-compat defaults
             s.setdefault("abaqus_cmd", DEFAULT_ABAQUS_CMD)
-            s.setdefault("build_script", str(DEFAULT_BUILD_SCRIPT))
-            s.setdefault("input_script", str(DEFAULT_INPUT_SCRIPT))
-            s.setdefault("import_script", str(DEFAULT_IMPORT_SCRIPT))
-            s.setdefault("apply_materials_script", str(DEFAULT_APPLY_MAT_SCRIPT))
-            s.setdefault("apply_meshing_script", str(DEFAULT_MESH_SCRIPT))
-            s.setdefault("apply_boundary_script", str(DEFAULT_APPLY_BC_SCRIPT))  # NEW
+            s.setdefault("use_external_helper_root", False)
+            s.setdefault("external_helper_root", "")
             s.setdefault("default_save_dir", str(SCRIPT_DIR))
             s.setdefault("ui_language", DEFAULT_UI_LANGUAGE)
             s.setdefault("base_xlsx", "")
@@ -2652,17 +2793,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 s["ht_build_enabled"] = bool(s.get("ht_build_enabled", s["ht_enabled"]))
                 s["ht_input_enabled"] = bool(s.get("ht_input_enabled", s["ht_enabled"]))
 
-
-
             return s
         return {
             "abaqus_cmd": DEFAULT_ABAQUS_CMD,
-            "build_script": str(DEFAULT_BUILD_SCRIPT),
-            "input_script": str(DEFAULT_INPUT_SCRIPT),
-            "import_script": str(DEFAULT_IMPORT_SCRIPT),
-            "apply_materials_script": str(DEFAULT_APPLY_MAT_SCRIPT),
-            "apply_meshing_script": str(DEFAULT_MESH_SCRIPT),
-            "apply_boundary_script": str(DEFAULT_APPLY_BC_SCRIPT),  # NEW
+            "use_external_helper_root": False,
+            "external_helper_root": "",
             "default_save_dir": str(SCRIPT_DIR),
             "ui_language": DEFAULT_UI_LANGUAGE,
             "base_xlsx": "",
@@ -2716,53 +2851,44 @@ class SettingsDialog(QtWidgets.QDialog):
         self.abaqus_le = QtWidgets.QLineEdit(self.values.get("abaqus_cmd", DEFAULT_ABAQUS_CMD))
         form.addRow(tr("Abaqus command"), self.abaqus_le)
 
-        self.build_le = QtWidgets.QLineEdit(self.values.get("build_script", str(DEFAULT_BUILD_SCRIPT)))
-        b_btn = QtWidgets.QPushButton("…"); b_btn.clicked.connect(lambda: self._pick(self.build_le))
-        hl1 = QtWidgets.QHBoxLayout(); hl1.addWidget(self.build_le); hl1.addWidget(b_btn)
-        form.addRow(tr("build_cae script"), hl1)
+        self.external_helper_chk = QtWidgets.QCheckBox("Use external Abaqus helper directory")
+        self.external_helper_chk.setChecked(_setting_bool(
+            self.values.get("use_external_helper_root", False)
+        ))
+        form.addRow("", self.external_helper_chk)
 
-        self.input_le = QtWidgets.QLineEdit(self.values.get("input_script", str(DEFAULT_INPUT_SCRIPT)))
-        i_btn = QtWidgets.QPushButton("…"); i_btn.clicked.connect(lambda: self._pick(self.input_le))
-        hl2 = QtWidgets.QHBoxLayout(); hl2.addWidget(self.input_le); hl2.addWidget(i_btn)
-        form.addRow(tr("create_input script"), hl2)
+        self.external_helper_le = QtWidgets.QLineEdit(
+            str(self.values.get("external_helper_root", "") or "")
+        )
+        self.external_helper_btn = QtWidgets.QPushButton("…")
+        self.external_helper_btn.clicked.connect(self._pick_external_helper_root)
+        helper_row = QtWidgets.QHBoxLayout()
+        helper_row.addWidget(self.external_helper_le)
+        helper_row.addWidget(self.external_helper_btn)
+        form.addRow("External helper directory", helper_row)
 
-        self.import_le = QtWidgets.QLineEdit(self.values.get("import_script", str(DEFAULT_IMPORT_SCRIPT)))
-        im_btn = QtWidgets.QPushButton("…"); im_btn.clicked.connect(lambda: self._pick(self.import_le))
-        hl3 = QtWidgets.QHBoxLayout(); hl3.addWidget(self.import_le); hl3.addWidget(im_btn)
-        form.addRow(tr("import_and_partition script"), hl3)
+        def _toggle_external_helper(enabled):
+            self.external_helper_le.setEnabled(enabled)
+            self.external_helper_btn.setEnabled(enabled)
 
-        self.apply_le = QtWidgets.QLineEdit(self.values.get("apply_materials_script", str(DEFAULT_APPLY_MAT_SCRIPT)))
-        ap_btn = QtWidgets.QPushButton("…"); ap_btn.clicked.connect(lambda: self._pick(self.apply_le))
-        hl4 = QtWidgets.QHBoxLayout(); hl4.addWidget(self.apply_le); hl4.addWidget(ap_btn)
-        form.addRow(tr("apply_materials script"), hl4)
-
-        self.mesh_le = QtWidgets.QLineEdit(self.values.get("apply_meshing_script", str(DEFAULT_MESH_SCRIPT)))
-        me_btn = QtWidgets.QPushButton("…"); me_btn.clicked.connect(lambda: self._pick(self.mesh_le))
-        hl5 = QtWidgets.QHBoxLayout(); hl5.addWidget(self.mesh_le); hl5.addWidget(me_btn)
-        form.addRow(tr("apply_meshing script"), hl5)
-
-        # NEW: boundary script picker
-        self.bc_le = QtWidgets.QLineEdit(self.values.get("apply_boundary_script", str(DEFAULT_APPLY_BC_SCRIPT)))
-        bc_btn = QtWidgets.QPushButton("…"); bc_btn.clicked.connect(lambda: self._pick(self.bc_le))
-        hl6 = QtWidgets.QHBoxLayout(); hl6.addWidget(self.bc_le); hl6.addWidget(bc_btn)
-        form.addRow(tr("apply_boundary script"), hl6)
+        self.external_helper_chk.toggled.connect(_toggle_external_helper)
+        _toggle_external_helper(self.external_helper_chk.isChecked())
 
         bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
         form.addRow(bb)
 
-    def _pick(self, line):
-        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, tr("Python file"), line.text())
-        if f: line.setText(f)
+    def _pick_external_helper_root(self):
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select external helper directory", self.external_helper_le.text()
+        )
+        if directory:
+            self.external_helper_le.setText(directory)
 
     def accept(self):
         self.values["abaqus_cmd"] = self.abaqus_le.text().strip() or DEFAULT_ABAQUS_CMD
-        self.values["build_script"] = self.build_le.text().strip() or str(DEFAULT_BUILD_SCRIPT)
-        self.values["input_script"] = self.input_le.text().strip() or str(DEFAULT_INPUT_SCRIPT)
-        self.values["import_script"] = self.import_le.text().strip() or str(DEFAULT_IMPORT_SCRIPT)
-        self.values["apply_materials_script"] = self.apply_le.text().strip() or str(DEFAULT_APPLY_MAT_SCRIPT)
-        self.values["apply_meshing_script"] = self.mesh_le.text().strip() or str(DEFAULT_MESH_SCRIPT)
-        self.values["apply_boundary_script"] = self.bc_le.text().strip() or str(DEFAULT_APPLY_BC_SCRIPT)
+        self.values["use_external_helper_root"] = self.external_helper_chk.isChecked()
+        self.values["external_helper_root"] = self.external_helper_le.text().strip()
         self.values["ui_language"] = self.lang_cb.currentData() or DEFAULT_UI_LANGUAGE
         super().accept()
 
