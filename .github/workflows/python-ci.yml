@@ -1,0 +1,40 @@
+name: Normal Python CI
+
+on:
+  pull_request:
+    branches:
+      - main
+
+# CI only needs to read the repository. It does not write checks, issues,
+# pull requests, contents, or releases.
+permissions:
+  contents: read
+
+jobs:
+  normal-python:
+    name: Normal Python checks
+    runs-on: ubuntu-latest
+    env:
+      # Keep GUI imports and any future Qt tests headless in hosted runners.
+      QT_QPA_PLATFORM: offscreen
+      MPLBACKEND: Agg
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install normal-Python test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "PyQt5>=5.15" "numpy>=1.21" "matplotlib>=3.4" "joblib>=1.1"
+
+      - name: Compile normal-Python sources and tests
+        run: python -m py_compile AM_gui_v7.py data_extract.py
+
+      - name: Run safe normal-Python regression tests
+        run: python -m unittest discover -s tests -p "test_*.py"
