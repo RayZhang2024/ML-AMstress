@@ -27,6 +27,10 @@ For a non-trivial change: inspect the implementation; identify the evidence and 
 
 Before modifying production code, identify the concrete problem or evidence, explain why the proposed files must change, and confirm that the change is within the issue scope. Documentation-only work should not become a pretext for runtime changes.
 
+### Autonomous development policy
+
+Agents must also read and follow [docs/AUTONOMOUS_DEVELOPMENT.md](docs/AUTONOMOUS_DEVELOPMENT.md), which defines the repository's work-unit rules, GREEN/YELLOW/RED risk model, merge authority, credential boundaries, and mandatory stop/escalation conditions.
+
 ## Git rules
 
 - Do not work directly on `main`.
