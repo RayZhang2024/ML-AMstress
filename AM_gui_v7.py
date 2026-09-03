@@ -53,6 +53,30 @@ DEFAULT_MESH_SCRIPT   = SCRIPT_DIR / "apply_meshing.py"
 # NEW: boundary template
 DEFAULT_APPLY_BC_SCRIPT = SCRIPT_DIR / "apply_boundary.py"
 
+
+def _external_helper_paths(script_paths, runtime_dir=None):
+    """Return configured helpers that resolve outside the GUI runtime directory.
+
+    ``script_paths`` is an iterable of ``(label, path)`` pairs.  Resolution is
+    intentionally performed here, before any Abaqus process is started, so the
+    warning describes the paths that the workflow will actually execute.
+    """
+    runtime = Path(runtime_dir or SCRIPT_DIR).expanduser().resolve()
+    mismatches = []
+    for label, configured in script_paths:
+        if configured is None or not str(configured).strip():
+            continue
+        try:
+            resolved = Path(configured).expanduser().resolve()
+            resolved.relative_to(runtime)
+        except ValueError:
+            mismatches.append((str(label), resolved))
+        except Exception:
+            # Keep a malformed/unresolvable configured path visible to the
+            # user without changing the existing file-open failure behaviour.
+            mismatches.append((str(label), Path(str(configured)).expanduser()))
+    return runtime, mismatches
+
 I18N_DIR = SCRIPT_DIR / "i18n"
 DEFAULT_UI_LANGUAGE = "en"
 SUPPORTED_UI_LANGS = {
@@ -174,6 +198,35 @@ class Worker(QtCore.QThread):
             self.output.emit(f"[Worker] 停止失败：{e}")
 
 class LaunchMixin:
+    def _confirm_helper_paths(self, workflow_name, script_paths):
+        runtime_dir, mismatches = _external_helper_paths(script_paths)
+        if not mismatches:
+            return True
+
+        lines = [
+            "GUI/runtime directory:",
+            "  %s" % runtime_dir,
+            "",
+            "Configured helper scripts outside that directory:",
+        ]
+        lines.extend("  %s: %s" % (label, path)
+                     for label, path in mismatches)
+        lines.extend([
+            "",
+            "Continue to use these custom paths, or Cancel before Abaqus starts.",
+        ])
+
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Warning)
+        box.setWindowTitle("External Abaqus helper scripts")
+        box.setText("%s uses helper scripts outside the GUI/runtime directory." % workflow_name)
+        box.setInformativeText("\n".join(lines))
+        continue_button = box.addButton("Continue", QtWidgets.QMessageBox.AcceptRole)
+        cancel_button = box.addButton("Cancel", QtWidgets.QMessageBox.RejectRole)
+        box.setDefaultButton(cancel_button)
+        box.exec_()
+        return box.clickedButton() is continue_button
+
     def _launch(self, cmd, cwd, log, run_button, stop_button=None, on_finished_extra=None,
                 clear_log=False, failure_markers=None, on_finished_always=None):
         exe = cmd[0]
@@ -489,7 +542,25 @@ class BuildModelTab(QtWidgets.QWidget, LaunchMixin):
         return out_csv
 
     # ---- main run ----
+    def _helper_paths_for_run(self):
+        if self.mode_cb.currentIndex() == 0:
+            return [("build_cae.py", self._build_tpl)]
+
+        paths = [
+            ("import_and_partition.py", self._import_tpl),
+            ("apply_meshing.py", self._mesh_tpl),
+        ]
+        if self.base_xlsx_le.text().strip() and self.build_xlsx_le.text().strip():
+            paths.insert(1, ("apply_materials.py", self._apply_tpl))
+        if self.bc_chk.isChecked():
+            paths.append(("apply_boundary.py", self._apply_bc_tpl))
+        return paths
+
     def _run(self):
+        import_mode = (self.mode_cb.currentIndex() == 1)
+        if not self._confirm_helper_paths("Build Model", self._helper_paths_for_run()):
+            return
+
         save_dir = Path(self.dir_le.text()).expanduser().resolve()
         save_dir.mkdir(parents=True, exist_ok=True)
         self.settings["ht_build_enabled"] = bool(self.ht_build_chk.isChecked())
@@ -497,7 +568,6 @@ class BuildModelTab(QtWidgets.QWidget, LaunchMixin):
         self.settings["axis_zero"]  = float(self.axis_zero_sp.value())
         self.settings["bottom_layers_remove"] = int(self.bottom_remove_sp.value())
 
-        import_mode = (self.mode_cb.currentIndex() == 1)
         self._tmpdir = tempfile.TemporaryDirectory()
 
         if not import_mode:
@@ -827,10 +897,13 @@ class InputAndUtempTab(QtWidgets.QWidget, LaunchMixin):
             self.log.appendPlainText("[GUI] 当前无运行中的任务。")
 
     def _run_all(self):
-        out_dir = Path(self.dir_le.text()).expanduser().resolve(); out_dir.mkdir(parents=True, exist_ok=True)
         cae_file = self.cae_le.text().strip()
         if not cae_file:
             QtWidgets.QMessageBox.critical(self, tr("No CAE file"), "请先选择 .cae 文件。"); return
+        if not self._confirm_helper_paths("Input & UTEMP", [("create_input.py", self._tpl)]):
+            return
+
+        out_dir = Path(self.dir_le.text()).expanduser().resolve(); out_dir.mkdir(parents=True, exist_ok=True)
 
         self._tmpdir = tempfile.TemporaryDirectory()
         patched = Path(self._tmpdir.name) / "create_input_patched.py"
