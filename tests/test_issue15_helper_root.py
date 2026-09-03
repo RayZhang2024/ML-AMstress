@@ -71,7 +71,7 @@ class HelperRootTests(unittest.TestCase):
             ],
         )
 
-    def test_coherent_legacy_paths_migrate_to_external_root(self):
+    def test_coherent_legacy_external_paths_remain_inactive_candidate(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime = Path(tmp) / "gui"
             external = Path(tmp) / "other-checkout"
@@ -83,12 +83,65 @@ class HelperRootTests(unittest.TestCase):
             }
             AM_gui_v7._migrate_legacy_helper_settings(settings, runtime)
 
-        self.assertTrue(settings["use_external_helper_root"])
-        self.assertEqual(settings["external_helper_root"], str(external.resolve()))
+        self.assertFalse(settings["use_external_helper_root"])
+        self.assertNotIn("external_helper_root", settings)
+        self.assertEqual(settings["_legacy_helper_root_candidate"],
+                         str(external.resolve()))
         self.assertTrue(settings["_legacy_helper_paths_migrated"])
         self.assertNotIn("build_script", settings)
         self.assertEqual(settings["_legacy_helper_paths"]["input_script"],
                          str(external / "create_input.py"))
+
+    def test_legacy_paths_from_other_checkout_use_current_runtime_helpers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = root / "ML-AMstress-prXX"
+            legacy_root = root / "ML-AMstress"
+            settings = {
+                key: str(legacy_root / filename)
+                for key, filename in zip(
+                    AM_gui_v7.HELPER_SETTING_KEYS, AM_gui_v7.HELPER_FILENAMES
+                )
+            }
+            AM_gui_v7._migrate_legacy_helper_settings(settings, runtime)
+            paths, external = AM_gui_v7._helper_paths_for_names(
+                settings, ["build_cae.py", "create_input.py"], runtime
+            )
+
+        self.assertFalse(settings["use_external_helper_root"])
+        self.assertFalse(external)
+        self.assertEqual(
+            paths,
+            [(name, runtime.resolve() / name)
+             for name in ("build_cae.py", "create_input.py")],
+        )
+
+    def test_explicit_new_format_external_override_is_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = root / "ML-AMstress-prXX"
+            legacy_root = root / "ML-AMstress"
+            explicit_root = root / "approved-helpers"
+            settings = {
+                "use_external_helper_root": True,
+                "external_helper_root": str(explicit_root),
+            }
+            settings.update({
+                key: str(legacy_root / filename)
+                for key, filename in zip(
+                    AM_gui_v7.HELPER_SETTING_KEYS, AM_gui_v7.HELPER_FILENAMES
+                )
+            })
+            AM_gui_v7._migrate_legacy_helper_settings(settings, runtime)
+            paths, external = AM_gui_v7._helper_paths_for_names(
+                settings, ["create_input.py"], runtime
+            )
+
+        self.assertTrue(settings["use_external_helper_root"])
+        self.assertTrue(external)
+        self.assertEqual(paths[0][1], explicit_root.resolve() / "create_input.py")
+        self.assertEqual(settings["_legacy_helper_root_candidate"],
+                         str(legacy_root.resolve()))
 
     def test_coherent_legacy_runtime_paths_select_default_root(self):
         with tempfile.TemporaryDirectory() as tmp:

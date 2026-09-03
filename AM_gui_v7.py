@@ -148,17 +148,34 @@ def _migrate_legacy_helper_settings(settings, runtime_dir=None):
             root = parents[0]
 
     runtime = Path(runtime_dir or DEFAULT_HELPER_ROOT).expanduser().resolve()
+    # A legacy six-path record is never evidence that the user explicitly
+    # selected an external helper root.  Only the new-format enable flag may
+    # activate that mode; retain any such explicit setting unchanged.
+    explicit_new_format = "use_external_helper_root" in settings
+    if not explicit_new_format:
+        # A root-only value is not a complete new-format opt-in.  Do not leave
+        # it looking authoritative after retiring the legacy six-path record.
+        settings.pop("external_helper_root", None)
     if coherent and root is not None:
-        settings.setdefault("use_external_helper_root", root != runtime)
         if root != runtime:
-            settings.setdefault("external_helper_root", str(root))
-            settings["_legacy_helper_paths_warning"] = (
-                "Legacy helper paths were migrated to the explicit external "
-                "helper directory: %s" % root
-            )
+            settings["_legacy_helper_root_candidate"] = str(root)
+        if not explicit_new_format:
+            settings["use_external_helper_root"] = False
+            if root != runtime:
+                settings["_legacy_helper_paths_warning"] = (
+                    "Legacy helper paths were archived and are inactive. "
+                    "Application-relative helpers are selected; the legacy "
+                    "root is retained only as a recovery candidate: %s" % root
+                )
+            else:
+                settings["_legacy_helper_paths_warning"] = (
+                    "Legacy helper paths were archived and matched the current "
+                    "runtime. Application-relative helpers are selected."
+                )
         settings["_legacy_helper_paths_migrated"] = True
     else:
-        settings.setdefault("use_external_helper_root", False)
+        if not explicit_new_format:
+            settings["use_external_helper_root"] = False
         settings["_legacy_helper_paths_warning"] = (
             "Legacy helper paths were not a complete, coherent helper set and "
             "are inactive. Application-relative helpers are now selected."
