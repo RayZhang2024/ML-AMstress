@@ -32,6 +32,12 @@ try:
     HT_TEMP_C
 except NameError:
     HT_TEMP_C = 650.0  # 
+
+try:
+    HT_STEP_INDEX
+except NameError:
+    # Legacy/non-imported models retain the historical layer_n + 4 behavior.
+    HT_STEP_INDEX = None
 # ------------------------------------------------------
 
 
@@ -206,6 +212,103 @@ def _mesh_quality_summary(assembly):
     return counts, None
 
 
+def _resolve_heat_treatment_step(model, layer_count):
+    """Find the CAE heat-treatment step after the configured removal sequence."""
+    prefixes = {}
+    for step_name in model.steps.keys():
+        for prefix in ('Step', 'BStep'):
+            marker = prefix + '-'
+            if not step_name.startswith(marker):
+                continue
+            try:
+                index = int(step_name[len(marker):])
+            except (TypeError, ValueError):
+                continue
+            prefixes.setdefault(prefix, []).append(index)
+
+    first_post_removal = int(layer_count) + 4
+    step_sequences = {}
+    for prefix, indices in prefixes.items():
+        indices = sorted(set(indices))
+        if any(index not in indices for index in range(1, first_post_removal)):
+            continue
+        post_removal = [index for index in indices if index >= first_post_removal]
+        if post_removal and post_removal == list(range(first_post_removal, max(post_removal) + 1)):
+            step_sequences[prefix] = (indices, post_removal)
+
+    def _created_step_name(interaction):
+        try:
+            history = list(interaction.history)
+            step_names = list(model.steps.keys())
+        except Exception:
+            return None
+        try:
+            created_state = CREATED
+        except NameError:
+            created_state = None
+        for history_index, state in enumerate(history):
+            try:
+                is_created = str(state) == 'CREATED'
+            except Exception:
+                is_created = False
+            if created_state is not None:
+                try:
+                    is_created = is_created or state == created_state
+                except Exception:
+                    pass
+            if not is_created or history_index >= len(step_names):
+                continue
+            return step_names[history_index]
+        return None
+
+    # ModelChange history is the source of truth for the final removal step.
+    # This is required for BStep-* fallback sequences, whose generated steps
+    # use the default time period and therefore have no unique HT period marker.
+    removal_steps = {}
+    try:
+        for interaction_name in model.interactions.keys():
+            is_base_removal = interaction_name == 'Int-%d' % (int(layer_count) + 2)
+            is_bottom_removal = interaction_name.startswith('Int-bottom-')
+            if not (is_base_removal or is_bottom_removal):
+                continue
+            step_name = _created_step_name(model.interactions[interaction_name])
+            if step_name is None:
+                continue
+            for prefix in ('Step', 'BStep'):
+                marker = prefix + '-'
+                if not step_name.startswith(marker):
+                    continue
+                try:
+                    index = int(step_name[len(marker):])
+                except (TypeError, ValueError):
+                    continue
+                removal_steps.setdefault(prefix, []).append(index)
+    except Exception:
+        removal_steps = {}
+
+    candidates = []
+    for prefix, sequence in step_sequences.items():
+        indices, post_removal = sequence
+        candidate_index = max(post_removal)
+        referenced_removals = sorted(set(removal_steps.get(prefix, [])))
+        if referenced_removals:
+            # The base removal must be present, and the HT step must be the
+            # distinct final step immediately following all CAE removals.
+            if int(layer_count) + 3 not in referenced_removals:
+                continue
+            if candidate_index != max(referenced_removals) + 1:
+                continue
+            candidates.append((prefix, candidate_index))
+
+    if len(candidates) == 1:
+        return candidates[0][1], None
+    if len(candidates) > 1:
+        return None, "multiple compatible heat-treatment step sequences were found: %s" % \
+            ', '.join('%s-%d' % candidate for candidate in candidates)
+    return None, "no distinct post-removal heat-treatment step was found in the CAE model (expected the final %s-%d-style step after the removal interactions)" % \
+        ('Step', first_post_removal)
+
+
 def validate_imported_model_ready():
     """Validate the imported-CAD set/mesh contract before generating any output."""
     model = mdb.models['Model-1']
@@ -372,6 +475,17 @@ def validate_imported_model_ready():
         if analysis_errors:
             errors.append("Mesh contains %d elements that fail Abaqus analysis checks." % analysis_errors)
 
+    heat_treatment_step = None
+    if int(HT_ENABLED) == 1:
+        if actual_layers is None:
+            errors.append("Cannot resolve the heat-treatment step until the CAE layer count is established.")
+        else:
+            heat_treatment_step, heat_treatment_error = _resolve_heat_treatment_step(model, actual_layers)
+            if heat_treatment_error is not None:
+                errors.append("Heat-treatment step unavailable: %s." % heat_treatment_error)
+            else:
+                _validation_log("[VALIDATION] Heat-treatment step: KSTEP=%d [OK]" % heat_treatment_step)
+
     if errors:
         failure_lines = ["[VALIDATION] FAIL - model is not ready for input generation."]
         _validation_log(failure_lines[0])
@@ -386,6 +500,7 @@ def validate_imported_model_ready():
                 pass
         raise RuntimeError("\n".join(failure_lines))
 
+    globals()['HT_STEP_INDEX'] = heat_treatment_step
     _validation_log("[VALIDATION] PASS - model is ready for input generation")
 
 
@@ -489,7 +604,10 @@ for x in range (temp_step):
 
             # --- NEW: heat-treatment step (only when HT is enabled) ---
             if int(HT_ENABLED) == 1:
-                fid.write("      IF (KSTEP=="+str(layer_n+4)+") THEN\n")
+                ht_step_index = HT_STEP_INDEX
+                if ht_step_index is None:
+                    ht_step_index = layer_n + 4
+                fid.write("      IF (KSTEP=="+str(ht_step_index)+") THEN\n")
                 fid.write("          ! Ramp 25C -> T_HT over 0.25 of step time, hold 0.5, cool back in 0.25\n")
                 fid.write("          THT = "+("{:.6f}".format(float(HT_TEMP_C)))+"\n")
                 fid.write("          TAMB = 25.0\n")
