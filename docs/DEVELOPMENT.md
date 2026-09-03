@@ -14,6 +14,26 @@ Start from an issue-specific branch, normally `codex/issue-<n>-<slug>`, and keep
 
 Run normal Python syntax/import checks and any practical automated tests for GUI-side code. Static checks do not prove Abaqus compatibility. Report GUI smoke tests separately from Abaqus/CAE model-generation validation and from Abaqus solver validation. Claim the latter only when Abaqus was actually run with a usable license; otherwise state that validation remains manual.
 
+### Pull-request CI
+
+Pull requests targeting `main` run `.github/workflows/python-ci.yml`. The job
+uses hosted Ubuntu with Python 3.11, sets `QT_QPA_PLATFORM=offscreen` and
+`MPLBACKEND=Agg` for headless GUI-side imports/tests, and installs only the
+current normal-Python test dependencies: PyQt5, NumPy, matplotlib, and joblib.
+PyVista, PyVistaQt, VTK, and Abaqus are not installed or invoked by this CI.
+
+The deterministic commands run from the repository root are:
+
+```text
+python -m py_compile AM_gui_v7.py data_extract.py
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+The test discovery includes the existing helper-path, helper-root, CPU/GPU,
+heat-treatment, and governance regression modules. The compile check covers
+the Python 3 GUI and dual-runtime data-extraction entry point; it is not an
+Abaqus/CAE compatibility or solver check.
+
 ## Paths and reproducibility
 
 Do not add developer-specific absolute paths to source or default configuration. Use user-selected paths, repository-relative paths, or documented placeholders. The GUI may generate temporary absolute paths at runtime; those are artifacts, not defaults to commit.
