@@ -5,6 +5,16 @@
 credentials disabled, then runs `scripts/a5_review_orchestrator.py` on the
 designated self-hosted Windows runner.
 
+The workflow keeps the built-in `GITHUB_TOKEN` for A5.2 labels/status/audit
+state. It mints a repository-scoped, short-lived App installation token with
+`actions/create-github-app-token@v3` from `AUTOMATION_APP_CLIENT_ID` and
+`AUTOMATION_APP_PRIVATE_KEY`, then passes it as `AUTOMATION_APP_TOKEN` only to
+trusted A5.3 same-branch push code. The token is injected only through the
+origin-scoped temporary Git extraheader and is removed from A5.1 reviewer,
+A5.3 Codex, and validation child environments. That repair push must emit the
+next `pull_request:synchronize` event for `Normal Python CI`; no merge or
+auto-merge operation is introduced.
+
 The orchestrator resolves exactly one open, in-repository `codex/issue-*` PR
 for the CI head, verifies its canonical `Closes #N` link and eligible open
 GREEN `agent:codex` issue, and fails closed on stale, forked, ambiguous, or

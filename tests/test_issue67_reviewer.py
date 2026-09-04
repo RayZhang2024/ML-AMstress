@@ -82,9 +82,10 @@ class ReviewerContractTests(unittest.TestCase):
         self.assertNotIn(raw_secret, command)
         self.assertNotIn(raw_secret, prompt)
         environment = reviewer.reviewer_environment({"GITHUB_TOKEN": raw_secret, "GH_TOKEN": raw_secret,
-                                                     "OPENAI_API_KEY": raw_secret, "SAFE": "yes"})
+                                                     "OPENAI_API_KEY": raw_secret, "AUTOMATION_APP_TOKEN": raw_secret,
+                                                     "SAFE": "yes"})
         self.assertEqual(environment["SAFE"], "yes")
-        for name in ("GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY"):
+        for name in ("GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY", "AUTOMATION_APP_TOKEN"):
             self.assertNotIn(name, environment)
 
         captured = {}

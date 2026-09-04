@@ -7,9 +7,9 @@ on:
 # The worker needs to create/push one branch, update the issue claim/status,
 # and open one PR. It contains no merge operation.
 permissions:
-  contents: write
+  contents: read
   issues: write
-  pull-requests: write
+  pull-requests: read
 
 concurrency:
   group: codex-green-issue-${{ github.event.issue.number }}
@@ -80,9 +80,23 @@ jobs:
         shell: powershell
         run: python scripts/codex_issue_worker.py --diagnose-workspace
 
+      - name: Mint repository-scoped automation App token
+        id: automation-app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.AUTOMATION_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
+          owner: RayZhang2024
+          repositories: ML-AMstress
+          permission-contents: write
+          permission-pull-requests: write
+
       - name: Run fail-closed GREEN worker
         run: python scripts/codex_issue_worker.py
         env:
           # The worker strips this token before Codex and injects it only for
           # final push/API operations.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The short-lived, repository-scoped App token is used only for
+          # event-generating branch writes and worker PR creation.
+          AUTOMATION_APP_TOKEN: ${{ steps.automation-app-token.outputs.token }}

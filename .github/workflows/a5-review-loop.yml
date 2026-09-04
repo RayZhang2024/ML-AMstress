@@ -9,9 +9,9 @@ on:
 # A5.3 same-branch push. It has no merge or auto-merge operation.
 permissions:
   actions: read
-  contents: write
+  contents: read
   issues: write
-  pull-requests: write
+  pull-requests: read
 
 concurrency:
   group: a5-review-${{ github.event.workflow_run.head_sha }}
@@ -57,9 +57,22 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install "PyQt5>=5.15" "numpy>=1.21" "matplotlib>=3.4" "joblib>=1.1"
 
+      - name: Mint repository-scoped automation App token
+        id: automation-app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.AUTOMATION_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
+          owner: RayZhang2024
+          repositories: ML-AMstress
+          permission-contents: write
+
       - name: Run trusted A5 review and repair coordinator
         run: python scripts/a5_review_orchestrator.py
         env:
           # This token remains in trusted orchestration only. A5.1 and A5.3
           # remove it from their respective untrusted child environments.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # A5.3 receives this only through trusted orchestration for its
+          # same-branch push; all A5 child environments strip it.
+          AUTOMATION_APP_TOKEN: ${{ steps.automation-app-token.outputs.token }}

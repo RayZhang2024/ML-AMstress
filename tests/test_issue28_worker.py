@@ -485,6 +485,7 @@ class WorkerPolicyTests(unittest.TestCase):
                 "OPENAI_API_KEY": "openai-secret",
                 "GITHUB_TOKEN": "github-write-token",
                 "GH_TOKEN": "gh-write-token",
+                "AUTOMATION_APP_TOKEN": "app-write-token",
                 "GIT_CONFIG_COUNT": "2",
                 "GIT_CONFIG_KEY_0": "core.autocrlf",
                 "GIT_CONFIG_VALUE_0": "false",
@@ -499,6 +500,7 @@ class WorkerPolicyTests(unittest.TestCase):
         self.assertNotIn("GITHUB_TOKEN", captured["env"])
         self.assertNotIn("GH_TOKEN", captured["env"])
         self.assertNotIn("OPENAI_API_KEY", captured["env"])
+        self.assertNotIn("AUTOMATION_APP_TOKEN", captured["env"])
         self.assertEqual(captured["env"]["GIT_CONFIG_NOSYSTEM"], "1")
         self.assertEqual(captured["env"]["GIT_CONFIG_GLOBAL"], os.devnull)
         self.assertNotIn("GIT_CONFIG_NOGLOBAL", captured["env"])
@@ -523,8 +525,9 @@ class WorkerPolicyTests(unittest.TestCase):
             with mock.patch.dict(
                 os.environ,
                 {
-                    "GITHUB_TOKEN": "github-write-token",
-                    "GIT_CONFIG_GLOBAL": str(global_config),
+                "GITHUB_TOKEN": "github-write-token",
+                "GIT_CONFIG_GLOBAL": str(global_config),
+                "AUTOMATION_APP_TOKEN": "app-write-token",
                     "GIT_CONFIG_NOGLOBAL": "1",
                 },
             ), mock.patch.object(
@@ -681,6 +684,7 @@ class WorkerPolicyTests(unittest.TestCase):
                 "GITHUB_TOKEN": "github-write-token",
                 "GH_TOKEN": "gh-write-token",
                 "OPENAI_API_KEY": "openai-secret",
+                "AUTOMATION_APP_TOKEN": "app-write-token",
             },
         ), mock.patch.object(worker, "_run", side_effect=fake_run):
             worker.push_branch(tempfile.gettempdir(), "codex/issue-28-test")
@@ -688,7 +692,9 @@ class WorkerPolicyTests(unittest.TestCase):
         self.assertNotIn("GITHUB_TOKEN", captured["env"])
         self.assertNotIn("GH_TOKEN", captured["env"])
         self.assertNotIn("OPENAI_API_KEY", captured["env"])
+        self.assertNotIn("AUTOMATION_APP_TOKEN", captured["env"])
         self.assertNotIn("github-write-token", captured["env"].values())
+        self.assertNotIn("app-write-token", captured["env"].values())
         self.assertEqual(
             captured["env"]["GIT_CONFIG_KEY_0"],
             "http.https://github.com/.extraheader",
@@ -698,13 +704,37 @@ class WorkerPolicyTests(unittest.TestCase):
         encoded_credentials = header[len("AUTHORIZATION: basic "):]
         self.assertEqual(
             base64.b64decode(encoded_credentials).decode("utf-8"),
-            "x-access-token:github-write-token",
+            "x-access-token:app-write-token",
         )
         self.assertNotIn("github-write-token", captured["command"])
         self.assertNotIn(encoded_credentials, captured["command"])
         self.assertEqual(
             captured["command"], ["git", "push", "origin", "codex/issue-28-test"]
         )
+
+    def test_trusted_push_fails_closed_without_automation_app_token(self):
+        with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "state-token"}, clear=True), \
+             mock.patch.object(worker, "_run") as run:
+            with self.assertRaisesRegex(worker.WorkerError, "AUTOMATION_APP_TOKEN"):
+                worker.push_branch(tempfile.gettempdir(), "codex/issue-28-test")
+        run.assert_not_called()
+
+    def test_main_fails_closed_when_app_token_mint_output_is_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            event_path = Path(directory) / "event.json"
+            event_path.write_text(json.dumps({
+                "action": "labeled",
+                "label": {"name": "agent:codex"},
+                "issue": {"number": 28},
+                "repository": {"full_name": worker.REPOSITORY},
+            }), encoding="utf-8")
+            with mock.patch.dict(os.environ, {
+                "GITHUB_EVENT_PATH": str(event_path),
+                "GITHUB_TOKEN": "state-token",
+            }, clear=True), mock.patch.object(worker.Worker, "execute") as execute:
+                with self.assertRaisesRegex(worker.WorkerError, "AUTOMATION_APP_TOKEN"):
+                    worker.main([])
+        execute.assert_not_called()
 
     def test_claimed_branch_checkout_tracks_new_remote_when_no_local_branch_exists(self):
         branch = worker.deterministic_branch_name(28, issue()["title"])
@@ -835,6 +865,26 @@ class WorkerPolicyTests(unittest.TestCase):
         )
         self.assertFalse(any("merge" in event[0] for event in client.events))
 
+    def test_event_writes_use_app_client_while_state_writes_use_builtin_client(self):
+        state_client = FakeClient(issue())
+        app_client = FakeClient(issue())
+        with mock.patch.object(worker, "_run", return_value=""), mock.patch.object(
+            worker, "_all_changed_paths", return_value=("docs/change.md",)
+        ), mock.patch.object(worker, "_git_paths", return_value=("docs/change.md",)):
+            worker.Worker(
+                state_client,
+                28,
+                "run-app-client",
+                codex_runner=lambda *args: None,
+                validation_runner=lambda cwd: None,
+                push_runner=lambda cwd, branch: None,
+                event_client=app_client,
+            ).execute()
+        self.assertTrue(any(event[0] == "create_branch" for event in app_client.events))
+        self.assertTrue(any(event[0] == "create_pr" for event in app_client.events))
+        self.assertFalse(any(event[0] in ("create_branch", "create_pr") for event in state_client.events))
+        self.assertTrue(any(event[0] == "labels" for event in state_client.events))
+
     def _preflight_workspace(self):
         directory = tempfile.TemporaryDirectory()
         root = Path(directory.name)
@@ -961,15 +1011,22 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("types: [labeled]", self.workflow)
         self.assertIn("github.event.label.name == 'agent:codex'", self.workflow)
         self.assertIn("runs-on: [self-hosted, windows, x64, ml-amstress-codex]", self.workflow)
-        self.assertIn("contents: write", self.workflow)
+        self.assertIn("contents: read", self.workflow)
         self.assertIn("issues: write", self.workflow)
-        self.assertIn("pull-requests: write", self.workflow)
+        self.assertIn("pull-requests: read", self.workflow)
         self.assertNotIn("OPENAI_API_KEY", self.workflow)
         self.assertNotIn("CODEX_CLI_PACKAGE", self.workflow)
         self.assertNotIn("npm install", self.workflow)
         self.assertIn("CODEX_EXECUTABLE: codex", self.workflow)
         self.assertIn("persist-credentials: false", self.workflow)
         self.assertIn("GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}", self.workflow)
+        self.assertIn("uses: actions/create-github-app-token@v3", self.workflow)
+        self.assertIn("client-id: ${{ vars.AUTOMATION_APP_CLIENT_ID }}", self.workflow)
+        self.assertIn("private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}", self.workflow)
+        self.assertIn("repositories: ML-AMstress", self.workflow)
+        self.assertIn("AUTOMATION_APP_TOKEN: ${{ steps.automation-app-token.outputs.token }}", self.workflow)
+        self.assertIn("permission-contents: write", self.workflow)
+        self.assertIn("permission-pull-requests: write", self.workflow)
         self.assertNotIn("gh pr merge", self.workflow)
         self.assertNotIn("enablePullRequestAutoMerge", self.workflow)
 

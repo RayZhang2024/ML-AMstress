@@ -59,18 +59,22 @@ one PR against `main`, and changes the issue to `status:review` only after PR
 creation. Failures preserve the branch and report `status:blocked`; no merge or
 auto-merge operation is available.
 
-The worker uses `GITHUB_TOKEN` only in the trusted orchestration step. The
-workflow requests `contents: write` to create/push the single claim branch,
-`issues: write` to record labels/comments, and `pull-requests: write` to open
-the review PR. `actions/checkout` uses `persist-credentials: false`; the worker
-removes this token (and `GH_TOKEN`) before starting Codex and injects a
-one-command git extra-header only for the final push. No narrower GitHub
-permission can perform those three API operations; the worker code has no merge
-endpoint. The Codex subprocess uses Git's supported `GIT_CONFIG_GLOBAL` null
-override together with `GIT_CONFIG_NOSYSTEM=1`, so it cannot read the runner
-user's global credential helpers; trusted post-Codex push authentication is
-unchanged. The worker does not use `OPENAI_API_KEY` or any other API-key billing
-path.
+The trusted worker uses the built-in `GITHUB_TOKEN` only for issue labels,
+status, and audit state. A repository-scoped, short-lived GitHub App token is
+minted by `actions/create-github-app-token@v3` from
+`AUTOMATION_APP_CLIENT_ID` and `AUTOMATION_APP_PRIVATE_KEY`; it is supplied as
+`AUTOMATION_APP_TOKEN` only to the final trusted worker step. That token performs
+event-generating branch claim/push and worker PR creation, so worker PR updates
+emit the normal `pull_request` events without a manual approval gate. The
+workflow therefore needs only built-in `contents: read`, `issues: write`, and
+`pull-requests: read` permissions. `actions/checkout` uses
+`persist-credentials: false`; Codex and validation subprocesses remove both
+tokens (and `GH_TOKEN`) before starting. The App token is injected only as a
+one-command, origin-scoped Git extra-header for the final push and is never
+persisted in Git configuration. The Codex subprocess uses Git's supported
+`GIT_CONFIG_GLOBAL` null override together with `GIT_CONFIG_NOSYSTEM=1`, so it
+cannot read the runner user's global credential helpers. The worker does not use
+`OPENAI_API_KEY` or any other API-key billing path.
 
 ## Self-hosted GREEN worker (Issue #31)
 

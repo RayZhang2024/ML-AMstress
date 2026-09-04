@@ -15,9 +15,10 @@ Use it with [AUTONOMOUS_DEVELOPMENT.md](AUTONOMOUS_DEVELOPMENT.md) and [AUTONOMO
 | Trusted-worker Python | Python 3.11 or newer on `PATH` |
 | Codex invocation | Prompt through stdin: `codex exec --sandbox workspace-write -c approval_policy="never" -` |
 | Checkout and EOL | `actions/checkout` has `persist-credentials: false`; checkout/local Git use `core.autocrlf=false` and `core.eol=lf` |
-| Trusted push | Only trusted worker push, using an origin-scoped GitHub HTTPS extraheader with Basic auth for base64-encoded `x-access-token:<GITHUB_TOKEN>` |
+| Trusted event writes | A repository-scoped, short-lived App token (`AUTOMATION_APP_TOKEN`) is minted from `AUTOMATION_APP_CLIENT_ID` and `AUTOMATION_APP_PRIVATE_KEY`; only trusted branch claim/push and PR create/update use it |
+| Trusted state writes | The built-in `GITHUB_TOKEN` performs issue labels, status, and bounded audit state only |
 | Repository setting | GitHub Actions is allowed to create pull requests |
-| PR CI | Bot-created PR CI can be `action_required`; a maintainer approves it before hosted CI runs |
+| PR CI | App-authenticated branch pushes and PR writes emit normal PR events, so no manual Actions approval gate is required for worker PR CI |
 | Merge policy | Merge and auto-merge remain disabled for A4; human review and human merge are required |
 
 Never place runner registration tokens, GitHub tokens, ChatGPT session material, OAuth data, cookies, or raw authentication output in documentation, issues, PRs, or logs.
@@ -31,7 +32,7 @@ risk:green + status:ready + fresh agent:codex label
   -> trusted preflight, eligibility, deterministic claim -> status:in-progress
   -> sandboxed Codex implementation / optional focused checks
   -> trusted normal-Python validation, commit, push, PR -> status:review
-  -> hosted PR CI (maintainer approval first if action_required)
+  -> hosted PR CI on the App-authenticated PR event
   -> human review and human merge
 ```
 
@@ -45,7 +46,8 @@ Failure preserves the deterministic claim branch and blocks the work; do not lau
 - Set only expected non-secret repository variables for runner name, Windows user, and Codex version. Keep tokens and registration material in approved secret/configuration locations.
 - Verify a clean checkout with `core.autocrlf=false` and `core.eol=lf`; never commit, discard, or bulk-normalize unrelated files just to make it clean.
 - Verify the existing workflow's `persist-credentials: false`, stdin prompt transport, `workspace-write`, and `approval_policy="never"`; these are verification points, not authorization to alter the workflow.
-- Verify Actions can create PRs and maintainers know how to approve bot PR CI marked `action_required`.
+- Configure the repository variable `AUTOMATION_APP_CLIENT_ID` and secret `AUTOMATION_APP_PRIVATE_KEY` for the installed repository App; never print or retrieve their values. Verify that the App is scoped to this repository and can write contents and pull requests.
+- Verify Actions can create PRs and that App-authenticated worker PR events start normal CI without manual approval.
 - Verify the trusted worker owns deterministic claims and that merge/auto-merge remain disabled.
 
 Issue #30 is the controlled integration evidence. PRs #62 and #63 are useful forensic references for stdin transport and the integration-era result, but do not replace this preflight.

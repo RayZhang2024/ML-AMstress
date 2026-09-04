@@ -307,7 +307,7 @@ def reviewer_command(resolved_executable: str) -> list[str]:
 
 def reviewer_environment(parent: Mapping[str, str] | None = None) -> dict[str, str]:
     environment = dict(os.environ if parent is None else parent)
-    for name in ("GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY"):
+    for name in ("GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY", "AUTOMATION_APP_TOKEN"):
         environment.pop(name, None)
     environment["GIT_CONFIG_NOSYSTEM"] = "1"
     environment["GIT_CONFIG_GLOBAL"] = os.devnull
