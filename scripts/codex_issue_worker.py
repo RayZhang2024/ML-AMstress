@@ -100,7 +100,14 @@ def resolve_codex_executable(executable=None):
 
 def _codex_command_tokens(executable=None):
     executable = executable if executable is not None else _configured_codex_executable()
-    return [executable, "exec", "--full-auto"]
+    return [
+        executable,
+        "exec",
+        "--sandbox",
+        "workspace-write",
+        "-c",
+        'approval_policy="never"',
+    ]
 
 
 def _isolate_git_configuration(environment):

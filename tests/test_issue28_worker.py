@@ -10,6 +10,7 @@ from scripts import codex_issue_worker as worker
 
 
 ROOT = Path(__file__).resolve().parents[1]
+TEST_CODEX_VERSION = "codex-cli 0.149.1"
 
 
 GREEN_BODY = """## Goal
@@ -175,7 +176,7 @@ class WorkerPolicyTests(unittest.TestCase):
         try:
             def fake_run(command, **kwargs):
                 if command[0] == "codex" and command[1] == "--version":
-                    output = "codex-cli 1.2.3"
+                    output = TEST_CODEX_VERSION
                 elif command[0] == "codex":
                     output = "Logged in using ChatGPT"
                 elif command[1:] == ["--version"]:
@@ -405,7 +406,7 @@ class WorkerPolicyTests(unittest.TestCase):
             def fake_run(command, **kwargs):
                 commands.append((command, kwargs))
                 if command[0] == resolved_codex and command[1] == "--version":
-                    output = "codex-cli 1.2.3"
+                    output = TEST_CODEX_VERSION
                 elif command[0] == resolved_codex and command[1:] == ["login", "status"]:
                     output = "Logged in using ChatGPT"
                 elif command[1:] == ["--version"]:
@@ -429,9 +430,18 @@ class WorkerPolicyTests(unittest.TestCase):
             command_vectors = [item[0] for item in commands]
             self.assertIn([resolved_codex, "--version"], command_vectors)
             self.assertIn([resolved_codex, "login", "status"], command_vectors)
-            actual = next(command for command in command_vectors if command[1:3] == ["exec", "--full-auto"])
+            actual = next(command for command in command_vectors if command[1] == "exec")
             self.assertEqual(actual[0], resolved_codex)
             self.assertNotEqual(actual[0], "codex")
+            self.assertIn("--sandbox", actual)
+            self.assertEqual(actual[actual.index("--sandbox") + 1], "workspace-write")
+            self.assertIn("-c", actual)
+            self.assertIn('approval_policy="never"', actual)
+            self.assertNotIn("--full-auto", actual)
+            self.assertNotIn("--approve-for-me", actual)
+            self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", actual)
+            self.assertNotIn("danger-full-access", actual)
+            self.assertIn("Exact issue contract", actual[-1])
             actual_kwargs = next(kwargs for command, kwargs in commands if command == actual)
             self.assertNotIn("shell", actual_kwargs)
         finally:
@@ -613,9 +623,13 @@ class WorkerPolicyTests(unittest.TestCase):
             "RUNNER_NAME": "ml-amstress-runner",
             "CODEX_EXPECTED_RUNNER_NAME": "ml-amstress-runner",
             "CODEX_EXPECTED_WINDOWS_USER": "runner-user",
-            "CODEX_EXPECTED_VERSION": "codex-cli 1.2.3",
+            "CODEX_EXPECTED_VERSION": TEST_CODEX_VERSION,
             "CODEX_EXECUTABLE": "codex",
         }
+
+    def test_worker_test_contract_pins_codex_cli_01491(self):
+        self.assertEqual(TEST_CODEX_VERSION, "codex-cli 0.149.1")
+        self.assertEqual(self._preflight_env()["CODEX_EXPECTED_VERSION"], TEST_CODEX_VERSION)
 
     def test_preflight_rejects_missing_codex_executable(self):
         directory = self._preflight_workspace()
@@ -635,7 +649,7 @@ class WorkerPolicyTests(unittest.TestCase):
         try:
             def fake_run(command, **kwargs):
                 if command[0] == "codex" and command[1] == "--version":
-                    return type("Result", (), {"returncode": 0, "stdout": "codex-cli 1.2.3", "stderr": ""})()
+                    return type("Result", (), {"returncode": 0, "stdout": TEST_CODEX_VERSION, "stderr": ""})()
                 if command[0] == "codex":
                     return type("Result", (), {"returncode": 1, "stdout": "Not logged in", "stderr": ""})()
                 if command[1:] == ["--version"]:
@@ -663,7 +677,7 @@ class WorkerPolicyTests(unittest.TestCase):
             def fake_run(command, **kwargs):
                 commands.append(command)
                 if command[0] == "codex" and command[1] == "--version":
-                    output = "codex-cli 1.2.3"
+                    output = TEST_CODEX_VERSION
                 elif command[0] == "codex":
                     output = "Logged in using ChatGPT"
                 elif command[1:] == ["--version"]:
