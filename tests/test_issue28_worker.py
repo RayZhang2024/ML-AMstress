@@ -488,6 +488,56 @@ class WorkerPolicyTests(unittest.TestCase):
         self.assertEqual(captured["env"]["GIT_CONFIG_KEY_0"], "http.extraheader")
         self.assertIn("github-write-token", captured["env"]["GIT_CONFIG_VALUE_0"])
 
+    def test_claimed_branch_checkout_tracks_new_remote_when_no_local_branch_exists(self):
+        branch = worker.deterministic_branch_name(28, issue()["title"])
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            return ""
+
+        with mock.patch.object(worker, "_run", side_effect=fake_run):
+            worker.checkout_claimed_worker_branch(branch, "worker-cwd")
+
+        self.assertEqual(calls[0][0], ["git", "fetch", "origin", branch])
+        self.assertEqual(calls[1][0], ["git", "branch", "--list", branch])
+        self.assertTrue(calls[1][1]["capture"])
+        self.assertEqual(
+            calls[2][0], ["git", "switch", "-c", branch, "--track", "origin/" + branch]
+        )
+
+    def test_claimed_branch_checkout_recreates_only_stale_local_worker_branch(self):
+        branch = worker.deterministic_branch_name(28, issue()["title"])
+        unrelated = "maintainer/keep-this-branch"
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            if command[:3] == ["git", "branch", "--list"]:
+                return branch + "\n"
+            return ""
+
+        with mock.patch.object(worker, "_run", side_effect=fake_run):
+            worker.checkout_claimed_worker_branch(branch, "worker-cwd")
+
+        commands = [command for command, _ in calls]
+        self.assertIn(
+            ["git", "switch", "-C", branch, "--track", "origin/" + branch], commands
+        )
+        self.assertFalse(any(unrelated in command for command in commands))
+        self.assertFalse(any(command[:2] == ["git", "reset"] for command in commands))
+        self.assertFalse(any(command[:3] == ["git", "branch", "-D"] for command in commands))
+
+    def test_preexisting_remote_claim_blocks_before_local_checkout_or_codex(self):
+        client = FakeClient(issue())
+        branch = worker.deterministic_branch_name(28, issue()["title"])
+        client.created_branch = branch
+        with mock.patch.object(worker, "checkout_claimed_worker_branch") as checkout:
+            with self.assertRaises(worker.WorkerError):
+                worker.Worker(client, 28, "run-duplicate", codex_runner=lambda *args: None).execute()
+        checkout.assert_not_called()
+        self.assertFalse(any(event[0] == "create_branch" for event in client.events))
+
     def test_state_change_before_claim_fails_without_branch(self):
         client = FakeClient(issue(), issue_sequence=[issue(updated_at="v1"), issue(updated_at="v2")])
         with self.assertRaises(worker.WorkerError):
@@ -515,6 +565,10 @@ class WorkerPolicyTests(unittest.TestCase):
                 ).execute()
         self.assertFalse(any(event[0] == "create_pr" for event in client.events))
         self.assertIn("status:blocked", [item["name"] for item in client.current_issue["labels"]])
+        self.assertEqual(
+            client.created_branch,
+            worker.deterministic_branch_name(28, client.current_issue["title"]),
+        )
 
     def test_success_records_claim_then_review_without_merge(self):
         client = FakeClient(issue())
