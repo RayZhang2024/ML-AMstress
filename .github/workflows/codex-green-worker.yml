@@ -33,6 +33,17 @@ jobs:
           # worker injects it only for its trusted post-Codex push operation.
           persist-credentials: false
 
+      - name: Pin repository-local Git line endings
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # This is deterministic checkout materialization, not cleanup. It
+          # runs immediately after checkout, before any project command or
+          # cleanliness gate, and writes only this repository's .git/config.
+          git config --local core.autocrlf false
+          git config --local core.eol lf
+          git checkout-index --force --all
+
       - name: Verify local Python
         shell: powershell
         run: |
