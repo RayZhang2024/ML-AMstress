@@ -136,10 +136,13 @@ class WorkflowAndEligibilityTests(unittest.TestCase):
         self.assertIn("repositories: ML-AMstress", workflow)
         self.assertIn("permission-contents: write", workflow)
         self.assertIn("AUTOMATION_APP_TOKEN: ${{ steps.automation-app-token.outputs.token }}", workflow)
+        self.assertIn("actions: read", workflow)
         self.assertIn("contents: read", workflow)
         self.assertIn("issues: write", workflow)
-        self.assertIn("pull-requests: read", workflow)
+        self.assertIn("pull-requests: write", workflow)
+        self.assertNotIn("pull-requests: read", workflow)
         self.assertIn("persist-credentials: false", workflow)
+        self.assertNotIn("gh pr merge", workflow)
         self.assertNotIn("enablePullRequestAutoMerge", workflow)
 
     def test_a5_workflow_runs_orchestrator_as_a_package_module(self):
