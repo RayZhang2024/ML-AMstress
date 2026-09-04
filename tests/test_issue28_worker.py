@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -204,10 +205,44 @@ class WorkerPolicyTests(unittest.TestCase):
 
         self.assertNotIn("GITHUB_TOKEN", captured["env"])
         self.assertNotIn("GH_TOKEN", captured["env"])
+        self.assertNotIn("OPENAI_API_KEY", captured["env"])
         self.assertEqual(captured["env"]["GIT_CONFIG_NOSYSTEM"], "1")
-        self.assertEqual(captured["env"]["GIT_CONFIG_NOGLOBAL"], "1")
+        self.assertEqual(captured["env"]["GIT_CONFIG_GLOBAL"], os.devnull)
+        self.assertNotIn("GIT_CONFIG_NOGLOBAL", captured["env"])
         self.assertEqual(captured["env"]["GIT_TERMINAL_PROMPT"], "0")
         self.assertNotIn("github-write-token", captured["command"][-1])
+
+    def test_codex_process_cannot_inherit_runner_global_credential_helper(self):
+        captured = {}
+
+        def fake_run(*args, **kwargs):
+            captured["env"] = kwargs["env"]
+            return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+        with tempfile.TemporaryDirectory() as directory:
+            global_config = Path(directory) / "runner.gitconfig"
+            global_config.write_text("[credential]\n\thelper = runner-helper\n")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GITHUB_TOKEN": "github-write-token",
+                    "GIT_CONFIG_GLOBAL": str(global_config),
+                    "GIT_CONFIG_NOGLOBAL": "1",
+                },
+            ), mock.patch.object(worker.subprocess, "run", side_effect=fake_run):
+                worker.run_codex(issue(), "codex/issue-28-test", directory)
+
+            self.assertEqual(captured["env"]["GIT_CONFIG_GLOBAL"], os.devnull)
+            self.assertNotIn("GIT_CONFIG_NOGLOBAL", captured["env"])
+            result = subprocess.run(
+                ["git", "config", "--global", "--get", "credential.helper"],
+                env=captured["env"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
 
     def test_trusted_push_injects_token_only_for_git_command(self):
         captured = {}
@@ -283,12 +318,108 @@ class WorkerPolicyTests(unittest.TestCase):
         )
         self.assertFalse(any("merge" in event[0] for event in client.events))
 
-    def test_missing_openai_auth_fails_before_branch_claim(self):
-        client = FakeClient(issue())
-        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
-            with self.assertRaises(worker.WorkerError):
-                worker.Worker(client, 28, "run-auth").execute()
-        self.assertFalse(any(event[0] == "create_branch" for event in client.events))
+    def _preflight_workspace(self):
+        directory = tempfile.TemporaryDirectory()
+        root = Path(directory.name)
+        (root / ".git").mkdir()
+        (root / "scripts").mkdir()
+        (root / "AGENTS.md").write_text("policy")
+        (root / "scripts" / "codex_issue_worker.py").write_text("worker")
+        return directory
+
+    def _preflight_env(self):
+        return {
+            "RUNNER_OS": "Windows",
+            "RUNNER_ARCH": "X64",
+            "RUNNER_NAME": "ml-amstress-runner",
+            "CODEX_EXPECTED_RUNNER_NAME": "ml-amstress-runner",
+            "CODEX_EXPECTED_WINDOWS_USER": "runner-user",
+            "CODEX_EXPECTED_VERSION": "codex-cli 1.2.3",
+            "CODEX_EXECUTABLE": "codex",
+        }
+
+    def test_preflight_rejects_missing_codex_executable(self):
+        directory = self._preflight_workspace()
+        try:
+            with mock.patch.dict(os.environ, self._preflight_env(), clear=False), mock.patch.object(
+                worker.getpass, "getuser", return_value="runner-user"
+            ), mock.patch.object(
+                worker.shutil, "which", side_effect=lambda name: "git" if name == "git" else None
+            ), self.assertRaises(worker.WorkerError) as raised:
+                worker.run_preflight(directory.name)
+            self.assertIn("Codex executable is not available", str(raised.exception))
+        finally:
+            directory.cleanup()
+
+    def test_preflight_rejects_unusable_chatgpt_authentication(self):
+        directory = self._preflight_workspace()
+        try:
+            def fake_run(command, **kwargs):
+                if command[0] == "codex" and command[1] == "--version":
+                    return type("Result", (), {"returncode": 0, "stdout": "codex-cli 1.2.3", "stderr": ""})()
+                if command[0] == "codex":
+                    return type("Result", (), {"returncode": 1, "stdout": "Not logged in", "stderr": ""})()
+                if command[1:] == ["--version"]:
+                    return type("Result", (), {"returncode": 0, "stdout": "git version 2", "stderr": ""})()
+                if command[1:3] == ["rev-parse", "--is-inside-work-tree"]:
+                    return type("Result", (), {"returncode": 0, "stdout": "true", "stderr": ""})()
+                return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+            with mock.patch.dict(os.environ, self._preflight_env(), clear=False), mock.patch.object(
+                worker.getpass, "getuser", return_value="runner-user"
+            ), mock.patch.object(
+                worker.shutil, "which", side_effect=lambda name: name
+            ), mock.patch.object(worker.subprocess, "run", side_effect=fake_run), self.assertRaises(
+                worker.WorkerError
+            ) as raised:
+                worker.run_preflight(directory.name)
+            self.assertIn("ChatGPT authentication is unavailable", str(raised.exception))
+        finally:
+            directory.cleanup()
+
+    def test_preflight_accepts_authenticated_windows_runner(self):
+        directory = self._preflight_workspace()
+        commands = []
+        try:
+            def fake_run(command, **kwargs):
+                commands.append(command)
+                if command[0] == "codex" and command[1] == "--version":
+                    output = "codex-cli 1.2.3"
+                elif command[0] == "codex":
+                    output = "Logged in using ChatGPT"
+                elif command[1:] == ["--version"]:
+                    output = "git version 2"
+                elif command[1:3] == ["rev-parse", "--is-inside-work-tree"]:
+                    output = "true"
+                else:
+                    output = ""
+                return type("Result", (), {"returncode": 0, "stdout": output, "stderr": ""})()
+
+            with mock.patch.dict(os.environ, self._preflight_env(), clear=False), mock.patch.object(
+                worker.getpass, "getuser", return_value="runner-user"
+            ), mock.patch.object(
+                worker.shutil, "which", side_effect=lambda name: name
+            ), mock.patch.object(worker.subprocess, "run", side_effect=fake_run):
+                worker.run_preflight(directory.name)
+
+            self.assertIn(["codex", "--version"], commands)
+            self.assertIn(["codex", "login", "status"], commands)
+            self.assertIn(["git", "status", "--porcelain"], commands)
+        finally:
+            directory.cleanup()
+
+    def test_preflight_rejects_api_key_fallback(self):
+        directory = self._preflight_workspace()
+        try:
+            values = self._preflight_env()
+            values["OPENAI_API_KEY"] = "must-not-be-used"
+            with mock.patch.dict(os.environ, values, clear=False), mock.patch.object(
+                worker.getpass, "getuser", return_value="runner-user"
+            ), self.assertRaises(worker.WorkerError) as raised:
+                worker.run_preflight(directory.name)
+            self.assertIn("OPENAI_API_KEY is unsupported", str(raised.exception))
+        finally:
+            directory.cleanup()
 
     def test_event_gate_requires_agent_codex_label(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -308,30 +439,31 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("issues:", self.workflow)
         self.assertIn("types: [labeled]", self.workflow)
         self.assertIn("github.event.label.name == 'agent:codex'", self.workflow)
+        self.assertIn("runs-on: [self-hosted, windows, x64, ml-amstress-codex]", self.workflow)
         self.assertIn("contents: write", self.workflow)
         self.assertIn("issues: write", self.workflow)
         self.assertIn("pull-requests: write", self.workflow)
-        self.assertIn("OPENAI_API_KEY", self.workflow)
+        self.assertNotIn("OPENAI_API_KEY", self.workflow)
+        self.assertNotIn("CODEX_CLI_PACKAGE", self.workflow)
+        self.assertNotIn("npm install", self.workflow)
+        self.assertIn("CODEX_EXECUTABLE: codex", self.workflow)
         self.assertIn("persist-credentials: false", self.workflow)
         self.assertIn("GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}", self.workflow)
         self.assertNotIn("gh pr merge", self.workflow)
         self.assertNotIn("enablePullRequestAutoMerge", self.workflow)
 
-    def test_openai_secret_is_scoped_to_worker_step(self):
-        job_env_start = self.workflow.index("    env:\n")
-        steps_start = self.workflow.index("    steps:\n")
-        self.assertNotIn("OPENAI_API_KEY:", self.workflow[job_env_start:steps_start])
-
-        worker_start = self.workflow.index("      - name: Run fail-closed GREEN worker")
-        worker_env = self.workflow[worker_start:]
-        self.assertIn("OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}", worker_env)
-        install_region = self.workflow[steps_start:worker_start]
-        self.assertNotIn("OPENAI_API_KEY", install_region)
-
     def test_auth_and_controlled_setup_are_documented(self):
-        for text in ("OPENAI_API_KEY", "GITHUB_TOKEN", "CODEX_CLI_PACKAGE", "status:review", "status:blocked"):
+        for text in (
+            "ChatGPT",
+            "GITHUB_TOKEN",
+            "CODEX_EXPECTED_VERSION",
+            "CODEX_EXPECTED_RUNNER_NAME",
+            "CODEX_EXPECTED_WINDOWS_USER",
+            "status:review",
+            "status:blocked",
+        ):
             self.assertIn(text, self.docs)
-        self.assertIn("controlled test issue", self.docs)
+        self.assertIn("controlled dry run", self.docs)
         self.assertIn("auto-merge operation is available", self.docs)
 
 

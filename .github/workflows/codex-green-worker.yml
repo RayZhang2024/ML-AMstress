@@ -18,11 +18,13 @@ concurrency:
 jobs:
   run-green-worker:
     if: github.event.label.name == 'agent:codex'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, windows, x64, ml-amstress-codex]
     timeout-minutes: 45
     env:
-      CODEX_COMMAND: codex exec --full-auto
-      CODEX_CLI_PACKAGE: ${{ vars.CODEX_CLI_PACKAGE }}
+      CODEX_EXECUTABLE: codex
+      CODEX_EXPECTED_VERSION: ${{ vars.CODEX_EXPECTED_VERSION }}
+      CODEX_EXPECTED_RUNNER_NAME: ${{ vars.CODEX_EXPECTED_RUNNER_NAME }}
+      CODEX_EXPECTED_WINDOWS_USER: ${{ vars.CODEX_EXPECTED_WINDOWS_USER }}
     steps:
       - name: Check out main
         uses: actions/checkout@v4
@@ -41,19 +43,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install "PyQt5>=5.15" "numpy>=1.21" "matplotlib>=3.4" "joblib>=1.1"
 
-      - name: Install approved Codex CLI
-        run: |
-          if [ -z "$CODEX_CLI_PACKAGE" ]; then
-            echo "::error::Repository variable CODEX_CLI_PACKAGE must name a maintainer-approved pinned package."
-            exit 1
-          fi
-          npm install --global "$CODEX_CLI_PACKAGE"
-
       - name: Run fail-closed GREEN worker
         run: python scripts/codex_issue_worker.py
         env:
-          # Secrets are scoped to the trusted orchestration step. The worker
-          # strips both before Codex and injects GITHUB_TOKEN only for final
-          # push/API operations; OPENAI_API_KEY is used only by Codex.
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # The worker strips this token before Codex and injects it only for
+          # final push/API operations.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

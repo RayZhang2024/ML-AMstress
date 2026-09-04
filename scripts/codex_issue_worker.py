@@ -9,10 +9,11 @@ auto-merge endpoint.
 from __future__ import print_function
 
 import dataclasses
+import getpass
 import json
 import os
 import re
-import shlex
+import shutil
 import subprocess
 import sys
 import urllib.error
@@ -73,6 +74,135 @@ class Eligibility:
     eligible: bool
     reasons: tuple
     contract: object = None
+
+
+def _codex_command_tokens():
+    executable = os.environ.get("CODEX_EXECUTABLE", "codex").strip()
+    return [executable, "exec", "--full-auto"]
+
+
+def _isolate_git_configuration(environment):
+    """Disable inherited Git configuration for an untrusted child process."""
+    environment.pop("GIT_CONFIG_NOGLOBAL", None)
+    for name in list(environment):
+        if name == "GIT_CONFIG_COUNT" or name.startswith("GIT_CONFIG_KEY_") or name.startswith("GIT_CONFIG_VALUE_"):
+            environment.pop(name, None)
+    environment["GIT_CONFIG_NOSYSTEM"] = "1"
+    # Git honors GIT_CONFIG_GLOBAL. On Windows os.devnull is the NUL device,
+    # so this prevents reads of the runner user's ~/.gitconfig and its helpers.
+    environment["GIT_CONFIG_GLOBAL"] = os.devnull
+    environment["GIT_TERMINAL_PROMPT"] = "0"
+
+
+def _probe_environment():
+    """Return a non-secret environment for local preflight probes."""
+    environment = os.environ.copy()
+    for name in ("GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY"):
+        environment.pop(name, None)
+    _isolate_git_configuration(environment)
+    return environment
+
+
+def _probe(command, cwd):
+    """Run a preflight probe without exposing its output."""
+    try:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            env=_probe_environment(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            check=False,
+        )
+    except (OSError, ValueError):
+        return 127, ""
+    return result.returncode, (result.stdout or "") + "\n" + (result.stderr or "")
+
+
+def run_preflight(cwd=None):
+    """Fail closed unless the intended Windows ChatGPT runner is ready."""
+    workspace = os.path.abspath(cwd or os.getcwd())
+    errors = []
+
+    if os.environ.get("RUNNER_OS", "").strip().lower() != "windows":
+        errors.append("RUNNER_OS must be Windows")
+    if os.environ.get("RUNNER_ARCH", "").strip().upper() != "X64":
+        errors.append("RUNNER_ARCH must be X64")
+
+    runner_name = os.environ.get("RUNNER_NAME", "").strip()
+    expected_runner_name = os.environ.get("CODEX_EXPECTED_RUNNER_NAME", "").strip()
+    if not runner_name:
+        errors.append("RUNNER_NAME is not available")
+    if not expected_runner_name:
+        errors.append("CODEX_EXPECTED_RUNNER_NAME is not configured")
+    elif runner_name.lower() != expected_runner_name.lower():
+        errors.append("runner identity does not match CODEX_EXPECTED_RUNNER_NAME")
+
+    expected_user = os.environ.get("CODEX_EXPECTED_WINDOWS_USER", "").strip()
+    actual_user = getpass.getuser()
+    if not expected_user:
+        errors.append("CODEX_EXPECTED_WINDOWS_USER is not configured")
+    elif actual_user.lower() != expected_user.lower():
+        errors.append("Windows user context does not match CODEX_EXPECTED_WINDOWS_USER")
+
+    # An API key must never be a usable fallback for this ChatGPT-authenticated
+    # worker. Reject misconfigured runner environments before any claim.
+    if os.environ.get("OPENAI_API_KEY"):
+        errors.append("OPENAI_API_KEY is unsupported; configure Codex ChatGPT login instead")
+
+    command = _codex_command_tokens()
+    executable = command[0] if command else ""
+    resolved_codex = shutil.which(executable) if executable else None
+    if not resolved_codex and executable and os.path.isfile(executable):
+        resolved_codex = executable
+    if not resolved_codex:
+        errors.append("Codex executable is not available on PATH")
+    else:
+        version_code, version_output = _probe([resolved_codex, "--version"], workspace)
+        if version_code != 0 or not version_output.strip():
+            errors.append("Codex executable did not return a usable version")
+        expected_version = os.environ.get("CODEX_EXPECTED_VERSION", "").strip()
+        if not expected_version:
+            errors.append("CODEX_EXPECTED_VERSION is not configured")
+        elif expected_version and expected_version not in version_output:
+            errors.append("Codex version does not match CODEX_EXPECTED_VERSION")
+
+        auth_code, auth_output = _probe([resolved_codex, "login", "status"], workspace)
+        if auth_code != 0 or "logged in using chatgpt" not in auth_output.lower():
+            errors.append("Codex ChatGPT authentication is unavailable non-interactively")
+
+    git_executable = shutil.which("git")
+    if not git_executable:
+        errors.append("Git executable is not available on PATH")
+    elif not os.path.isdir(workspace):
+        errors.append("worker workspace does not exist")
+    else:
+        git_code, git_output = _probe([git_executable, "--version"], workspace)
+        if git_code != 0 or not git_output.strip():
+            errors.append("Git executable did not return a usable version")
+        if not os.path.exists(os.path.join(workspace, ".git")):
+            errors.append("worker workspace is not a Git checkout")
+        else:
+            repo_code, repo_output = _probe(
+                [git_executable, "rev-parse", "--is-inside-work-tree"], workspace
+            )
+            if repo_code != 0 or repo_output.strip().lower() != "true":
+                errors.append("worker workspace is not inside a Git work tree")
+            status_code, status_output = _probe(
+                [git_executable, "status", "--porcelain"], workspace
+            )
+            if status_code != 0:
+                errors.append("could not inspect worker workspace status")
+            elif status_output.strip():
+                errors.append("worker workspace is not clean")
+
+    for required in ("AGENTS.md", os.path.join("scripts", "codex_issue_worker.py")):
+        if not os.path.isfile(os.path.join(workspace, required)):
+            errors.append("required workspace file is missing: %s" % required.replace("\\", "/"))
+
+    if errors:
+        raise WorkerError("runner preflight failed: " + "; ".join(errors))
 
 
 def _section(body, heading):
@@ -380,7 +510,7 @@ def _all_changed_paths(base_sha):
 
 def _codex_prompt(issue, branch):
     body = issue["body"]
-    for secret_name in ("OPENAI_API_KEY", "GITHUB_TOKEN"):
+    for secret_name in ("GITHUB_TOKEN",):
         secret = os.environ.get(secret_name)
         if secret:
             body = body.replace(secret, "[REDACTED]")
@@ -405,24 +535,19 @@ Exact issue contract:
 
 
 def run_codex(issue, branch, cwd):
-    raw_command = os.environ.get("CODEX_COMMAND", "codex exec --full-auto").strip()
-    if not raw_command:
-        raise WorkerError("CODEX_COMMAND is not configured")
-    if not os.environ.get("OPENAI_API_KEY"):
-        raise WorkerError("OPENAI_API_KEY secret is not configured")
-    command = shlex.split(raw_command) + [_codex_prompt(issue, branch)]
+    command = _codex_command_tokens() + [_codex_prompt(issue, branch)]
+    if not command[0]:
+        raise WorkerError("CODEX_EXECUTABLE is not configured")
     # Capture output so a provider/CLI cannot accidentally echo credentials into
     # Actions logs, comments, or PR text.  Only the exit status is reported.
     codex_env = os.environ.copy()
     codex_env.pop("GITHUB_TOKEN", None)
     codex_env.pop("GH_TOKEN", None)
-    codex_env.pop("CODEX_CLI_PACKAGE", None)
-    # Checkout credentials are disabled in the workflow. These settings also
-    # prevent a hosted runner's global/system git helper from supplying a
-    # write credential to the untrusted Codex process.
-    codex_env["GIT_CONFIG_NOSYSTEM"] = "1"
-    codex_env["GIT_CONFIG_NOGLOBAL"] = "1"
-    codex_env["GIT_TERMINAL_PROMPT"] = "0"
+    codex_env.pop("OPENAI_API_KEY", None)
+    # Checkout credentials are disabled in the workflow. This supported Git
+    # isolation prevents a runner user's global/system credential helper from
+    # supplying a write credential to the untrusted Codex process.
+    _isolate_git_configuration(codex_env)
     result = subprocess.run(
         command,
         cwd=cwd,
@@ -439,7 +564,6 @@ def run_codex(issue, branch, cwd):
 def run_normal_validation(cwd):
     env = os.environ.copy()
     env.pop("GITHUB_TOKEN", None)
-    env.pop("OPENAI_API_KEY", None)
     env.setdefault("QT_QPA_PLATFORM", "offscreen")
     env.setdefault("MPLBACKEND", "Agg")
     _run([sys.executable, "-m", "py_compile", "AM_gui_v7.py", "data_extract.py"], cwd=cwd, env=env)
@@ -524,16 +648,14 @@ class Worker(object):
 
     def execute(self):
         try:
+            if self.requires_auth:
+                run_preflight(self.cwd)
             issue, contract, dependency_states = self._snapshot()
         except Exception as error:
             self._blocked(str(error))
             raise
         branch = deterministic_branch_name(issue["number"], issue.get("title", ""))
         self.branch = branch
-        if self.requires_auth and not os.environ.get("OPENAI_API_KEY"):
-            reason = "OPENAI_API_KEY secret is not configured"
-            self._blocked(reason)
-            raise WorkerError(reason)
         eligibility = self._eligibility(issue, dependency_states, branch_exists=self.client.branch_exists(branch))
         if not eligibility.eligible:
             reason = "; ".join(eligibility.reasons)
