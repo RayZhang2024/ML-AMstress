@@ -160,7 +160,7 @@ def _isolate_git_configuration(environment):
 def _probe_environment():
     """Return a non-secret environment for local preflight probes."""
     environment = os.environ.copy()
-    for name in ("GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY"):
+    for name in ("GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY", "AUTOMATION_APP_TOKEN"):
         environment.pop(name, None)
     _isolate_git_configuration(environment)
     return environment
@@ -773,6 +773,7 @@ def run_codex(issue, branch, cwd):
     codex_env.pop("GITHUB_TOKEN", None)
     codex_env.pop("GH_TOKEN", None)
     codex_env.pop("OPENAI_API_KEY", None)
+    codex_env.pop("AUTOMATION_APP_TOKEN", None)
     # Checkout credentials are disabled in the workflow. This supported Git
     # isolation prevents a runner user's global/system credential helper from
     # supplying a write credential to the untrusted Codex process.
@@ -795,6 +796,9 @@ def run_codex(issue, branch, cwd):
 def run_normal_validation(cwd):
     env = os.environ.copy()
     env.pop("GITHUB_TOKEN", None)
+    env.pop("GH_TOKEN", None)
+    env.pop("OPENAI_API_KEY", None)
+    env.pop("AUTOMATION_APP_TOKEN", None)
     env.setdefault("QT_QPA_PLATFORM", "offscreen")
     env.setdefault("MPLBACKEND", "Agg")
     _run([sys.executable, "-m", "py_compile", "AM_gui_v7.py", "data_extract.py"], cwd=cwd, env=env)
@@ -807,9 +811,9 @@ def run_normal_validation(cwd):
 
 def push_branch(cwd, branch):
     """Push using a one-command, trusted post-Codex auth boundary."""
-    token = os.environ.get("GITHUB_TOKEN")
+    token = os.environ.get("AUTOMATION_APP_TOKEN")
     if not token:
-        raise WorkerError("GITHUB_TOKEN is required for the final push")
+        raise WorkerError("AUTOMATION_APP_TOKEN is required for the final push")
     credentials = "x-access-token:" + token
     encoded_credentials = base64.b64encode(credentials.encode("utf-8")).decode(
         "ascii"
@@ -818,6 +822,7 @@ def push_branch(cwd, branch):
     env.pop("OPENAI_API_KEY", None)
     env.pop("GITHUB_TOKEN", None)
     env.pop("GH_TOKEN", None)
+    env.pop("AUTOMATION_APP_TOKEN", None)
     env["GIT_CONFIG_COUNT"] = "1"
     env["GIT_CONFIG_KEY_0"] = "http.https://github.com/.extraheader"
     env["GIT_CONFIG_VALUE_0"] = "AUTHORIZATION: basic " + encoded_credentials
@@ -836,6 +841,7 @@ class Worker(object):
         codex_runner=None,
         validation_runner=None,
         push_runner=None,
+        event_client=None,
     ):
         self.client = client
         self.issue_number = int(issue_number)
@@ -845,6 +851,7 @@ class Worker(object):
         self.codex_runner = codex_runner or run_codex
         self.validation_runner = validation_runner or run_normal_validation
         self.push_runner = push_runner or push_branch
+        self.event_client = event_client or client
         self.requires_auth = codex_runner is None
 
     def _snapshot(self):
@@ -917,7 +924,7 @@ class Worker(object):
 
         base_sha = self.client.branch_sha(BASE_BRANCH)
         try:
-            self.client.create_branch(branch, base_sha)
+            self.event_client.create_branch(branch, base_sha)
         except WorkerError as error:
             self._blocked("deterministic branch claim failed (possible duplicate): %s" % error)
             raise
@@ -983,7 +990,7 @@ class Worker(object):
                 "- Abaqus/CAE and scientific validation: not run\n"
                 "- Merge/auto-merge: not performed\n"
             ) % (self.issue_number, branch, ", ".join(changed) or "(none)")
-            pr = self.client.create_pr(
+            pr = self.event_client.create_pr(
                 branch,
                 "Issue #%d: %s" % (self.issue_number, claimed_issue.get("title", "GREEN work")),
                 pr_body,
@@ -1031,8 +1038,12 @@ def main(arguments=None):
         raise WorkerError("GITHUB_EVENT_PATH is required")
     number, repository = _event_issue_number(event_path)
     client = GitHubClient(os.environ.get("GITHUB_TOKEN"), repository)
+    event_token = os.environ.get("AUTOMATION_APP_TOKEN")
+    if not event_token:
+        raise WorkerError("AUTOMATION_APP_TOKEN is required for event-generating writes")
+    event_client = GitHubClient(event_token, repository)
     run_id = os.environ.get("GITHUB_RUN_ID", "local")
-    Worker(client, number, run_id).execute()
+    Worker(client, number, run_id, event_client=event_client).execute()
 
 
 if __name__ == "__main__":

@@ -1,5 +1,7 @@
 import copy
 import inspect
+import os
+from pathlib import Path
 import subprocess
 import unittest
 from unittest import mock
@@ -14,6 +16,7 @@ from scripts import codex_issue_worker as green_worker
 HEAD = "a" * 40
 NEW_HEAD = "b" * 40
 BRANCH = "codex/issue-75-a5-green-task"
+ROOT = Path(__file__).resolve().parents[1]
 
 ISSUE_BODY = """## Goal
 Test.
@@ -122,6 +125,31 @@ class FakeClient:
 
 
 class WorkflowAndEligibilityTests(unittest.TestCase):
+    def test_a5_workflow_mints_repository_scoped_app_token_for_repair_push_only(self):
+        workflow = (ROOT / ".github" / "workflows" / "a5-review-loop.yml").read_text(encoding="utf-8")
+        self.assertIn("uses: actions/create-github-app-token@v3", workflow)
+        self.assertIn("client-id: ${{ vars.AUTOMATION_APP_CLIENT_ID }}", workflow)
+        self.assertIn("private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}", workflow)
+        self.assertIn("owner: RayZhang2024", workflow)
+        self.assertIn("repositories: ML-AMstress", workflow)
+        self.assertIn("permission-contents: write", workflow)
+        self.assertIn("AUTOMATION_APP_TOKEN: ${{ steps.automation-app-token.outputs.token }}", workflow)
+        self.assertIn("contents: read", workflow)
+        self.assertIn("issues: write", workflow)
+        self.assertIn("pull-requests: read", workflow)
+        self.assertIn("persist-credentials: false", workflow)
+        self.assertNotIn("enablePullRequestAutoMerge", workflow)
+
+    def test_a5_workflow_runs_orchestrator_as_a_package_module(self):
+        workflow = (ROOT / ".github" / "workflows" / "a5-review-loop.yml").read_text(encoding="utf-8")
+        self.assertIn("python -m scripts.a5_review_orchestrator", workflow)
+        self.assertNotIn("python scripts/a5_review_orchestrator.py", workflow)
+
+    def test_orchestrator_requires_app_token_before_trusted_execution(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(orchestrator.OrchestrationError, "AUTOMATION_APP_TOKEN"):
+                orchestrator.require_automation_app_token()
+
     def test_review_label_provisioning_is_idempotent_and_creates_missing(self):
         existing = FakeClient()
         orchestrator.ensure_review_labels(existing)

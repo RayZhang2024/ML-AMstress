@@ -49,6 +49,13 @@ class OrchestrationError(Exception):
     """A fail-closed trusted orchestration failure."""
 
 
+def require_automation_app_token() -> str:
+    token = os.environ.get("AUTOMATION_APP_TOKEN")
+    if not token:
+        raise OrchestrationError("AUTOMATION_APP_TOKEN is required for trusted repair pushes")
+    return token
+
+
 @dataclasses.dataclass(frozen=True)
 class WorkflowRun:
     run_id: int
@@ -619,6 +626,7 @@ def main(arguments: Sequence[str] | None = None) -> None:
     event_path = os.environ.get("GITHUB_EVENT_PATH")
     if not event_path:
         raise OrchestrationError("GITHUB_EVENT_PATH is required")
+    require_automation_app_token()
     with open(event_path, "r", encoding="utf-8") as stream:
         event = json.load(stream)
     orchestrate(GitHubClient(os.environ.get("GITHUB_TOKEN")), event, os.getcwd())

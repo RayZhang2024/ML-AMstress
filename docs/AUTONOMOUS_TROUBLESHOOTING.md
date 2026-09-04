@@ -138,7 +138,7 @@ Preserve the failed state before recovery. The trusted worker owns control-plane
 
 **Diagnosis/evidence:** Trusted push uses origin-scoped `http.https://github.com/.extraheader` Basic auth.
 
-**Correct fix:** Base64-encode `x-access-token:<GITHUB_TOKEN>` for Basic auth and inject it only for trusted `git push origin <branch>`.
+**Correct fix:** Base64-encode `x-access-token:<AUTOMATION_APP_TOKEN>` for Basic auth and inject it only for the trusted event-generating `git push origin <branch>`. The short-lived repository App token is minted by the workflow; the built-in `GITHUB_TOKEN` remains for labels, status, and audit state.
 
 **Do not fix by:** Using Bearer, persisting checkout credentials, or exposing token to Codex.
 
@@ -166,15 +166,15 @@ Preserve the failed state before recovery. The trusted worker owns control-plane
 
 **Symptom:** PR exists, but hosted CI has not run and GitHub shows `action_required`.
 
-**Root cause:** GitHub requires maintainer approval for the bot-created PR under applicable policy.
+**Root cause:** The PR was created or updated with a credential that does not generate the required normal pull-request event under the repository's policy.
 
 **Diagnosis/evidence:** Check workflow state; this is distinct from a test failure.
 
-**Correct fix:** A maintainer approves pending run, then reviews hosted CI.
+**Correct fix:** Verify the trusted workflow minted the repository-scoped App token and used it for the worker branch push and PR create/update. The App-authenticated event should start normal PR CI without a manual approval gate.
 
-**Do not fix by:** Retrying worker, merging before CI, or changing permissions to force execution.
+**Do not fix by:** Retrying worker with broader credentials, exposing token material, merging before CI, or changing permissions to force execution.
 
-**Prevention/regression protection:** Repository process/configuration and runbook checklist; approval remains human action.
+**Prevention/regression protection:** Repository App configuration, workflow token-scoping tests, and runbook checklist.
 
 **Evidence references:** Issue #30 hosted PR CI.
 

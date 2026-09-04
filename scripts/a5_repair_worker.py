@@ -217,7 +217,7 @@ def build_repair_prompt(request: RepairRequest) -> str:
 def _isolated_environment(remove_tokens: bool = True) -> dict[str, str]:
     env = os.environ.copy()
     if remove_tokens:
-        for name in ("GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY"):
+        for name in ("GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY", "AUTOMATION_APP_TOKEN"):
             env.pop(name, None)
     for name in list(env):
         if name == "GIT_CONFIG_COUNT" or name.startswith("GIT_CONFIG_KEY_") or name.startswith("GIT_CONFIG_VALUE_"):
@@ -340,9 +340,9 @@ def commit_repair(request: RepairRequest, cwd: str) -> str:
 
 
 def push_repair(request: RepairRequest, cwd: str, new_head: str) -> None:
-    token = os.environ.get("GITHUB_TOKEN")
+    token = os.environ.get("AUTOMATION_APP_TOKEN")
     if not token:
-        raise RepairError("trusted push credential is unavailable")
+        raise RepairError("trusted App push credential is unavailable")
     encoded = base64.b64encode(("x-access-token:" + token).encode("utf-8")).decode("ascii")
     env = _isolated_environment()
     env["GIT_CONFIG_COUNT"] = "1"

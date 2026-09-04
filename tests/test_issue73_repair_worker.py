@@ -94,7 +94,8 @@ class RepairExecutionTests(unittest.TestCase):
 
     def test_codex_command_stdin_and_secret_isolation(self):
         completed = mock.Mock(returncode=0, stdout="", stderr="")
-        with mock.patch.object(worker, "resolve_codex_executable", return_value="codex.exe"), \
+        with mock.patch.dict(os.environ, {"AUTOMATION_APP_TOKEN": "app-secret"}, clear=False), \
+             mock.patch.object(worker, "resolve_codex_executable", return_value="codex.exe"), \
              mock.patch.object(worker, "_run", return_value=completed) as run:
             worker.run_codex(request(), ".")
         command, _, environment, prompt = run.call_args.args
@@ -104,6 +105,7 @@ class RepairExecutionTests(unittest.TestCase):
         self.assertNotIn(prompt, command)
         self.assertEqual(environment["GIT_CONFIG_GLOBAL"], os.devnull)
         self.assertEqual(environment["GIT_TERMINAL_PROMPT"], "0")
+        self.assertNotIn("AUTOMATION_APP_TOKEN", environment)
 
     def test_codex_failure_does_not_expose_streams(self):
         completed = mock.Mock(returncode=9, stdout="secret stdout", stderr="secret stderr")
@@ -176,12 +178,20 @@ class RepairExecutionTests(unittest.TestCase):
         def record(command, cwd, env=None, input_text=None):
             captured["command"], captured["env"] = command, env
             return mock.Mock(returncode=0, stdout="", stderr="")
-        with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "topsecret"}, clear=True), \
+        with mock.patch.dict(os.environ, {"AUTOMATION_APP_TOKEN": "topsecret"}, clear=True), \
              mock.patch.object(worker, "_run", side_effect=record):
             worker.push_repair(request(), ".", NEW_HEAD)
         self.assertIn("--force-with-lease=refs/heads/codex/issue-73-repair:" + HEAD, captured["command"])
         self.assertNotIn("topsecret", " ".join(captured["command"]))
         self.assertNotIn("OPENAI_API_KEY", captured["env"])
+        self.assertNotIn("AUTOMATION_APP_TOKEN", captured["env"])
+
+    def test_push_fails_closed_without_automation_app_token(self):
+        with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "state-token"}, clear=True), \
+             mock.patch.object(worker, "_run") as run:
+            with self.assertRaisesRegex(worker.RepairError, "App push credential is unavailable"):
+                worker.push_repair(request(), ".", NEW_HEAD)
+        run.assert_not_called()
 
     def test_push_lease_accepts_expected_head_and_rejects_moved_remote(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -204,7 +214,7 @@ class RepairExecutionTests(unittest.TestCase):
             self._git(str(source), "commit", "-am", "repair")
             new_head = self._git(str(source), "rev-parse", "HEAD").stdout.strip()
 
-            with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "test-token"}):
+            with mock.patch.dict(os.environ, {"AUTOMATION_APP_TOKEN": "test-token"}):
                 worker.push_repair(request(branch=branch, expected_head_sha=expected_head), str(source), new_head)
             self.assertEqual(self._git(directory, "--git-dir", str(remote), "rev-parse", "refs/heads/" + branch).stdout.strip(),
                              new_head)
@@ -218,7 +228,7 @@ class RepairExecutionTests(unittest.TestCase):
             self._git(str(mover), "push", "-q", "origin", "HEAD:refs/heads/" + branch)
             moved_head = self._git(str(mover), "rev-parse", "HEAD").stdout.strip()
 
-            with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "test-token"}):
+            with mock.patch.dict(os.environ, {"AUTOMATION_APP_TOKEN": "test-token"}):
                 with self.assertRaises(worker.RepairError):
                     worker.push_repair(request(branch=branch, expected_head_sha=new_head), str(source), new_head)
             self.assertEqual(self._git(directory, "--git-dir", str(remote), "rev-parse", "refs/heads/" + branch).stdout.strip(),
