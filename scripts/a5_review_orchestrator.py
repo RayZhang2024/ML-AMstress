@@ -43,6 +43,12 @@ CLOSES_RE = re.compile(r"(?im)^\s*(?:closes?|fix(?:es)?|resolves?)\s+#([1-9][0-9
 STATE_MARKER_RE = re.compile(r"^<!-- a5\.4a-state:(\{.*\}) -->$")
 CI_MARKER_RE = re.compile(r"^<!-- a5\.4a-ci:(\{.*\}) -->$")
 REPAIR_MARKER_RE = re.compile(r"^<!-- a5\.4a-repair:(\{.*\}) -->$")
+A5_GITHUB_USER_AGENT = "ml-amstress-a5-review-loop"
+REST_OPERATIONS = frozenset((
+    "list-open-prs", "get-pr", "get-issue", "get-dependency-issue",
+    "list-comments", "list-labels", "create-label", "list-changed-files",
+    "set-labels", "create-audit-comment",
+))
 
 
 class OrchestrationError(Exception):
@@ -557,31 +563,40 @@ class GitHubClient:
             raise OrchestrationError("GITHUB_TOKEN is required by trusted orchestration")
         self.token, self.repository = token, repository
 
-    def _request(self, method: str, path: str, payload: Any = None, repository: str | None = None) -> Any:
+    def _request(self, operation: str, method: str, path: str, payload: Any = None,
+                 repository: str | None = None) -> Any:
+        if operation not in REST_OPERATIONS:
+            raise OrchestrationError("trusted GitHub operation is invalid")
         data = None if payload is None else json.dumps(payload).encode("utf-8")
         request = urllib.request.Request("https://api.github.com/repos/%s%s" % (repository or self.repository, path), data=data, method=method)
         request.add_header("Accept", "application/vnd.github+json")
         request.add_header("Authorization", "Bearer " + self.token)
         request.add_header("X-GitHub-Api-Version", "2022-11-28")
+        request.add_header("User-Agent", A5_GITHUB_USER_AGENT)
         if data is not None:
             request.add_header("Content-Type", "application/json")
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 return json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, urllib.error.HTTPError, ValueError) as error:
-            raise OrchestrationError("trusted GitHub API request failed") from error
+        except urllib.error.HTTPError as error:
+            raise OrchestrationError("GitHub %s: HTTP %d" % (operation, error.code)) from None
+        except urllib.error.URLError:
+            raise OrchestrationError("GitHub %s: transport failure" % operation) from None
+        except (UnicodeError, ValueError):
+            raise OrchestrationError("GitHub %s: invalid response" % operation) from None
 
     def pr(self, number: int) -> Mapping[str, Any]:
-        return self._request("GET", "/pulls/%d" % number)
+        return self._request("get-pr", "GET", "/pulls/%d" % number)
 
     def issue(self, number: int) -> Mapping[str, Any]:
-        return self._request("GET", "/issues/%d" % number)
+        return self._request("get-issue", "GET", "/issues/%d" % number)
 
     def dependency_issue(self, dependency: green_worker.Dependency) -> Mapping[str, Any]:
-        return self._request("GET", "/issues/%d" % dependency.number, repository=dependency.repository)
+        return self._request("get-dependency-issue", "GET", "/issues/%d" % dependency.number,
+                             repository=dependency.repository)
 
     def repository_labels(self) -> list[Mapping[str, Any]]:
-        value = self._request("GET", "/labels?per_page=100")
+        value = self._request("list-labels", "GET", "/labels?per_page=100")
         if not isinstance(value, list) or len(value) >= 100:
             raise OrchestrationError("GitHub repository labels response is malformed")
         return value
@@ -589,33 +604,33 @@ class GitHubClient:
     def create_label(self, specification: Mapping[str, str]) -> None:
         if not isinstance(specification, Mapping) or set(specification) != {"name", "color", "description"}:
             raise OrchestrationError("review label specification is malformed")
-        self._request("POST", "/labels", dict(specification))
+        self._request("create-label", "POST", "/labels", dict(specification))
 
     def comments(self, number: int) -> list[Mapping[str, Any]]:
-        value = self._request("GET", "/issues/%d/comments?per_page=100" % number)
+        value = self._request("list-comments", "GET", "/issues/%d/comments?per_page=100" % number)
         if not isinstance(value, list) or len(value) >= 100:
             raise OrchestrationError("GitHub comments response is malformed")
         return value
 
     def changed_files(self, number: int) -> list[Mapping[str, Any]]:
-        value = self._request("GET", "/pulls/%d/files?per_page=100" % number)
+        value = self._request("list-changed-files", "GET", "/pulls/%d/files?per_page=100" % number)
         if not isinstance(value, list) or len(value) >= 100:
             raise OrchestrationError("GitHub changed-file response is malformed")
         return value
 
     def open_prs_for_head(self, head_sha: str) -> list[Mapping[str, Any]]:
-        value = self._request("GET", "/pulls?state=open&per_page=100")
+        value = self._request("list-open-prs", "GET", "/pulls?state=open&per_page=100")
         if not isinstance(value, list) or len(value) >= 100:
             raise OrchestrationError("GitHub PR response is malformed")
         return [item for item in value if isinstance(item, Mapping) and item.get("head", {}).get("sha") == head_sha]
 
     def set_labels(self, number: int, labels: Sequence[str]) -> None:
-        self._request("PUT", "/issues/%d/labels" % number, {"labels": list(labels)})
+        self._request("set-labels", "PUT", "/issues/%d/labels" % number, {"labels": list(labels)})
 
     def comment(self, number: int, body: str) -> None:
         if not isinstance(body, str) or len(body) > MAX_AUDIT:
             raise OrchestrationError("refusing unbounded audit comment")
-        self._request("POST", "/issues/%d/comments" % number, {"body": body})
+        self._request("create-audit-comment", "POST", "/issues/%d/comments" % number, {"body": body})
 
 
 def main(arguments: Sequence[str] | None = None) -> None:

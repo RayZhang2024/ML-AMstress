@@ -2,8 +2,9 @@
 
 `.github/workflows/a5-review-loop.yml` starts only after a completed
 `Normal Python CI` `workflow_run`. It checks out trusted `main` with persisted
-credentials disabled, then runs `scripts/a5_review_orchestrator.py` on the
-designated self-hosted Windows runner.
+credentials disabled, then runs the coordinator as
+`python -m scripts.a5_review_orchestrator` on the designated self-hosted
+Windows runner.
 
 The workflow keeps the built-in `GITHUB_TOKEN` for A5.2 labels/status/audit
 state. It mints a repository-scoped, short-lived App installation token with
@@ -20,6 +21,13 @@ for the CI head, verifies its canonical `Closes #N` link and eligible open
 GREEN `agent:codex` issue, and fails closed on stale, forked, ambiguous, or
 non-GREEN evidence. It constructs the A5.1 snapshot from trusted API evidence;
 A5.1 remains read-only and receives no GitHub credential.
+
+The trusted A5 REST boundary uses a fixed application User-Agent. Every API
+call has a stable operation name; an HTTP failure records only that operation
+and its numeric status, while transport and malformed-response failures record
+only the operation and their fixed category. These diagnostics never include
+request URLs, payloads, response bodies, headers, tokens, prompts, diffs, or
+local paths.
 
 A5.2 is the sole source of `review:pending`, `review:blocker`,
 `review:clean`, and `review:escalated` transitions. Bounded machine-readable
