@@ -98,10 +98,12 @@ API-billing fallback.
    fails closed if the checkout is not clean or required policy files are
    missing.
 5. Install a maintainer-approved Python 3.11 or newer on that same account's
-   `PATH`. The dedicated runner's currently validated local interpreter is
-   Python 3.13.14. The self-hosted workflow verifies the local executable and
-   version before dependency installation; it does not use `actions/setup-python`
-   or download, install, repair, or modify Python/Windows registry state.
+   `PATH`. This Python is required for trusted-worker preflight and its
+   authoritative final normal-Python validation. The dedicated runner's
+   currently validated local interpreter is Python 3.13.14. The self-hosted
+   workflow verifies the local executable and version before dependency
+   installation; it does not use `actions/setup-python` or download, install,
+   repair, or modify Python/Windows registry state.
 
 The workflow performs preflight before any issue claim. It verifies Windows and
 x64 runner identity, the expected runner/user context, Codex executable and
@@ -112,11 +114,29 @@ the run stops and reports the failure; it never silently switches to API-key
 billing. Existing `GITHUB_TOKEN` isolation, checkout credential disabling,
 trusted push/API operations, and protected control-plane paths remain intact.
 
-Before routing Issue #30, a maintainer must perform one controlled dry run under
-the actual runner account and confirm that authenticated Codex starts
-non-interactively without exposing credentials. Keep Issue #30 untriggered
-until that check passes. The worker's automated tests use fakes and do not
-invoke Codex; this controlled runner test remains manual.
+### Preflight and controlled integration sequence
+
+After the maintainer has configured the designated runner, pinned
+ChatGPT-authenticated Codex CLI, expected runner/user/version variables, Git,
+and trusted-worker Python, verify the basic runner preflight and login under
+the runner account without exposing credentials. This confirms the runner
+identity, Codex version and non-interactive ChatGPT login, Git availability,
+and trusted-worker Python availability. It is a prerequisite check, not a
+separate end-to-end worker dry run.
+
+Once those prerequisites are established, Issue #30 is the controlled live
+end-to-end GREEN worker integration test. It is intended to exercise the
+harmless scoped implementation path, trusted validation, push, PR creation,
+transition to `status:review`, and stop-without-merge behavior. Do not assume
+that this full integration has succeeded until Issue #30 actually completes
+those steps; prior preflight or launch observations establish only their
+respective prerequisites.
+
+Sandboxed Codex may run optional local checks when available, but its inability
+to invoke Python or other optional tooling is not by itself a reason to decline
+an otherwise clear GREEN edit. It must report that limitation truthfully. The
+trusted worker, not sandboxed Codex, owns the required Python 3.11+ preflight
+and authoritative final normal-Python validation.
 
 ## Paths and reproducibility
 

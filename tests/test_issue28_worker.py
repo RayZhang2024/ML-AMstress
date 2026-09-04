@@ -975,7 +975,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("git clean", diagnostic_step)
         self.assertNotIn("git reset", diagnostic_step)
 
-    def test_auth_and_controlled_setup_are_documented(self):
+    def test_auth_and_controlled_integration_setup_are_documented(self):
         for text in (
             "ChatGPT",
             "GITHUB_TOKEN",
@@ -986,7 +986,13 @@ class WorkflowContractTests(unittest.TestCase):
             "status:blocked",
         ):
             self.assertIn(text, self.docs)
-        self.assertIn("controlled dry run", self.docs)
+        self.assertIn("Preflight and controlled integration sequence", self.docs)
+        self.assertIn("Issue #30 is the controlled live", self.docs)
+        self.assertIn("end-to-end GREEN worker integration test", self.docs)
+        self.assertIn("trusted-worker preflight", self.docs)
+        self.assertIn("authoritative final normal-Python validation", self.docs)
+        self.assertIn("not by itself a reason to decline", self.docs)
+        self.assertNotIn("Keep Issue #30 untriggered", self.docs)
         self.assertIn("auto-merge operation is available", self.docs)
 
 
