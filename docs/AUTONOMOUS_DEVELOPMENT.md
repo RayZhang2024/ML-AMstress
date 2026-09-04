@@ -29,6 +29,34 @@ transitions are defined in [AUTONOMOUS_ORCHESTRATION.md](AUTONOMOUS_ORCHESTRATIO
   distinguish planned/manual validation from checks actually performed. Never
   assume unrun Abaqus, solver, GUI, or scientific evidence.
 
+### Trusted-worker implementation boundary
+
+The readiness, dependency, duplicate-work, and branch/PR checks above apply to
+an actor that owns orchestration. The trusted GREEN worker in
+`scripts/codex_issue_worker.py` is such an actor: it performs those checks,
+re-checks races and dependencies, and makes the deterministic branch claim
+before it invokes sandboxed Codex.
+
+After that worker has completed those checks for its immutable issue snapshot
+and claimed branch, the sandboxed Codex implementation process must treat the
+resulting control-plane facts as authoritative. It must not require GitHub API
+access or repeat issue labels/status/risk, dependency, duplicate/open-PR,
+branch-claim, or race checks. This exception does not apply to manual agents
+or any other actor that has not received a completed trusted-worker claim.
+
+The trusted worker owns branch creation and claim, issue labels/status,
+authoritative normal-Python validation, commit/push, PR creation, and the
+merge/no-merge policy. Those worker-owned steps are context, not prerequisites
+for sandboxed Codex. Sandboxed Codex still owns the local repository Necessity
+Gate: determine whether the requested change is already satisfied, identify
+the minimal scoped edits, respect Do-not-change constraints, and stop on
+effective-risk escalation or scientific ambiguity. It may run focused local
+checks when available and must report checks it could not run truthfully;
+unavailable optional Python or other tooling alone does not block an otherwise
+clear GREEN edit because the trusted worker performs final validation. The
+sandboxed process must continue without `GITHUB_TOKEN`, `GH_TOKEN`, or
+`OPENAI_API_KEY`.
+
 ## Repository risk model
 
 Classify a work unit by the highest-risk behavior it changes, not by the

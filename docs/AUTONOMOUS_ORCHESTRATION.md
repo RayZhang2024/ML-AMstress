@@ -130,6 +130,32 @@ or the state cannot be determined, it must stop and set/report `status:blocked`
 rather than racing or duplicating work. Closing an issue or merging a PR is not
 an agent's implicit authority.
 
+### Trusted GREEN worker and sandboxed Codex
+
+The eligibility and claim rules in this section remain mandatory for any actor
+that owns orchestration, including manual agents. The trusted GREEN worker in
+`scripts/codex_issue_worker.py` performs the readiness, dependency,
+duplicate/open-PR/branch, and race re-checks, then claims its deterministic
+branch before it invokes Codex.
+
+Once that worker has completed those checks for the immutable issue snapshot
+and claimed branch, its sandboxed Codex implementation process must treat the
+control-plane facts as authoritative. It must not require GitHub API access or
+repeat labels/status/risk, dependency, duplicate/open-PR, branch-claim, or race
+checks. This is not a general exemption: an actor without a completed
+trusted-worker claim must still perform the checks above before starting work.
+
+For this invocation, branch creation and claim, labels/status, authoritative
+normal-Python validation, commit/push, PR creation, and merge/no-merge policy
+are trusted-worker duties and context, not sandboxed Codex prerequisites.
+Sandboxed Codex remains responsible for the local repository Necessity Gate,
+minimal scoped edits, Do-not-change constraints, effective-risk/scientific
+ambiguity stops, and truthful reporting of optional local checks it could not
+run. Missing optional Python or other tooling in the sandbox does not by itself
+block a clear GREEN edit because the trusted worker performs final validation.
+The sandboxed process receives no `GITHUB_TOKEN`, `GH_TOKEN`, or
+`OPENAI_API_KEY`.
+
 ## State transitions and evidence
 
 The intended lifecycle is:
