@@ -46,6 +46,35 @@ RISK_PREFIX = "risk:"
 CLAIM_MARKER = "<!-- codex-worker-claim issue:{number} run:{run_id} branch:{branch} -->"
 MAX_WORKSPACE_STATUS_ENTRIES = 20
 MAX_WORKSPACE_STATUS_PATH_LENGTH = 240
+MAX_CODEX_NOOP_DIAGNOSTIC_CHARS = 500
+MAX_CODEX_NOOP_DIAGNOSTIC_LINES = 3
+CODEX_NOOP_FALLBACK = (
+    "Codex exited successfully without repository changes; no safe diagnostic text available"
+)
+AUTHORIZATION_VALUE_RE = re.compile(
+    r"(?i)\b(?:authorization\s*:\s*)?(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{6,}"
+)
+TOKEN_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|token|secret)\s*[=:]\s*['\"]?[A-Za-z0-9._~+/=-]{8,}"
+)
+OAUTH_TOKEN_ASSIGNMENT_RE = re.compile(
+    r"(?i)['\"]?(?:id[_-]?token|refresh[_-]?token)['\"]?\s*[:=]\s*['\"]?[A-Za-z0-9._~+/=-]{8,}['\"]?"
+)
+JWT_LIKE_TOKEN_RE = re.compile(
+    r"\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b"
+)
+COOKIE_VALUE_RE = re.compile(
+    r"(?i)\b(?:cookie|session(?:_token)?|csrf(?:_token)?)\s*[:=]\s*[^\s;]+"
+)
+COMMON_API_KEY_RE = re.compile(
+    r"\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|AKIA[0-9A-Z]{16})\b"
+)
+USER_ABSOLUTE_PATH_RE = re.compile(
+    r"(?i)(?:[A-Z]:[\\/](?:Users|home)[\\/][^\s\"']+|/(?:home|Users)/[^\s\"']+)"
+)
+REDACTION_ONLY_RE = re.compile(
+    r"(?i)(?:\[REDACTED(?:_PATH)?\]|bearer|basic|authorization|token|secret|[\s:=|])+"
+)
 ALLOWED_GREEN_ROOTS = ("docs/", "scripts/", "tests/")
 ALLOWED_GREEN_FILES = ("README.md", "LICENSE")
 PROTECTED_CONTROL_PLANE_ROOTS = (".github/",)
@@ -214,6 +243,43 @@ def format_workspace_status(porcelain_output, limit=MAX_WORKSPACE_STATUS_ENTRIES
     if omitted:
         entries.append("... %d additional entries omitted" % omitted)
     return "; ".join(entries)
+
+
+def format_codex_noop_diagnostic(stdout, stderr):
+    """Return only a bounded, redacted tail of successful Codex output."""
+    text = "\n".join((stdout or "", stderr or ""))
+    # The worker prompt always introduces its full untrusted contract with this
+    # marker. Never echo that contract into a no-op diagnostic.
+    text = text.split("Exact issue contract:", 1)[0]
+    for name in ("GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY"):
+        secret = os.environ.get(name)
+        if secret:
+            text = text.replace(secret, "[REDACTED]")
+    text = AUTHORIZATION_VALUE_RE.sub("[REDACTED]", text)
+    text = TOKEN_ASSIGNMENT_RE.sub("[REDACTED]", text)
+    text = OAUTH_TOKEN_ASSIGNMENT_RE.sub("[REDACTED]", text)
+    text = JWT_LIKE_TOKEN_RE.sub("[REDACTED]", text)
+    text = COOKIE_VALUE_RE.sub("[REDACTED]", text)
+    text = COMMON_API_KEY_RE.sub("[REDACTED]", text)
+    text = USER_ABSOLUTE_PATH_RE.sub("[REDACTED_PATH]", text)
+    text = re.sub(r"[\x00-\x09\x0b-\x1f\x7f]+", " ", text)
+
+    lines = []
+    for line in text.splitlines():
+        normalized = " ".join(line.split())
+        if normalized and not REDACTION_ONLY_RE.fullmatch(normalized):
+            lines.append(normalized)
+    if not lines:
+        return CODEX_NOOP_FALLBACK
+
+    summary = " | ".join(lines[-MAX_CODEX_NOOP_DIAGNOSTIC_LINES:])
+    prefix = "Codex exited successfully without repository changes: "
+    available = MAX_CODEX_NOOP_DIAGNOSTIC_CHARS - len(prefix)
+    if available <= 0:
+        return prefix[:MAX_CODEX_NOOP_DIAGNOSTIC_CHARS]
+    if len(summary) > available:
+        summary = "..." + summary[-max(0, available - 3):].lstrip()
+    return prefix + summary
 
 
 def diagnose_workspace(cwd=None):
@@ -689,6 +755,7 @@ def run_codex(issue, branch, cwd):
     )
     if result.returncode:
         raise WorkerError("Codex exited with status %d" % result.returncode)
+    return result.stdout or "", result.stderr or ""
 
 
 def run_normal_validation(cwd):
@@ -850,13 +917,15 @@ class Worker(object):
 
         try:
             checkout_claimed_worker_branch(branch, self.cwd)
-            self.codex_runner(claimed_issue, branch, self.cwd)
+            codex_output = self.codex_runner(claimed_issue, branch, self.cwd)
             paths = _all_changed_paths(base_sha)
             _, disallowed = green_changed_paths(paths)
             if disallowed:
                 raise WorkerError("effective risk escalated outside GREEN paths: %s" % ", ".join(disallowed))
             if not paths:
-                raise WorkerError("Codex produced no issue-scoped changes")
+                if isinstance(codex_output, tuple) and len(codex_output) == 2:
+                    raise WorkerError(format_codex_noop_diagnostic(*codex_output))
+                raise WorkerError(CODEX_NOOP_FALLBACK)
             self.validation_runner(self.cwd)
             if _run(["git", "status", "--porcelain"], cwd=self.cwd, capture=True).strip():
                 _run(["git", "add", "--all"], cwd=self.cwd)

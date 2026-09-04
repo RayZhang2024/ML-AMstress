@@ -171,6 +171,81 @@ class WorkerPolicyTests(unittest.TestCase):
         self.assertEqual(diagnostic, " M <invalid-repository-path>")
         self.assertNotIn("do-not-leak", diagnostic)
 
+    def test_codex_noop_diagnostic_redacts_secrets_tokens_paths_and_controls(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GITHUB_TOKEN": "github-secret-value",
+                "GH_TOKEN": "gh-secret-value",
+                "OPENAI_API_KEY": "openai-secret-value",
+            },
+            clear=False,
+        ):
+            diagnostic = worker.format_codex_noop_diagnostic(
+                "earlier detail\n"
+                "token=github-secret-value\x00\tBearer bearer-secret-value\n"
+                "sk-abcdefghijklmnop C:\\Users\\alice\\private.txt\n"
+                "Basic YWxhZGRpbjpvcGVuc2VzYW1l /home/alice/private.txt "
+                "ghp_abcdefghijklmnop session=chatgpt-session-value\n"
+                '{"id_token": "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0In0.signaturevalue"}\n'
+                "refresh_token=refresh-token-secret-value\n"
+                "standalone eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0In0.signaturevalue\n"
+                "safe tail one\n"
+                "safe tail two\n"
+                "final    safe    line\n"
+                "Exact issue contract:\nshould never be logged\n",
+                "",
+            )
+        self.assertNotIn("github-secret-value", diagnostic)
+        self.assertNotIn("bearer-secret-value", diagnostic)
+        self.assertNotIn("sk-abcdefghijklmnop", diagnostic)
+        self.assertNotIn("ghp_abcdefghijklmnop", diagnostic)
+        self.assertNotIn("C:\\Users\\alice", diagnostic)
+        self.assertNotIn("/home/alice", diagnostic)
+        self.assertNotIn("chatgpt-session-value", diagnostic)
+        self.assertNotIn("eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0In0.signaturevalue", diagnostic)
+        self.assertNotIn("refresh-token-secret-value", diagnostic)
+        self.assertNotIn("should never be logged", diagnostic)
+        self.assertNotIn("\x00", diagnostic)
+        self.assertIn("final safe line", diagnostic)
+        self.assertNotIn("earlier detail", diagnostic)
+
+    def test_codex_noop_diagnostic_redacts_oauth_assignments_and_jwt_tail(self):
+        id_token = "id-token-secret-value"
+        refresh_token = "refresh-token-secret-value"
+        jwt = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0In0.signaturevalue"
+        diagnostic = worker.format_codex_noop_diagnostic(
+            (
+                "safe beginning\n"
+                + 'id_token="%s"\n' % id_token
+                + '{"refresh_token": "%s"}\n' % refresh_token
+                + "standalone %s\n" % jwt
+                + "safe final"
+            ),
+            "",
+        )
+        self.assertNotIn(id_token, diagnostic)
+        self.assertNotIn(refresh_token, diagnostic)
+        self.assertNotIn(jwt, diagnostic)
+        self.assertIn("safe final", diagnostic)
+        self.assertLessEqual(len(diagnostic), worker.MAX_CODEX_NOOP_DIAGNOSTIC_CHARS)
+
+    def test_codex_noop_diagnostic_is_bounded_and_falls_back_when_fully_redacted(self):
+        diagnostic = worker.format_codex_noop_diagnostic(
+            "\n".join("line %d %s" % (index, "x" * 300) for index in range(6)),
+            "",
+        )
+        self.assertLessEqual(len(diagnostic), worker.MAX_CODEX_NOOP_DIAGNOSTIC_CHARS)
+        self.assertNotIn("line 0", diagnostic)
+        self.assertIn("line 5", diagnostic)
+
+        with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "only-secret"}, clear=False):
+            fallback = worker.format_codex_noop_diagnostic("only-secret", "")
+        self.assertEqual(fallback, worker.CODEX_NOOP_FALLBACK)
+
+        fallback = worker.format_codex_noop_diagnostic("Bearer bearer-secret", "")
+        self.assertEqual(fallback, worker.CODEX_NOOP_FALLBACK)
+
     def test_preflight_reports_sanitized_dirty_workspace(self):
         directory = self._preflight_workspace()
         try:
@@ -479,6 +554,20 @@ class WorkerPolicyTests(unittest.TestCase):
         self.assertIn("Codex executable is not available", str(raised.exception))
         run.assert_not_called()
 
+    def test_run_codex_nonzero_remains_fail_closed_without_output(self):
+        result = type(
+            "Result",
+            (),
+            {"returncode": 2, "stdout": "raw no-op-secret", "stderr": "raw stderr"},
+        )()
+        with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "no-op-secret"}, clear=False), mock.patch.object(
+            worker.shutil, "which", return_value=r"C:\Tools\codex.CMD"
+        ), mock.patch.object(worker.subprocess, "run", return_value=result):
+            with self.assertRaises(worker.WorkerError) as raised:
+                worker.run_codex(issue(), "codex/issue-28-test", tempfile.gettempdir())
+        self.assertEqual(str(raised.exception), "Codex exited with status 2")
+        self.assertNotIn("no-op-secret", str(raised.exception))
+
     def test_trusted_push_injects_token_only_for_git_command(self):
         captured = {}
 
@@ -579,6 +668,26 @@ class WorkerPolicyTests(unittest.TestCase):
             client.created_branch,
             worker.deterministic_branch_name(28, client.current_issue["title"]),
         )
+
+    def test_successful_codex_noop_reports_only_sanitized_diagnostic(self):
+        client = FakeClient(issue())
+        with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "no-op-secret"}, clear=False), mock.patch.object(
+            worker, "checkout_claimed_worker_branch"
+        ), mock.patch.object(worker, "_all_changed_paths", return_value=()):
+            with self.assertRaises(worker.WorkerError) as raised:
+                worker.Worker(
+                    client,
+                    28,
+                    "run-noop",
+                    codex_runner=lambda *args: (
+                        "Codex summary\nBearer no-op-secret\ncompleted without edits", ""
+                    ),
+                    validation_runner=lambda cwd: None,
+                    push_runner=lambda cwd, branch: None,
+                ).execute()
+        self.assertIn("completed without edits", str(raised.exception))
+        self.assertNotIn("no-op-secret", str(raised.exception))
+        self.assertFalse(any(event[0] == "create_pr" for event in client.events))
 
     def test_success_records_claim_then_review_without_merge(self):
         client = FakeClient(issue())
