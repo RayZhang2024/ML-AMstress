@@ -579,11 +579,39 @@ class WorkerPolicyTests(unittest.TestCase):
             self.assertNotIn("--approve-for-me", actual)
             self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", actual)
             self.assertNotIn("danger-full-access", actual)
-            self.assertIn("Exact issue contract", actual[-1])
+            self.assertEqual(actual[-1], "-")
+            self.assertNotIn("Exact issue contract", actual)
             actual_kwargs = next(kwargs for command, kwargs in commands if command == actual)
             self.assertNotIn("shell", actual_kwargs)
+            self.assertEqual(
+                actual_kwargs["input"], worker._codex_prompt(issue(), "codex/issue-28-test")
+            )
+            self.assertTrue(actual_kwargs["universal_newlines"])
         finally:
             directory.cleanup()
+
+    def test_run_codex_delivers_long_issue_contract_intact_via_stdin(self):
+        marker = "long-contract-marker"
+        body = GREEN_BODY + "\n" + marker + ("x" * 17000)
+        long_issue = issue(body=body)
+        captured = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+            captured["kwargs"] = kwargs
+            return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+        with mock.patch.object(
+            worker.shutil, "which", return_value=r"C:\Tools\codex.CMD"
+        ), mock.patch.object(worker.subprocess, "run", side_effect=fake_run):
+            worker.run_codex(long_issue, "codex/issue-61-test", tempfile.gettempdir())
+
+        prompt = worker._codex_prompt(long_issue, "codex/issue-61-test")
+        self.assertGreater(len(prompt), 16 * 1024)
+        self.assertEqual(captured["command"][-1], "-")
+        self.assertNotIn(marker, " ".join(captured["command"]))
+        self.assertNotIn(body, captured["command"])
+        self.assertEqual(captured["kwargs"]["input"], prompt)
 
     def test_run_codex_supports_explicit_executable_file(self):
         with tempfile.TemporaryDirectory() as directory:
