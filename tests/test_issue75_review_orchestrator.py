@@ -273,6 +273,32 @@ class StateAndRepairTests(unittest.TestCase):
         self.assertEqual(captured["request"].review_decision_key, plan.decision_key)
         self.assertEqual([item["name"] for item in client.pr_data["labels"]], ["review:pending"])
 
+    def test_same_head_blocker_replay_recovers_original_key_for_second_attempt(self):
+        client = FakeClient()
+        pending = orchestrator.CurrentReviewState("status:review", "review:pending", HEAD)
+        accepted_input = orchestrator._state_input(175, 75, HEAD, pending, "verdict", blocker_verdict())
+        accepted_plan = state_contract.transition(accepted_input)
+        client.pr_data["labels"] = labels("review:blocker")
+        client.issue_data["labels"] = labels("status:in-progress", "risk:green", "agent:codex")
+        client.comment_data.extend((
+            {"body": orchestrator._audit_body(accepted_input, accepted_plan),
+             "user": {"login": orchestrator.TRUSTED_AUDIT_AUTHOR}},
+            {"body": orchestrator._repair_marker(175, 75, HEAD, accepted_plan.decision_key, 1, ("F-1",)),
+             "user": {"login": orchestrator.TRUSTED_AUDIT_AUTHOR}},
+        ))
+        captured = {}
+        def second_attempt(request, cwd):
+            captured["request"] = request
+            client.pr_data["head"]["sha"] = NEW_HEAD
+            return repair.RepairResult(1, orchestrator.REPOSITORY, 175, 75, BRANCH, 2, HEAD, NEW_HEAD,
+                                       ("F-1",), ("docs/change.md",), "passed", "a5.3:" + "b" * 64)
+        with mock.patch.object(orchestrator, "checkout_exact_pr_branch"), \
+             mock.patch.object(orchestrator.repair, "execute_repair", side_effect=second_attempt):
+            self.assertEqual(orchestrator.orchestrate(client, event(), ".", lambda *_: blocker_verdict()), "repair-pushed")
+        self.assertEqual(captured["request"].review_decision_key, accepted_plan.decision_key)
+        self.assertEqual(captured["request"].attempt_number, 2)
+        self.assertEqual(orchestrator.repair_attempt_count(client.comment_data, 175), 2)
+
     def test_repair_failure_keeps_blocker_state(self):
         client = FakeClient()
         current = orchestrator.CurrentReviewState("status:in-progress", "review:blocker", HEAD)

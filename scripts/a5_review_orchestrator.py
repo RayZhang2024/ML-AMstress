@@ -391,7 +391,7 @@ def accepted_blocker_decision_key(comments: Sequence[Mapping[str, Any]], pr_numb
                 and item.get("old_issue_status") == "status:review"
                 and item.get("new_issue_status") == "status:in-progress"):
             key = item.get("decision_key")
-            if not isinstance(key, str) or not state_contract.A5_2_DECISION_KEY_RE.fullmatch(key):
+            if not isinstance(key, str) or not repair.A5_2_DECISION_KEY_RE.fullmatch(key):
                 raise OrchestrationError("accepted blocker audit has an invalid decision key")
             matches.append(key)
     if len(set(matches)) != 1:
