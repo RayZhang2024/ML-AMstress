@@ -187,6 +187,9 @@ class WorkerPolicyTests(unittest.TestCase):
                 "sk-abcdefghijklmnop C:\\Users\\alice\\private.txt\n"
                 "Basic YWxhZGRpbjpvcGVuc2VzYW1l /home/alice/private.txt "
                 "ghp_abcdefghijklmnop session=chatgpt-session-value\n"
+                '{"id_token": "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0In0.signaturevalue"}\n'
+                "refresh_token=refresh-token-secret-value\n"
+                "standalone eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0In0.signaturevalue\n"
                 "safe tail one\n"
                 "safe tail two\n"
                 "final    safe    line\n"
@@ -200,10 +203,32 @@ class WorkerPolicyTests(unittest.TestCase):
         self.assertNotIn("C:\\Users\\alice", diagnostic)
         self.assertNotIn("/home/alice", diagnostic)
         self.assertNotIn("chatgpt-session-value", diagnostic)
+        self.assertNotIn("eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0In0.signaturevalue", diagnostic)
+        self.assertNotIn("refresh-token-secret-value", diagnostic)
         self.assertNotIn("should never be logged", diagnostic)
         self.assertNotIn("\x00", diagnostic)
         self.assertIn("final safe line", diagnostic)
         self.assertNotIn("earlier detail", diagnostic)
+
+    def test_codex_noop_diagnostic_redacts_oauth_assignments_and_jwt_tail(self):
+        id_token = "id-token-secret-value"
+        refresh_token = "refresh-token-secret-value"
+        jwt = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0In0.signaturevalue"
+        diagnostic = worker.format_codex_noop_diagnostic(
+            (
+                "safe beginning\n"
+                + 'id_token="%s"\n' % id_token
+                + '{"refresh_token": "%s"}\n' % refresh_token
+                + "standalone %s\n" % jwt
+                + "safe final"
+            ),
+            "",
+        )
+        self.assertNotIn(id_token, diagnostic)
+        self.assertNotIn(refresh_token, diagnostic)
+        self.assertNotIn(jwt, diagnostic)
+        self.assertIn("safe final", diagnostic)
+        self.assertLessEqual(len(diagnostic), worker.MAX_CODEX_NOOP_DIAGNOSTIC_CHARS)
 
     def test_codex_noop_diagnostic_is_bounded_and_falls_back_when_fully_redacted(self):
         diagnostic = worker.format_codex_noop_diagnostic(

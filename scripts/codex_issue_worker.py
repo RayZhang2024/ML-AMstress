@@ -57,6 +57,12 @@ AUTHORIZATION_VALUE_RE = re.compile(
 TOKEN_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|token|secret)\s*[=:]\s*['\"]?[A-Za-z0-9._~+/=-]{8,}"
 )
+OAUTH_TOKEN_ASSIGNMENT_RE = re.compile(
+    r"(?i)['\"]?(?:id[_-]?token|refresh[_-]?token)['\"]?\s*[:=]\s*['\"]?[A-Za-z0-9._~+/=-]{8,}['\"]?"
+)
+JWT_LIKE_TOKEN_RE = re.compile(
+    r"\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b"
+)
 COOKIE_VALUE_RE = re.compile(
     r"(?i)\b(?:cookie|session(?:_token)?|csrf(?:_token)?)\s*[:=]\s*[^\s;]+"
 )
@@ -251,6 +257,8 @@ def format_codex_noop_diagnostic(stdout, stderr):
             text = text.replace(secret, "[REDACTED]")
     text = AUTHORIZATION_VALUE_RE.sub("[REDACTED]", text)
     text = TOKEN_ASSIGNMENT_RE.sub("[REDACTED]", text)
+    text = OAUTH_TOKEN_ASSIGNMENT_RE.sub("[REDACTED]", text)
+    text = JWT_LIKE_TOKEN_RE.sub("[REDACTED]", text)
     text = COOKIE_VALUE_RE.sub("[REDACTED]", text)
     text = COMMON_API_KEY_RE.sub("[REDACTED]", text)
     text = USER_ABSOLUTE_PATH_RE.sub("[REDACTED_PATH]", text)
