@@ -160,23 +160,59 @@ class WorkerPolicyTests(unittest.TestCase):
 
     def test_green_allowlist_rejects_production_paths(self):
         allowed, rejected = worker.green_changed_paths(
-            ["docs/change.md", "scripts/codex_issue_worker.py", "create_input.py"]
+            [
+                "docs/change.md",
+                "scripts/codex_issue_worker.py",
+                ".github/workflows/candidate.yml",
+                "create_input.py",
+            ]
         )
         self.assertEqual(allowed, ("docs/change.md", "scripts/codex_issue_worker.py"))
-        self.assertEqual(rejected, ("create_input.py",))
+        self.assertEqual(rejected, (".github/workflows/candidate.yml", "create_input.py"))
 
-    def test_green_workflow_guard_rejects_scientific_or_merge_activation(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / ".github" / "workflows"
-            path.mkdir(parents=True)
-            workflow_path = path / "candidate.yml"
-            workflow_path.write_text("run: gh pr merge --auto", encoding="utf-8")
-            self.assertEqual(
-                worker.green_workflow_violations(
-                    (".github/workflows/candidate.yml",), directory
-                ),
-                (".github/workflows/candidate.yml (forbidden workflow behavior)",),
-            )
+    def test_codex_process_has_no_github_write_credential_or_git_helper(self):
+        captured = {}
+
+        def fake_run(*args, **kwargs):
+            captured["command"] = args[0]
+            captured["env"] = kwargs["env"]
+            return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "OPENAI_API_KEY": "openai-secret",
+                "GITHUB_TOKEN": "github-write-token",
+                "GH_TOKEN": "gh-write-token",
+            },
+        ), mock.patch.object(worker.subprocess, "run", side_effect=fake_run):
+            worker.run_codex(issue(), "codex/issue-28-test", tempfile.gettempdir())
+
+        self.assertNotIn("GITHUB_TOKEN", captured["env"])
+        self.assertNotIn("GH_TOKEN", captured["env"])
+        self.assertEqual(captured["env"]["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(captured["env"]["GIT_CONFIG_NOGLOBAL"], "1")
+        self.assertEqual(captured["env"]["GIT_TERMINAL_PROMPT"], "0")
+        self.assertNotIn("github-write-token", captured["command"][-1])
+
+    def test_trusted_push_injects_token_only_for_git_command(self):
+        captured = {}
+
+        def fake_run(command, cwd=None, env=None, **kwargs):
+            captured["command"] = command
+            captured["env"] = env
+            return ""
+
+        with mock.patch.dict(
+            os.environ,
+            {"GITHUB_TOKEN": "github-write-token", "OPENAI_API_KEY": "openai-secret"},
+        ), mock.patch.object(worker, "_run", side_effect=fake_run):
+            worker.push_branch(tempfile.gettempdir(), "codex/issue-28-test")
+
+        self.assertNotIn("GITHUB_TOKEN", captured["env"])
+        self.assertNotIn("OPENAI_API_KEY", captured["env"])
+        self.assertEqual(captured["env"]["GIT_CONFIG_KEY_0"], "http.extraheader")
+        self.assertIn("github-write-token", captured["env"]["GIT_CONFIG_VALUE_0"])
 
     def test_state_change_before_claim_fails_without_branch(self):
         client = FakeClient(issue(), issue_sequence=[issue(updated_at="v1"), issue(updated_at="v2")])
@@ -201,6 +237,7 @@ class WorkerPolicyTests(unittest.TestCase):
                     "run-fail",
                     codex_runner=fail,
                     validation_runner=lambda cwd: None,
+                    push_runner=lambda cwd, branch: None,
                 ).execute()
         self.assertFalse(any(event[0] == "create_pr" for event in client.events))
         self.assertIn("status:blocked", [item["name"] for item in client.current_issue["labels"]])
@@ -216,6 +253,7 @@ class WorkerPolicyTests(unittest.TestCase):
                 "run-success",
                 codex_runner=lambda *args: None,
                 validation_runner=lambda cwd: None,
+                push_runner=lambda cwd, branch: None,
             ).execute()
         self.assertEqual(result["number"], 123)
         labels_events = [event for event in client.events if event[0] == "labels"]
@@ -260,6 +298,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("issues: write", self.workflow)
         self.assertIn("pull-requests: write", self.workflow)
         self.assertIn("OPENAI_API_KEY", self.workflow)
+        self.assertIn("persist-credentials: false", self.workflow)
+        self.assertIn("GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}", self.workflow)
         self.assertNotIn("gh pr merge", self.workflow)
         self.assertNotIn("enablePullRequestAutoMerge", self.workflow)
 

@@ -43,8 +43,9 @@ fails closed unless the issue is open, has exactly `status:ready` and
 has no competing branch or open PR. A deterministic `codex/issue-<number>-<slug>`
 ref is created as the claim lock before the issue is marked
 `status:in-progress`. The worker runs Codex on that branch, rejects any diff
-outside GREEN paths (`.github/`, `docs/`, `scripts/`, `tests/`, and the small
-governance-file allowlist), runs the normal-Python checks, pushes once, opens
+outside GREEN paths (`docs/`, `scripts/`, `tests/`, and the small
+governance-file allowlist); all `.github/workflows/**` edits are rejected,
+rather than being part of the autonomous edit surface. It runs the normal-Python checks, pushes once, opens
 one PR against `main`, and changes the issue to `status:review` only after PR
 creation. Failures preserve the branch and report `status:blocked`; no merge or
 auto-merge operation is available.
@@ -54,11 +55,14 @@ The workflow requires these names only (never their values):
 - `OPENAI_API_KEY` — GitHub Actions secret used by the Codex CLI. It is passed
   only through the process environment and is never printed or placed in a
   prompt/comment/PR.
-- `GITHUB_TOKEN` — GitHub's built-in token, supplied automatically. The
-  workflow requests `contents: write` to create/push the single claim branch,
-  `issues: write` to record labels/comments, and `pull-requests: write` to open
-  the review PR. No narrower GitHub permission can perform those three API
-  operations; the worker code has no merge endpoint.
+- `GITHUB_TOKEN` — GitHub's built-in token, supplied only to the trusted worker
+  step. The workflow requests `contents: write` to create/push the single claim
+  branch, `issues: write` to record labels/comments, and `pull-requests: write`
+  to open the review PR. `actions/checkout` uses `persist-credentials: false`;
+  the worker removes this token (and `GH_TOKEN`) before starting Codex and
+  injects a one-command git extra-header only for the final push. No narrower
+  GitHub permission can perform those three API operations; the worker code has
+  no merge endpoint.
 - `CODEX_CLI_PACKAGE` — repository variable naming a maintainer-approved,
   pinned `@openai/codex` package version for `npm install`; it is configuration,
   not a secret. The workflow fails before the worker if it is absent.

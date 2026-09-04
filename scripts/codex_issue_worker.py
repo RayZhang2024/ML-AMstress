@@ -40,7 +40,7 @@ RISK_RE = re.compile(r"\brisk:(green|yellow|red)\b")
 STATUS_PREFIX = "status:"
 RISK_PREFIX = "risk:"
 CLAIM_MARKER = "<!-- codex-worker-claim issue:{number} run:{run_id} branch:{branch} -->"
-ALLOWED_GREEN_ROOTS = (".github/", "docs/", "scripts/", "tests/")
+ALLOWED_GREEN_ROOTS = ("docs/", "scripts/", "tests/")
 ALLOWED_GREEN_FILES = ("AGENTS.md", "README.md", "LICENSE")
 
 
@@ -244,29 +244,6 @@ def green_changed_paths(paths):
     return tuple(allowed), tuple(disallowed)
 
 
-def green_workflow_violations(paths, cwd):
-    """Reject workflow edits that activate scientific work or merging."""
-    violations = []
-    forbidden = re.compile(
-        r"(?i)(?:abaqus|abq2021|gh\s+pr\s+merge|"
-        r"enablepullrequestautomerge|auto-merge)"
-    )
-    for path in paths:
-        normalized = path.replace("\\", "/")
-        if not normalized.startswith(".github/workflows/"):
-            continue
-        full_path = os.path.join(cwd, normalized)
-        try:
-            with open(full_path, "r") as stream:
-                content = stream.read()
-        except (IOError, OSError):
-            violations.append(normalized + " (unreadable workflow)")
-            continue
-        if forbidden.search(content):
-            violations.append(normalized + " (forbidden workflow behavior)")
-    return tuple(violations)
-
-
 class GitHubClient(object):
     """Small REST client using only the worker's GITHUB_TOKEN."""
 
@@ -426,7 +403,14 @@ def run_codex(issue, branch, cwd):
     # Actions logs, comments, or PR text.  Only the exit status is reported.
     codex_env = os.environ.copy()
     codex_env.pop("GITHUB_TOKEN", None)
+    codex_env.pop("GH_TOKEN", None)
     codex_env.pop("CODEX_CLI_PACKAGE", None)
+    # Checkout credentials are disabled in the workflow. These settings also
+    # prevent a hosted runner's global/system git helper from supplying a
+    # write credential to the untrusted Codex process.
+    codex_env["GIT_CONFIG_NOSYSTEM"] = "1"
+    codex_env["GIT_CONFIG_NOGLOBAL"] = "1"
+    codex_env["GIT_TERMINAL_PROMPT"] = "0"
     result = subprocess.run(
         command,
         cwd=cwd,
@@ -454,6 +438,21 @@ def run_normal_validation(cwd):
     )
 
 
+def push_branch(cwd, branch):
+    """Push using a one-command, trusted post-Codex auth boundary."""
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:
+        raise WorkerError("GITHUB_TOKEN is required for the final push")
+    env = os.environ.copy()
+    env.pop("OPENAI_API_KEY", None)
+    env.pop("GITHUB_TOKEN", None)
+    env.pop("GH_TOKEN", None)
+    env["GIT_CONFIG_COUNT"] = "1"
+    env["GIT_CONFIG_KEY_0"] = "http.extraheader"
+    env["GIT_CONFIG_VALUE_0"] = "AUTHORIZATION: bearer " + token
+    _run(["git", "push", "origin", branch], cwd=cwd, env=env)
+
+
 class Worker(object):
     """Orchestrate one issue with injectable client/runner boundaries."""
 
@@ -465,6 +464,7 @@ class Worker(object):
         cwd=None,
         codex_runner=None,
         validation_runner=None,
+        push_runner=None,
     ):
         self.client = client
         self.issue_number = int(issue_number)
@@ -473,6 +473,7 @@ class Worker(object):
         self.branch = None
         self.codex_runner = codex_runner or run_codex
         self.validation_runner = validation_runner or run_normal_validation
+        self.push_runner = push_runner or push_branch
         self.requires_auth = codex_runner is None
 
     def _snapshot(self):
@@ -591,23 +592,17 @@ class Worker(object):
             _, disallowed = green_changed_paths(paths)
             if disallowed:
                 raise WorkerError("effective risk escalated outside GREEN paths: %s" % ", ".join(disallowed))
-            workflow_violations = green_workflow_violations(paths, self.cwd)
-            if workflow_violations:
-                raise WorkerError("forbidden workflow behavior: %s" % ", ".join(workflow_violations))
             if not paths:
                 raise WorkerError("Codex produced no issue-scoped changes")
             self.validation_runner(self.cwd)
             if _run(["git", "status", "--porcelain"], cwd=self.cwd, capture=True).strip():
                 _run(["git", "add", "--all"], cwd=self.cwd)
                 _run(["git", "commit", "-m", "Issue #%d GREEN implementation" % self.issue_number], cwd=self.cwd)
-            _run(["git", "push", "origin", branch], cwd=self.cwd)
+            self.push_runner(self.cwd, branch)
             changed = _git_paths(base_sha)
             _, disallowed = green_changed_paths(changed)
             if disallowed:
                 raise WorkerError("effective risk escalated after commit: %s" % ", ".join(disallowed))
-            workflow_violations = green_workflow_violations(changed, self.cwd)
-            if workflow_violations:
-                raise WorkerError("forbidden workflow behavior after commit: %s" % ", ".join(workflow_violations))
             pr_body = (
                 "Closes #%d\n\n"
                 "GREEN-only Codex worker result.\n\n"

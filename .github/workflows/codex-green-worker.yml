@@ -21,13 +21,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       CODEX_COMMAND: codex exec --full-auto
       CODEX_CLI_PACKAGE: ${{ vars.CODEX_CLI_PACKAGE }}
     steps:
       - name: Check out main
         uses: actions/checkout@v4
+        with:
+          # Never persist the write-capable Actions token in .git/config. The
+          # worker injects it only for its trusted post-Codex push operation.
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -49,3 +52,7 @@ jobs:
 
       - name: Run fail-closed GREEN worker
         run: python scripts/codex_issue_worker.py
+        env:
+          # The worker strips this token before Codex and injects it only for
+          # the final push/API operations.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
