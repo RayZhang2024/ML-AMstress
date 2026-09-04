@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import subprocess
@@ -630,7 +631,7 @@ class WorkerPolicyTests(unittest.TestCase):
         self.assertEqual(str(raised.exception), "Codex exited with status 2")
         self.assertNotIn("no-op-secret", str(raised.exception))
 
-    def test_trusted_push_injects_token_only_for_git_command(self):
+    def test_trusted_push_uses_origin_scoped_basic_auth_only_for_git_command(self):
         captured = {}
 
         def fake_run(command, cwd=None, env=None, **kwargs):
@@ -640,14 +641,34 @@ class WorkerPolicyTests(unittest.TestCase):
 
         with mock.patch.dict(
             os.environ,
-            {"GITHUB_TOKEN": "github-write-token", "OPENAI_API_KEY": "openai-secret"},
+            {
+                "GITHUB_TOKEN": "github-write-token",
+                "GH_TOKEN": "gh-write-token",
+                "OPENAI_API_KEY": "openai-secret",
+            },
         ), mock.patch.object(worker, "_run", side_effect=fake_run):
             worker.push_branch(tempfile.gettempdir(), "codex/issue-28-test")
 
         self.assertNotIn("GITHUB_TOKEN", captured["env"])
+        self.assertNotIn("GH_TOKEN", captured["env"])
         self.assertNotIn("OPENAI_API_KEY", captured["env"])
-        self.assertEqual(captured["env"]["GIT_CONFIG_KEY_0"], "http.extraheader")
-        self.assertIn("github-write-token", captured["env"]["GIT_CONFIG_VALUE_0"])
+        self.assertNotIn("github-write-token", captured["env"].values())
+        self.assertEqual(
+            captured["env"]["GIT_CONFIG_KEY_0"],
+            "http.https://github.com/.extraheader",
+        )
+        header = captured["env"]["GIT_CONFIG_VALUE_0"]
+        self.assertTrue(header.startswith("AUTHORIZATION: basic "))
+        encoded_credentials = header[len("AUTHORIZATION: basic "):]
+        self.assertEqual(
+            base64.b64decode(encoded_credentials).decode("utf-8"),
+            "x-access-token:github-write-token",
+        )
+        self.assertNotIn("github-write-token", captured["command"])
+        self.assertNotIn(encoded_credentials, captured["command"])
+        self.assertEqual(
+            captured["command"], ["git", "push", "origin", "codex/issue-28-test"]
+        )
 
     def test_claimed_branch_checkout_tracks_new_remote_when_no_local_branch_exists(self):
         branch = worker.deterministic_branch_name(28, issue()["title"])
