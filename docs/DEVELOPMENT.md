@@ -59,7 +59,10 @@ the review PR. `actions/checkout` uses `persist-credentials: false`; the worker
 removes this token (and `GH_TOKEN`) before starting Codex and injects a
 one-command git extra-header only for the final push. No narrower GitHub
 permission can perform those three API operations; the worker code has no merge
-endpoint. The worker does not use `OPENAI_API_KEY` or any other API-key billing
+endpoint. The Codex subprocess uses Git's supported `GIT_CONFIG_GLOBAL` null
+override together with `GIT_CONFIG_NOSYSTEM=1`, so it cannot read the runner
+user's global credential helpers; trusted post-Codex push authentication is
+unchanged. The worker does not use `OPENAI_API_KEY` or any other API-key billing
 path.
 
 ## Self-hosted GREEN worker (Issue #31)

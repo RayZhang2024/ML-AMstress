@@ -81,12 +81,25 @@ def _codex_command_tokens():
     return [executable, "exec", "--full-auto"]
 
 
+def _isolate_git_configuration(environment):
+    """Disable inherited Git configuration for an untrusted child process."""
+    environment.pop("GIT_CONFIG_NOGLOBAL", None)
+    for name in list(environment):
+        if name == "GIT_CONFIG_COUNT" or name.startswith("GIT_CONFIG_KEY_") or name.startswith("GIT_CONFIG_VALUE_"):
+            environment.pop(name, None)
+    environment["GIT_CONFIG_NOSYSTEM"] = "1"
+    # Git honors GIT_CONFIG_GLOBAL. On Windows os.devnull is the NUL device,
+    # so this prevents reads of the runner user's ~/.gitconfig and its helpers.
+    environment["GIT_CONFIG_GLOBAL"] = os.devnull
+    environment["GIT_TERMINAL_PROMPT"] = "0"
+
+
 def _probe_environment():
     """Return a non-secret environment for local preflight probes."""
     environment = os.environ.copy()
     for name in ("GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY"):
         environment.pop(name, None)
-    environment["GIT_TERMINAL_PROMPT"] = "0"
+    _isolate_git_configuration(environment)
     return environment
 
 
@@ -531,12 +544,10 @@ def run_codex(issue, branch, cwd):
     codex_env.pop("GITHUB_TOKEN", None)
     codex_env.pop("GH_TOKEN", None)
     codex_env.pop("OPENAI_API_KEY", None)
-    # Checkout credentials are disabled in the workflow. These settings also
-    # prevent a hosted runner's global/system git helper from supplying a
-    # write credential to the untrusted Codex process.
-    codex_env["GIT_CONFIG_NOSYSTEM"] = "1"
-    codex_env["GIT_CONFIG_NOGLOBAL"] = "1"
-    codex_env["GIT_TERMINAL_PROMPT"] = "0"
+    # Checkout credentials are disabled in the workflow. This supported Git
+    # isolation prevents a runner user's global/system credential helper from
+    # supplying a write credential to the untrusted Codex process.
+    _isolate_git_configuration(codex_env)
     result = subprocess.run(
         command,
         cwd=cwd,

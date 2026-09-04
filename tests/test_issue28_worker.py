@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -206,9 +207,42 @@ class WorkerPolicyTests(unittest.TestCase):
         self.assertNotIn("GH_TOKEN", captured["env"])
         self.assertNotIn("OPENAI_API_KEY", captured["env"])
         self.assertEqual(captured["env"]["GIT_CONFIG_NOSYSTEM"], "1")
-        self.assertEqual(captured["env"]["GIT_CONFIG_NOGLOBAL"], "1")
+        self.assertEqual(captured["env"]["GIT_CONFIG_GLOBAL"], os.devnull)
+        self.assertNotIn("GIT_CONFIG_NOGLOBAL", captured["env"])
         self.assertEqual(captured["env"]["GIT_TERMINAL_PROMPT"], "0")
         self.assertNotIn("github-write-token", captured["command"][-1])
+
+    def test_codex_process_cannot_inherit_runner_global_credential_helper(self):
+        captured = {}
+
+        def fake_run(*args, **kwargs):
+            captured["env"] = kwargs["env"]
+            return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+        with tempfile.TemporaryDirectory() as directory:
+            global_config = Path(directory) / "runner.gitconfig"
+            global_config.write_text("[credential]\n\thelper = runner-helper\n")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GITHUB_TOKEN": "github-write-token",
+                    "GIT_CONFIG_GLOBAL": str(global_config),
+                    "GIT_CONFIG_NOGLOBAL": "1",
+                },
+            ), mock.patch.object(worker.subprocess, "run", side_effect=fake_run):
+                worker.run_codex(issue(), "codex/issue-28-test", directory)
+
+            self.assertEqual(captured["env"]["GIT_CONFIG_GLOBAL"], os.devnull)
+            self.assertNotIn("GIT_CONFIG_NOGLOBAL", captured["env"])
+            result = subprocess.run(
+                ["git", "config", "--global", "--get", "credential.helper"],
+                env=captured["env"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
 
     def test_trusted_push_injects_token_only_for_git_command(self):
         captured = {}
