@@ -167,7 +167,10 @@ approval.
 
 ## Current activation boundary
 
-These labels, transitions, and syntax are documentation conventions for future
-orchestration. This repository currently has no Codex worker, issue poller,
-label-management automation, autonomous production-code execution, or
-auto-merge enabled by this document.
+These labels, transitions, and syntax do not by themselves activate workers,
+issue pollers, label-management automation, autonomous production-code
+execution, or auto-merge. Issue #28 adds the first explicitly label-triggered
+GREEN-only worker; it is implemented in
+`scripts/codex_issue_worker.py` and `.github/workflows/codex-green-worker.yml`.
+That worker remains fail-closed, review-first, and unable to merge or enable
+auto-merge; YELLOW/RED effective-risk changes are rejected.
