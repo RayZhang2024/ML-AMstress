@@ -1,0 +1,65 @@
+name: A5 protected PR review and repair loop
+
+on:
+  workflow_run:
+    workflows: ["Normal Python CI"]
+    types: [completed]
+
+# Only the trusted coordinator may update review/issue state and perform an
+# A5.3 same-branch push. It has no merge or auto-merge operation.
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: a5-review-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  review-exact-ci-head:
+    runs-on: [self-hosted, windows, x64, ml-amstress-codex]
+    timeout-minutes: 45
+    env:
+      CODEX_EXECUTABLE: codex
+      CODEX_EXPECTED_VERSION: ${{ vars.CODEX_EXPECTED_VERSION }}
+      CODEX_EXPECTED_RUNNER_NAME: ${{ vars.CODEX_EXPECTED_RUNNER_NAME }}
+      CODEX_EXPECTED_WINDOWS_USER: ${{ vars.CODEX_EXPECTED_WINDOWS_USER }}
+    steps:
+      - name: Check out trusted main control plane
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+        env:
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: "false"
+          GIT_CONFIG_KEY_1: core.eol
+          GIT_CONFIG_VALUE_1: lf
+
+      - name: Persist repository-local Git line endings
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git config --local core.autocrlf false
+          git config --local core.eol lf
+
+      - name: Verify trusted runner and ChatGPT Codex login
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -c "from scripts.codex_issue_worker import run_preflight; run_preflight()"
+
+      - name: Install A5.3 normal-Python validation dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "PyQt5>=5.15" "numpy>=1.21" "matplotlib>=3.4" "joblib>=1.1"
+
+      - name: Run trusted A5 review and repair coordinator
+        run: python scripts/a5_review_orchestrator.py
+        env:
+          # This token remains in trusted orchestration only. A5.1 and A5.3
+          # remove it from their respective untrusted child environments.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
