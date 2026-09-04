@@ -488,10 +488,13 @@ class WorkflowContractTests(unittest.TestCase):
             "      - name: Install normal-Python worker test dependencies"
         )
         self.assertLess(preflight, install_dependencies)
-        self.assertIn("Get-Command python", self.workflow[preflight:install_dependencies])
-        self.assertIn("--verify-local-python", self.workflow[preflight:install_dependencies])
-        self.assertIn("$ErrorActionPreference = 'Stop'", self.workflow[preflight:install_dependencies])
-        self.assertIn("Local Python executable could not run.", self.workflow[preflight:install_dependencies])
+        preflight_step = self.workflow[preflight:install_dependencies]
+        self.assertIn("shell: powershell", preflight_step)
+        self.assertNotIn("shell: pwsh", preflight_step)
+        self.assertIn("Get-Command python", preflight_step)
+        self.assertIn("--verify-local-python", preflight_step)
+        self.assertIn("$ErrorActionPreference = 'Stop'", preflight_step)
+        self.assertIn("Local Python executable could not run.", preflight_step)
 
     def test_auth_and_controlled_setup_are_documented(self):
         for text in (
