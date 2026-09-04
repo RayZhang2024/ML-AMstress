@@ -115,6 +115,35 @@ class WorkerPolicyTests(unittest.TestCase):
             with self.assertRaises(worker.WorkerError):
                 worker.parse_dependencies(text)
 
+    def test_local_python_preflight_rejects_missing_or_malformed_python(self):
+        with mock.patch.object(worker.shutil, "which", return_value=None):
+            with self.assertRaises(worker.WorkerError) as raised:
+                worker.verify_local_python()
+        self.assertIn("not available on PATH", str(raised.exception))
+
+        with mock.patch.object(worker.shutil, "which", return_value="python"), mock.patch.object(
+            worker, "_probe", return_value=(0, "not a Python version")
+        ):
+            with self.assertRaises(worker.WorkerError) as raised:
+                worker.verify_local_python()
+        self.assertIn("malformed version", str(raised.exception))
+
+    def test_local_python_preflight_rejects_unsupported_and_accepts_supported_versions(self):
+        for output in ("Python 3.10.14", "Python 4.0.0"):
+            with mock.patch.object(worker.shutil, "which", return_value="python"), mock.patch.object(
+                worker, "_probe", return_value=(0, output)
+            ):
+                with self.assertRaises(worker.WorkerError) as raised:
+                    worker.verify_local_python()
+            self.assertIn("Python 3.11 or newer", str(raised.exception))
+
+        with mock.patch.object(worker.shutil, "which", return_value="python"), mock.patch.object(
+            worker, "_probe", return_value=(0, "Python 3.13.14")
+        ):
+            executable, version = worker.verify_local_python()
+        self.assertEqual(executable, "python")
+        self.assertEqual(version, (3, 13))
+
     def test_eligible_green_issue_with_satisfied_dependencies(self):
         current = issue(body=GREEN_BODY.replace("- none", "- blocked-by: #22"))
         contract = worker.parse_contract(current["body"])
@@ -451,6 +480,18 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}", self.workflow)
         self.assertNotIn("gh pr merge", self.workflow)
         self.assertNotIn("enablePullRequestAutoMerge", self.workflow)
+
+    def test_workflow_uses_verified_local_python_before_dependencies(self):
+        self.assertNotIn("actions/setup-python", self.workflow)
+        preflight = self.workflow.index("      - name: Verify local Python")
+        install_dependencies = self.workflow.index(
+            "      - name: Install normal-Python worker test dependencies"
+        )
+        self.assertLess(preflight, install_dependencies)
+        self.assertIn("Get-Command python", self.workflow[preflight:install_dependencies])
+        self.assertIn("--verify-local-python", self.workflow[preflight:install_dependencies])
+        self.assertIn("$ErrorActionPreference = 'Stop'", self.workflow[preflight:install_dependencies])
+        self.assertIn("Local Python executable could not run.", self.workflow[preflight:install_dependencies])
 
     def test_auth_and_controlled_setup_are_documented(self):
         for text in (
