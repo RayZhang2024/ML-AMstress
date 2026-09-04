@@ -52,29 +52,63 @@ one PR against `main`, and changes the issue to `status:review` only after PR
 creation. Failures preserve the branch and report `status:blocked`; no merge or
 auto-merge operation is available.
 
-The workflow requires these names only (never their values):
+The worker uses `GITHUB_TOKEN` only in the trusted orchestration step. The
+workflow requests `contents: write` to create/push the single claim branch,
+`issues: write` to record labels/comments, and `pull-requests: write` to open
+the review PR. `actions/checkout` uses `persist-credentials: false`; the worker
+removes this token (and `GH_TOKEN`) before starting Codex and injects a
+one-command git extra-header only for the final push. No narrower GitHub
+permission can perform those three API operations; the worker code has no merge
+endpoint. The worker does not use `OPENAI_API_KEY` or any other API-key billing
+path.
 
-- `OPENAI_API_KEY` — GitHub Actions secret used by the Codex CLI. It is scoped
-  only to the final worker step (dependency setup/install steps do not receive
-  it), and is never printed or placed in a prompt/comment/PR.
-- `GITHUB_TOKEN` — GitHub's built-in token, supplied only to the trusted worker
-  step. The workflow requests `contents: write` to create/push the single claim
-  branch, `issues: write` to record labels/comments, and `pull-requests: write`
-  to open the review PR. `actions/checkout` uses `persist-credentials: false`;
-  the worker removes this token (and `GH_TOKEN`) before starting Codex and
-  injects a one-command git extra-header only for the final push. No narrower
-  GitHub permission can perform those three API operations; the worker code has
-  no merge endpoint.
-- `CODEX_CLI_PACKAGE` — repository variable naming a maintainer-approved,
-  pinned `@openai/codex` package version for `npm install`; it is configuration,
-  not a secret. The workflow fails before the worker if it is absent.
+## Self-hosted GREEN worker (Issue #31)
 
-Before enabling the label trigger, a maintainer must set the pinned package
-variable and `OPENAI_API_KEY`, verify organization secret policies, and run one
-controlled test issue that changes only documentation/tests. Do not use a
-personal broad-scope token or print credentials in Actions logs. The worker's
-automated tests use fakes and do not invoke Codex; this controlled integration
-test remains manual.
+The GREEN worker runs on a dedicated repository self-hosted Windows runner
+labeled `self-hosted`, `windows`, `x64`, and `ml-amstress-codex`. Hosted
+normal-Python PR CI is unchanged. The worker uses a locally installed,
+maintainer-approved pinned Codex CLI authenticated with the maintainer's
+ChatGPT account; it does not use `OPENAI_API_KEY`, and there is no API-key or
+API-billing fallback.
+
+### Maintainer setup
+
+1. In repository settings, add a repository-level Windows x64 self-hosted
+   runner with the labels above. Keep it interactive under the same Windows
+   account that will run Codex; do not initially run it as `LocalSystem` or
+   another service identity.
+2. Install Git and the approved pinned Codex CLI in that account's `PATH`.
+   For an npm-managed installation, use the maintainer-approved version, for
+   example `npm install --global @openai/codex@<approved-version>`; do not put
+   this installation in the workflow. Complete `codex login` with the
+   maintainer's ChatGPT account, then verify `codex login status` reports
+   `Logged in using ChatGPT`. The status command must succeed without a prompt
+   or credential output.
+3. Configure repository variables (identifiers, not secrets):
+   `CODEX_EXPECTED_VERSION` (the exact `codex --version` text or stable version
+   token), `CODEX_EXPECTED_RUNNER_NAME` (the registered runner name), and
+   `CODEX_EXPECTED_WINDOWS_USER` (the value returned by
+   `python -c "import getpass; print(getpass.getuser())"` under the runner
+   account). Do not configure an `OPENAI_API_KEY` secret for this worker.
+4. Ensure the runner workspace has network access for GitHub API operations, a
+   usable `git` executable, and permission for Actions checkout. The worker
+   fails closed if the checkout is not clean or required policy files are
+   missing.
+
+The workflow performs preflight before any issue claim. It verifies Windows and
+x64 runner identity, the expected runner/user context, Codex executable and
+version, ChatGPT-only non-interactive authentication, Git availability, and a
+clean Git workspace. Probe output is captured and never logged, so credentials
+cannot be exposed. If ChatGPT authentication is unavailable to the runner user,
+the run stops and reports the failure; it never silently switches to API-key
+billing. Existing `GITHUB_TOKEN` isolation, checkout credential disabling,
+trusted push/API operations, and protected control-plane paths remain intact.
+
+Before routing Issue #30, a maintainer must perform one controlled dry run under
+the actual runner account and confirm that authenticated Codex starts
+non-interactively without exposing credentials. Keep Issue #30 untriggered
+until that check passes. The worker's automated tests use fakes and do not
+invoke Codex; this controlled runner test remains manual.
 
 ## Paths and reproducibility
 
