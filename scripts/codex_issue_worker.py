@@ -761,7 +761,8 @@ def run_codex(issue, branch, cwd):
         if not executable:
             raise WorkerError("CODEX_EXECUTABLE is not configured")
         raise WorkerError("Codex executable is not available on PATH")
-    command = _codex_command_tokens(resolved_codex) + [_codex_prompt(issue, branch)]
+    prompt = _codex_prompt(issue, branch)
+    command = _codex_command_tokens(resolved_codex) + ["-"]
     # Capture output so a provider/CLI cannot accidentally echo credentials into
     # Actions logs, comments, or PR text.  Only the exit status is reported.
     codex_env = os.environ.copy()
@@ -778,6 +779,7 @@ def run_codex(issue, branch, cwd):
         env=codex_env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        input=prompt,
         universal_newlines=True,
         check=False,
     )
