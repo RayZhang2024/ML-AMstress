@@ -1,9 +1,11 @@
 import copy
+import io
 import inspect
 import os
 from pathlib import Path
 import subprocess
 import unittest
+import urllib.error
 from unittest import mock
 
 from scripts import a5_review_orchestrator as orchestrator
@@ -149,6 +151,69 @@ class WorkflowAndEligibilityTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(orchestrator.OrchestrationError, "AUTOMATION_APP_TOKEN"):
                 orchestrator.require_automation_app_token()
+
+
+class TrustedRestBoundaryTests(unittest.TestCase):
+    def test_request_uses_fixed_user_agent_and_stable_operation(self):
+        response = mock.MagicMock()
+        response.read.return_value = b'{"number": 175}'
+        response.__enter__.return_value = response
+        captured = {}
+
+        def open_request(request, timeout):
+            captured["request"], captured["timeout"] = request, timeout
+            return response
+
+        with mock.patch.object(orchestrator.urllib.request, "urlopen", side_effect=open_request):
+            value = orchestrator.GitHubClient("sentinel-token").pr(175)
+        self.assertEqual(value, {"number": 175})
+        self.assertEqual(captured["timeout"], 30)
+        self.assertEqual(captured["request"].get_header("User-agent"), orchestrator.A5_GITHUB_USER_AGENT)
+        self.assertNotIn("sentinel-token", orchestrator.A5_GITHUB_USER_AGENT)
+        self.assertIn("get-pr", orchestrator.REST_OPERATIONS)
+
+    def test_http_failure_exposes_only_operation_and_numeric_status(self):
+        secret = "sentinel-token-response-body-prompt-C:/Users/private"
+        failure = urllib.error.HTTPError(
+            "https://api.github.com/repos/private/repo/pulls?secret=" + secret,
+            403,
+            "sentinel GitHub error text",
+            {"X-Secret": secret},
+            io.BytesIO(secret.encode("utf-8")),
+        )
+        with mock.patch.object(orchestrator.urllib.request, "urlopen", side_effect=failure):
+            with self.assertRaises(orchestrator.OrchestrationError) as raised:
+                orchestrator.GitHubClient(secret).comment(175, "prompt-like payload " + secret)
+        self.assertEqual(str(raised.exception), "GitHub create-audit-comment: HTTP 403")
+        for forbidden in (secret, "https://", "private/repo", "GitHub error", "payload", "C:/Users"):
+            self.assertNotIn(forbidden, str(raised.exception))
+
+    def test_transport_failure_exposes_only_fixed_category(self):
+        secret = "sentinel-token-transport-C:/Users/private"
+        with mock.patch.object(orchestrator.urllib.request, "urlopen", side_effect=urllib.error.URLError(secret)):
+            with self.assertRaises(orchestrator.OrchestrationError) as raised:
+                orchestrator.GitHubClient(secret).issue(75)
+        self.assertEqual(str(raised.exception), "GitHub get-issue: transport failure")
+        self.assertNotIn(secret, str(raised.exception))
+        self.assertNotIn("C:/Users", str(raised.exception))
+
+    def test_invalid_response_exposes_only_fixed_category(self):
+        secret = "sentinel-token-invalid-json-prompt-C:/Users/private"
+        response = mock.MagicMock()
+        response.read.return_value = ("{invalid:" + secret + "}").encode("utf-8")
+        response.__enter__.return_value = response
+        with mock.patch.object(orchestrator.urllib.request, "urlopen", return_value=response):
+            with self.assertRaises(orchestrator.OrchestrationError) as raised:
+                orchestrator.GitHubClient(secret).pr(175)
+        self.assertEqual(str(raised.exception), "GitHub get-pr: invalid response")
+        for forbidden in (secret, "C:/Users", "invalid:"):
+            self.assertNotIn(forbidden, str(raised.exception))
+
+    def test_all_trusted_rest_operations_are_bounded_and_named(self):
+        source = inspect.getsource(orchestrator.GitHubClient)
+        for operation in orchestrator.REST_OPERATIONS:
+            self.assertIn('"' + operation + '"', source)
+        self.assertNotIn("trusted GitHub API request failed", source)
 
     def test_review_label_provisioning_is_idempotent_and_creates_missing(self):
         existing = FakeClient()
