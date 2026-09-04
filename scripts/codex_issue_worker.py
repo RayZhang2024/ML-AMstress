@@ -38,6 +38,7 @@ DEPENDENCY_RE = re.compile(
     r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*)\s*$"
 )
 RISK_RE = re.compile(r"\brisk:(green|yellow|red)\b")
+PYTHON_VERSION_RE = re.compile(r"\bPython\s+([0-9]+)\.([0-9]+)(?:\.[0-9]+)?\b")
 STATUS_PREFIX = "status:"
 RISK_PREFIX = "risk:"
 CLAIM_MARKER = "<!-- codex-worker-claim issue:{number} run:{run_id} branch:{branch} -->"
@@ -118,6 +119,35 @@ def _probe(command, cwd):
     except (OSError, ValueError):
         return 127, ""
     return result.returncode, (result.stdout or "") + "\n" + (result.stderr or "")
+
+
+def parse_python_version(output):
+    """Return the major/minor version from a local ``python --version`` probe."""
+    match = PYTHON_VERSION_RE.search(output or "")
+    if not match:
+        raise WorkerError("local Python returned a malformed version")
+    return int(match.group(1)), int(match.group(2))
+
+
+def verify_local_python(cwd=None):
+    """Fail closed unless the self-hosted runner has Python 3.11 or newer."""
+    executable = shutil.which("python")
+    if not executable:
+        raise WorkerError("local Python executable is not available on PATH")
+    code, output = _probe([executable, "--version"], cwd or os.getcwd())
+    if code != 0:
+        raise WorkerError("local Python executable could not report its version")
+    version = parse_python_version(output)
+    if version[0] != 3 or version < (3, 11):
+        raise WorkerError(
+            "local Python %d.%d is unsupported; Python 3.11 or newer is required"
+            % version
+        )
+    print(
+        "GREEN worker local Python preflight: executable=%s version=%d.%d"
+        % (executable, version[0], version[1])
+    )
+    return executable, version
 
 
 def run_preflight(cwd=None):
@@ -780,7 +810,13 @@ def _event_issue_number(event_path):
     return issue["number"], event.get("repository", {}).get("full_name", REPOSITORY)
 
 
-def main():
+def main(arguments=None):
+    arguments = list(sys.argv[1:] if arguments is None else arguments)
+    if arguments == ["--verify-local-python"]:
+        verify_local_python()
+        return
+    if arguments:
+        raise WorkerError("unsupported worker argument")
     event_path = os.environ.get("GITHUB_EVENT_PATH")
     if not event_path:
         raise WorkerError("GITHUB_EVENT_PATH is required")

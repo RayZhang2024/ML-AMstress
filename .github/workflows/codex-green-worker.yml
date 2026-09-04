@@ -33,10 +33,26 @@ jobs:
           # worker injects it only for its trusted post-Codex push operation.
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+      - name: Verify local Python
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = Get-Command python -CommandType Application -ErrorAction SilentlyContinue
+          if ($null -eq $python) {
+            Write-Error "Local Python executable is not available on PATH."
+            exit 1
+          }
+          try {
+            & $python.Source scripts/codex_issue_worker.py --verify-local-python
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "Local Python executable could not report a supported version."
+              exit 1
+            }
+          }
+          catch {
+            Write-Error "Local Python executable could not run."
+            exit 1
+          }
 
       - name: Install normal-Python worker test dependencies
         run: |

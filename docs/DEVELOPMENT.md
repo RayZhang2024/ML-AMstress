@@ -97,6 +97,11 @@ API-billing fallback.
    usable `git` executable, and permission for Actions checkout. The worker
    fails closed if the checkout is not clean or required policy files are
    missing.
+5. Install a maintainer-approved Python 3.11 or newer on that same account's
+   `PATH`. The dedicated runner's currently validated local interpreter is
+   Python 3.13.14. The self-hosted workflow verifies the local executable and
+   version before dependency installation; it does not use `actions/setup-python`
+   or download, install, repair, or modify Python/Windows registry state.
 
 The workflow performs preflight before any issue claim. It verifies Windows and
 x64 runner identity, the expected runner/user context, Codex executable and
