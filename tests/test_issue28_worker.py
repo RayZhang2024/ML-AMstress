@@ -230,6 +230,35 @@ class WorkerPolicyTests(unittest.TestCase):
         self.assertIn("safe final", diagnostic)
         self.assertLessEqual(len(diagnostic), worker.MAX_CODEX_NOOP_DIAGNOSTIC_CHARS)
 
+    def test_codex_noop_diagnostic_prefers_safe_stdout_final_response(self):
+        diagnostic = worker.format_codex_noop_diagnostic(
+            "final explanation from Codex",
+            "token=stderr-secret-value\nsafe tail two\nfinal safe line\n"
+            "command output that must not be shown",
+        )
+        self.assertIn("final response", diagnostic)
+        self.assertIn("final explanation from Codex", diagnostic)
+        self.assertNotIn("safe tail two", diagnostic)
+        self.assertNotIn("final safe line", diagnostic)
+        self.assertNotIn("command output", diagnostic)
+        self.assertNotIn("stderr-secret-value", diagnostic)
+
+    def test_codex_noop_diagnostic_uses_sanitized_stderr_only_as_fallback(self):
+        jwt = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0In0.signaturevalue"
+        diagnostic = worker.format_codex_noop_diagnostic(
+            "Bearer stdout-secret-value",
+            "stderr explanation\nrefresh_token=refresh-token-secret-value\n%s" % jwt,
+        )
+        self.assertIn("stderr fallback", diagnostic)
+        self.assertIn("stderr explanation", diagnostic)
+        self.assertNotIn("stdout-secret-value", diagnostic)
+        self.assertNotIn("refresh-token-secret-value", diagnostic)
+        self.assertNotIn(jwt, diagnostic)
+
+        empty_stdout = worker.format_codex_noop_diagnostic("", "safe stderr fallback")
+        self.assertIn("stderr fallback", empty_stdout)
+        self.assertIn("safe stderr fallback", empty_stdout)
+
     def test_codex_noop_diagnostic_is_bounded_and_falls_back_when_fully_redacted(self):
         diagnostic = worker.format_codex_noop_diagnostic(
             "\n".join("line %d %s" % (index, "x" * 300) for index in range(6)),

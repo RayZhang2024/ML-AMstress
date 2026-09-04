@@ -245,12 +245,11 @@ def format_workspace_status(porcelain_output, limit=MAX_WORKSPACE_STATUS_ENTRIES
     return "; ".join(entries)
 
 
-def format_codex_noop_diagnostic(stdout, stderr):
-    """Return only a bounded, redacted tail of successful Codex output."""
-    text = "\n".join((stdout or "", stderr or ""))
+def _format_codex_noop_stream_diagnostic(text, source):
+    """Return a bounded, redacted diagnostic from one captured Codex stream."""
     # The worker prompt always introduces its full untrusted contract with this
     # marker. Never echo that contract into a no-op diagnostic.
-    text = text.split("Exact issue contract:", 1)[0]
+    text = (text or "").split("Exact issue contract:", 1)[0]
     for name in ("GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY"):
         secret = os.environ.get(name)
         if secret:
@@ -270,16 +269,27 @@ def format_codex_noop_diagnostic(stdout, stderr):
         if normalized and not REDACTION_ONLY_RE.fullmatch(normalized):
             lines.append(normalized)
     if not lines:
-        return CODEX_NOOP_FALLBACK
+        return None
 
     summary = " | ".join(lines[-MAX_CODEX_NOOP_DIAGNOSTIC_LINES:])
-    prefix = "Codex exited successfully without repository changes: "
+    prefix = "Codex exited successfully without repository changes (%s): " % source
     available = MAX_CODEX_NOOP_DIAGNOSTIC_CHARS - len(prefix)
     if available <= 0:
         return prefix[:MAX_CODEX_NOOP_DIAGNOSTIC_CHARS]
     if len(summary) > available:
         summary = "..." + summary[-max(0, available - 3):].lstrip()
     return prefix + summary
+
+
+def format_codex_noop_diagnostic(stdout, stderr):
+    """Return the final response, or a safe stderr fallback, for a no-op run."""
+    diagnostic = _format_codex_noop_stream_diagnostic(stdout, "final response")
+    if diagnostic:
+        return diagnostic
+    diagnostic = _format_codex_noop_stream_diagnostic(stderr, "stderr fallback")
+    if diagnostic:
+        return diagnostic
+    return CODEX_NOOP_FALLBACK
 
 
 def diagnose_workspace(cwd=None):
