@@ -599,6 +599,16 @@ def _run(command, cwd=None, env=None, capture=False):
     return result.stdout if capture else ""
 
 
+def checkout_claimed_worker_branch(branch, cwd):
+    """Switch only the newly claimed deterministic branch to its remote ref."""
+    _run(["git", "fetch", "origin", branch], cwd=cwd)
+    local_branch = _run(["git", "branch", "--list", branch], cwd=cwd, capture=True)
+    if local_branch.strip():
+        _run(["git", "switch", "-C", branch, "--track", "origin/" + branch], cwd=cwd)
+    else:
+        _run(["git", "switch", "-c", branch, "--track", "origin/" + branch], cwd=cwd)
+
+
 def _git_paths(base_sha):
     output = _run(["git", "diff", "--name-only", base_sha + "...HEAD"], capture=True)
     return tuple(line.strip() for line in output.splitlines() if line.strip())
@@ -832,8 +842,7 @@ class Worker(object):
             raise
 
         try:
-            _run(["git", "fetch", "origin", branch], cwd=self.cwd)
-            _run(["git", "switch", "-c", branch, "--track", "origin/" + branch], cwd=self.cwd)
+            checkout_claimed_worker_branch(branch, self.cwd)
             self.codex_runner(claimed_issue, branch, self.cwd)
             paths = _all_changed_paths(base_sha)
             _, disallowed = green_changed_paths(paths)
