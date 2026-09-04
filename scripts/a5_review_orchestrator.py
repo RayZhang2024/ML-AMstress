@@ -7,6 +7,7 @@ out; their Codex child processes remain credential-isolated.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import os
 import re
@@ -27,6 +28,10 @@ BASE_BRANCH = "main"
 CI_WORKFLOW_NAME = "Normal Python CI"
 TERMINAL_CONCLUSIONS = frozenset(("success", "failure", "cancelled", "skipped", "timed_out", "action_required", "neutral", "startup_failure", "stale"))
 REVIEW_LABELS = frozenset(("review:pending", "review:blocker", "review:clean", "review:escalated"))
+REVIEW_LABEL_SPECS = {
+    name: {"name": name, "color": "0366d6", "description": "A5.2 PR review state"}
+    for name in sorted(REVIEW_LABELS)
+}
 MAX_REPAIR_ATTEMPTS = repair.MAX_REPAIR_ATTEMPTS
 MAX_COMMENTS = 200
 MAX_CHANGED_FILES = reviewer.MAX_CHANGED_FILES
@@ -169,6 +174,25 @@ def validate_dependencies(client: Any, contract: green_worker.Contract) -> None:
             raise OrchestrationError("issue dependency is not satisfied")
 
 
+def authorization_fingerprint(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any],
+                              run: WorkflowRun) -> str:
+    """Bind a reviewer result to the complete trusted authorization evidence."""
+    pr_number, branch = validate_pr_identity(pr, run)
+    issue_number = canonical_linked_issue(pr)
+    contract = validate_issue_identity(issue, branch, issue_number)
+    dependency_states = []
+    for dependency in contract.dependencies:
+        evidence = client.dependency_issue(dependency)
+        if not isinstance(evidence, Mapping) or str(evidence.get("state", "")).lower() != "closed":
+            raise OrchestrationError("issue dependency is not satisfied")
+        dependency_states.append((dependency.repository, dependency.number, "closed"))
+    identity = {"pr_number": pr_number, "pr_title": pr.get("title"), "pr_body": pr.get("body"),
+                "base": pr.get("base"), "head": pr.get("head"), "pr_labels": _label_names(pr),
+                "issue_number": issue_number, "issue_title": issue.get("title"), "issue_body": issue.get("body"),
+                "issue_labels": _label_names(issue), "dependencies": dependency_states}
+    return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
 def _marker(pattern: re.Pattern[str], body: str) -> dict[str, Any] | None:
     match = pattern.fullmatch(body.strip())
     if not match:
@@ -247,6 +271,30 @@ def _has_state_decision(comments: Sequence[Mapping[str, Any]], key: str) -> bool
 
 def _replace_label(names: Sequence[str], family: str, target: str) -> list[str]:
     return sorted([name for name in names if not name.startswith(family)] + [target])
+
+
+def ensure_review_labels(client: Any) -> None:
+    """Provision the exact A5.2 label vocabulary before any state mutation."""
+    available = client.repository_labels()
+    if not isinstance(available, Sequence) or isinstance(available, (str, bytes)):
+        raise OrchestrationError("repository label evidence is malformed")
+    names = []
+    for item in available:
+        name = item.get("name") if isinstance(item, Mapping) else None
+        if not isinstance(name, str):
+            raise OrchestrationError("repository label evidence is malformed")
+        names.append(name)
+    for required in REVIEW_LABELS:
+        variants = [name for name in names if name.casefold() == required.casefold()]
+        if len(variants) > 1 or (variants and variants[0] != required):
+            raise OrchestrationError("repository review label evidence is ambiguous")
+    for required in sorted(REVIEW_LABELS):
+        if required not in names:
+            client.create_label(REVIEW_LABEL_SPECS[required])
+    verified = client.repository_labels()
+    verified_names = [item.get("name") for item in verified if isinstance(item, Mapping)]
+    if any(verified_names.count(required) != 1 for required in REVIEW_LABELS):
+        raise OrchestrationError("repository review label provisioning could not be verified")
 
 
 def apply_transition(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any], comments: Sequence[Mapping[str, Any]],
@@ -330,6 +378,27 @@ def repair_attempt_count(comments: Sequence[Mapping[str, Any]], pr_number: int) 
     return len(attempts)
 
 
+def accepted_blocker_decision_key(comments: Sequence[Mapping[str, Any]], pr_number: int,
+                                  issue_number: int, head: str) -> str:
+    """Recover only the original pending-to-blocker A5.2 decision identity."""
+    matches = []
+    for item in _comments_with_marker(comments, STATE_MARKER_RE):
+        if (item.get("pull_request_number") == pr_number and item.get("issue_number") == issue_number
+                and item.get("event_kind") == "verdict" and item.get("verdict") == "blocker"
+                and item.get("current_head_sha") == head and item.get("new_review_state_head_sha") == head
+                and item.get("old_pr_review_state") == "review:pending"
+                and item.get("new_pr_review_state") == "review:blocker"
+                and item.get("old_issue_status") == "status:review"
+                and item.get("new_issue_status") == "status:in-progress"):
+            key = item.get("decision_key")
+            if not isinstance(key, str) or not state_contract.A5_2_DECISION_KEY_RE.fullmatch(key):
+                raise OrchestrationError("accepted blocker audit has an invalid decision key")
+            matches.append(key)
+    if len(set(matches)) != 1:
+        raise OrchestrationError("accepted blocker decision audit is missing or ambiguous")
+    return matches[0]
+
+
 def checkout_exact_pr_branch(branch: str, expected_head: str, cwd: str) -> None:
     """Fetch and switch only the exact in-repository PR branch for A5.3."""
     def run(command: Sequence[str]) -> str:
@@ -345,34 +414,56 @@ def checkout_exact_pr_branch(branch: str, expected_head: str, cwd: str) -> None:
         raise OrchestrationError("checked-out PR branch no longer matches expected head")
 
 
-def _refetch_unchanged(client: Any, pr_number: int, issue_number: int, head: str,
-                        prior: CurrentReviewState) -> tuple[Mapping[str, Any], Mapping[str, Any], list[Mapping[str, Any]]]:
+def _refetch_unchanged(client: Any, pr_number: int, issue_number: int, head: str, run: WorkflowRun,
+                        prior: CurrentReviewState, authorization: str) -> tuple[Mapping[str, Any], Mapping[str, Any], list[Mapping[str, Any]]]:
     pr, issue, comments = client.pr(pr_number), client.issue(issue_number), client.comments(pr_number)
-    if _sha(pr.get("head", {}).get("sha"), "re-fetched PR head") != head:
+    observed_pr_number, branch = validate_pr_identity(pr, run)
+    if observed_pr_number != pr_number or _sha(pr.get("head", {}).get("sha"), "re-fetched PR head") != head:
         raise OrchestrationError("PR head changed after reviewer evidence")
+    if canonical_linked_issue(pr) != issue_number:
+        raise OrchestrationError("PR issue link changed after reviewer evidence")
+    contract = validate_issue_identity(issue, branch, issue_number)
+    validate_dependencies(client, contract)
+    if authorization_fingerprint(client, pr, issue, run) != authorization:
+        raise OrchestrationError("authorization evidence changed after reviewer execution")
     if current_review_state(pr, issue, comments) != prior:
         raise OrchestrationError("review state changed after reviewer evidence")
     return pr, issue, comments
 
 
+def _revalidate_repair_authorization(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any],
+                                     comments: Sequence[Mapping[str, Any]], run: WorkflowRun,
+                                     issue_number: int) -> CurrentReviewState:
+    """Re-check trusted scope after applying blocker state and before A5.3."""
+    pr_number, branch = validate_pr_identity(pr, run)
+    if canonical_linked_issue(pr) != issue_number:
+        raise OrchestrationError("PR issue link changed before repair")
+    contract = validate_issue_identity(issue, branch, issue_number)
+    validate_dependencies(client, contract)
+    current = current_review_state(pr, issue, comments)
+    if (pr_number < 1 or current.issue_status != "status:in-progress"
+            or current.review_label != "review:blocker" or current.review_head_sha != run.head_sha):
+        raise OrchestrationError("blocker repair authorization no longer matches the exact head")
+    return current
+
+
 def _repair(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any], comments: Sequence[Mapping[str, Any]],
-            current: CurrentReviewState, verdict: reviewer.ReviewVerdict, paths: tuple[str, ...], cwd: str) -> str:
+            current: CurrentReviewState, verdict: reviewer.ReviewVerdict, accepted_blocker_key: str,
+            paths: tuple[str, ...], cwd: str) -> str:
     attempts = repair_attempt_count(comments, pr["number"])
     if attempts >= MAX_REPAIR_ATTEMPTS:
         exhausted = "<!-- a5.4a-repair-exhausted:{\"schema_version\":1,\"pr_number\":%d} -->" % pr["number"]
         if exhausted not in [item.get("body") for item in comments if _trusted_comment(item)]:
             client.comment(pr["number"], exhausted)
         return "repair-exhausted"
-    state_input = _state_input(pr["number"], issue["number"], pr["head"]["sha"], current, "verdict", verdict)
-    decision = state_contract.decision_key(state_input)
     attempt = attempts + 1
-    client.comment(pr["number"], _repair_marker(pr["number"], issue["number"], pr["head"]["sha"], decision, attempt,
-                                                  tuple(item.id for item in verdict.findings)))
     request = repair.RepairRequest(1, REPOSITORY, pr["number"], issue["number"], _pr_branch(pr), pr["head"]["sha"],
-                                   decision, current.issue_status, current.review_label, current.review_head_sha,
+                                   accepted_blocker_key, current.issue_status, current.review_label, current.review_head_sha,
                                    "green", tuple(repair.BlockerFinding(item.id, item.category, item.message,
                                    item.required_action, item.required_evidence) for item in verdict.findings), paths, attempt)
     repair.validate_request(request)
+    client.comment(pr["number"], _repair_marker(pr["number"], issue["number"], pr["head"]["sha"], accepted_blocker_key, attempt,
+                                                  tuple(item.id for item in verdict.findings)))
     try:
         checkout_exact_pr_branch(request.branch, request.expected_head_sha, cwd)
         result = repair.execute_repair(request, cwd)
@@ -409,6 +500,7 @@ def orchestrate(client: Any, event: Mapping[str, Any], cwd: str,
         record_ci_observation(client, comments, run, pr_number)
         return "ci-non-success"
 
+    ensure_review_labels(client)
     current = current_review_state(pr, issue, comments)
     if current.review_label == "review:escalated":
         return "review-escalated"
@@ -428,6 +520,7 @@ def orchestrate(client: Any, event: Mapping[str, Any], cwd: str,
         return "review-clean"
 
     snapshot, paths = build_snapshot(pr, issue, run, client.changed_files(pr_number))
+    authorization = authorization_fingerprint(client, pr, issue, run)
     if current.review_label not in ("review:pending", "review:blocker") or current.review_head_sha != run.head_sha:
         raise OrchestrationError("current review state is not pending for the exact CI head")
     verdict = review_runner(snapshot, cwd)
@@ -435,7 +528,7 @@ def orchestrate(client: Any, event: Mapping[str, Any], cwd: str,
         raise OrchestrationError("reviewer returned an invalid verdict object")
     if verdict.effective_risk != "green" and verdict.verdict != "escalate":
         raise OrchestrationError("non-GREEN reviewer risk must not advance or repair automatically")
-    pr, issue, comments = _refetch_unchanged(client, pr_number, issue_number, run.head_sha, current)
+    pr, issue, comments = _refetch_unchanged(client, pr_number, issue_number, run.head_sha, run, current, authorization)
     transition_input = _state_input(pr_number, issue_number, run.head_sha, current, "verdict", verdict)
     plan = state_contract.transition(transition_input)
     apply_transition(client, pr, issue, comments, transition_input, plan)
@@ -444,7 +537,10 @@ def orchestrate(client: Any, event: Mapping[str, Any], cwd: str,
     if verdict.verdict == "escalate":
         return "review-escalated"
     pr, issue, comments = client.pr(pr_number), client.issue(issue_number), client.comments(pr_number)
-    return _repair(client, pr, issue, comments, current_review_state(pr, issue, comments), verdict, paths, cwd)
+    current = _revalidate_repair_authorization(client, pr, issue, comments, run, issue_number)
+    accepted_key = plan.decision_key if not plan.idempotent_no_op else accepted_blocker_decision_key(
+        comments, pr_number, issue_number, run.head_sha)
+    return _repair(client, pr, issue, comments, current, verdict, accepted_key, paths, cwd)
 
 
 class GitHubClient:
@@ -476,6 +572,17 @@ class GitHubClient:
 
     def dependency_issue(self, dependency: green_worker.Dependency) -> Mapping[str, Any]:
         return self._request("GET", "/issues/%d" % dependency.number, repository=dependency.repository)
+
+    def repository_labels(self) -> list[Mapping[str, Any]]:
+        value = self._request("GET", "/labels?per_page=100")
+        if not isinstance(value, list) or len(value) >= 100:
+            raise OrchestrationError("GitHub repository labels response is malformed")
+        return value
+
+    def create_label(self, specification: Mapping[str, str]) -> None:
+        if not isinstance(specification, Mapping) or set(specification) != {"name", "color", "description"}:
+            raise OrchestrationError("review label specification is malformed")
+        self._request("POST", "/labels", dict(specification))
 
     def comments(self, number: int) -> list[Mapping[str, Any]]:
         value = self._request("GET", "/issues/%d/comments?per_page=100" % number)

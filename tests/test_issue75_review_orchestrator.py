@@ -74,6 +74,8 @@ class FakeClient:
         self.files_data = copy.deepcopy(files or [{"filename": "docs/change.md", "patch": "+safe"}])
         self.comment_data = []
         self.label_updates = []
+        self.repository_label_data = labels(*sorted(orchestrator.REVIEW_LABELS))
+        self.created_labels = []
 
     def open_prs_for_head(self, head):
         return [self.pr_data] if self.pr_data["head"]["sha"] == head else []
@@ -102,6 +104,13 @@ class FakeClient:
     def dependency_issue(self, dependency):
         return {"state": "closed"}
 
+    def repository_labels(self):
+        return self.repository_label_data
+
+    def create_label(self, specification):
+        self.created_labels.append(specification)
+        self.repository_label_data.append({"name": specification["name"]})
+
     def set_labels(self, number, names):
         target = self.pr_data if number == self.pr_data["number"] else self.issue_data
         target["labels"] = labels(*names)
@@ -113,6 +122,22 @@ class FakeClient:
 
 
 class WorkflowAndEligibilityTests(unittest.TestCase):
+    def test_review_label_provisioning_is_idempotent_and_creates_missing(self):
+        existing = FakeClient()
+        orchestrator.ensure_review_labels(existing)
+        self.assertEqual(existing.created_labels, [])
+
+        missing = FakeClient()
+        missing.repository_label_data = [{"name": "review:pending"}]
+        orchestrator.ensure_review_labels(missing)
+        self.assertEqual({item["name"] for item in missing.created_labels}, orchestrator.REVIEW_LABELS - {"review:pending"})
+
+    def test_review_label_creation_failure_fails_closed(self):
+        client = FakeClient()
+        client.repository_label_data = []
+        client.create_label = mock.Mock(side_effect=orchestrator.OrchestrationError("API failure"))
+        with self.assertRaises(orchestrator.OrchestrationError):
+            orchestrator.ensure_review_labels(client)
     def test_workflow_run_requires_exact_name_completed_terminal_and_sha(self):
         self.assertEqual(orchestrator.parse_workflow_run(event()).head_sha, HEAD)
         for changed in ({"name": "Other"}, {"status": "in_progress"}, {"conclusion": None}, {"head_sha": "bad"}):
@@ -197,6 +222,26 @@ class StateAndRepairTests(unittest.TestCase):
             orchestrator.orchestrate(client, event(), ".", stale)
         self.assertEqual(client.comment_data[0]["body"].startswith("<!-- a5.4a-state:"), True)
 
+    def test_reviewer_metadata_races_cannot_apply_verdict_or_repair(self):
+        changes = (
+            lambda client: client.issue_data["labels"].__setitem__(1, {"name": "risk:yellow"}),
+            lambda client: client.issue_data.__setitem__("body", ISSUE_BODY.replace("- none", "- blocked-by: #1")),
+            lambda client: (client.issue_data.__setitem__("body", ISSUE_BODY.replace("- none", "- blocked-by: #1")),
+                            setattr(client, "dependency_issue", lambda _: {"state": "open"})),
+            lambda client: client.pr_data.__setitem__("body", "Closes #76"),
+            lambda client: client.pr_data["base"].__setitem__("ref", "release"),
+            lambda client: client.pr_data["head"].__setitem__("ref", "codex/issue-75-other"),
+        )
+        for change in changes:
+            client = FakeClient()
+            def raced(*_):
+                change(client)
+                return clean_verdict()
+            with self.assertRaises(orchestrator.OrchestrationError):
+                orchestrator.orchestrate(client, event(), ".", raced)
+            self.assertNotIn("review:clean", [item["name"] for item in client.pr_data["labels"]])
+            self.assertFalse(any("a5.4a-repair" in item["body"] for item in client.comment_data))
+
     def test_repair_attempt_markers_are_bounded_and_unique(self):
         comments = [{"body": orchestrator._repair_marker(175, 75, HEAD, "a5.2:" + "a" * 64, 1, ("F-1",)),
                      "user": {"login": orchestrator.TRUSTED_AUDIT_AUTHOR}}]
@@ -222,9 +267,10 @@ class StateAndRepairTests(unittest.TestCase):
         with mock.patch.object(orchestrator, "checkout_exact_pr_branch"), \
              mock.patch.object(orchestrator.repair, "execute_repair", side_effect=repaired):
             result = orchestrator._repair(client, client.pr_data, client.issue_data, client.comment_data, current,
-                                           blocker_verdict(), ("docs/change.md",), ".")
+                                           blocker_verdict(), plan.decision_key, ("docs/change.md",), ".")
         self.assertEqual(result, "repair-pushed")
         self.assertEqual(captured["request"].allowed_paths, ("docs/change.md",))
+        self.assertEqual(captured["request"].review_decision_key, plan.decision_key)
         self.assertEqual([item["name"] for item in client.pr_data["labels"]], ["review:pending"])
 
     def test_repair_failure_keeps_blocker_state(self):
@@ -232,9 +278,21 @@ class StateAndRepairTests(unittest.TestCase):
         current = orchestrator.CurrentReviewState("status:in-progress", "review:blocker", HEAD)
         with mock.patch.object(orchestrator, "checkout_exact_pr_branch", side_effect=orchestrator.OrchestrationError("no")):
             result = orchestrator._repair(client, client.pr_data, client.issue_data, [], current, blocker_verdict(),
-                                           ("docs/change.md",), ".")
+                                           "a5.2:" + "a" * 64, ("docs/change.md",), ".")
         self.assertEqual(result, "repair-failed")
         self.assertIn("repair-failed", client.comment_data[-1]["body"])
+
+    def test_incompatible_repair_request_consumes_no_attempt_or_runs_codex(self):
+        client = FakeClient()
+        current = orchestrator.CurrentReviewState("status:in-progress", "review:blocker", HEAD)
+        scientific = reviewer.ReviewVerdict(1, "blocker", HEAD, "green", "blocked", (reviewer.Finding(
+            "F-1", "scientific", "unsafe", "stop", "human"),), "")
+        with mock.patch.object(orchestrator, "checkout_exact_pr_branch") as checkout:
+            with self.assertRaises(repair.RepairError):
+                orchestrator._repair(client, client.pr_data, client.issue_data, [], current, scientific,
+                                     "a5.2:" + "a" * 64, ("docs/change.md",), ".")
+        checkout.assert_not_called()
+        self.assertEqual(client.comment_data, [])
 
     def test_exact_branch_checkout_requires_matching_remote_and_local_heads(self):
         calls = []

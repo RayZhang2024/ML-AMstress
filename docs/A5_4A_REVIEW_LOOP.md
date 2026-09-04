@@ -14,7 +14,11 @@ A5.1 remains read-only and receives no GitHub credential.
 A5.2 is the sole source of `review:pending`, `review:blocker`,
 `review:clean`, and `review:escalated` transitions. Bounded machine-readable
 PR comments record exact-head CI observations, state decision keys, and repair
-attempts. A repair can run only for an accepted GREEN blocker, at most twice,
+attempts. Before any successful-head state mutation, the trusted coordinator
+idempotently verifies or creates the four repository review labels and fails
+closed if their evidence or creation is ambiguous. A repair uses the exact
+accepted pending-to-blocker A5.2 decision key, can run only for an accepted
+GREEN blocker, at most twice,
 and only within the PR's already-reviewed GREEN changed-file set. A successful
 A5.3 repair must prove its pushed head before A5.2 returns the PR to pending;
 the next exact-head CI completion performs any further review.
