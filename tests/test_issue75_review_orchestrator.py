@@ -140,6 +140,11 @@ class WorkflowAndEligibilityTests(unittest.TestCase):
         self.assertIn("persist-credentials: false", workflow)
         self.assertNotIn("enablePullRequestAutoMerge", workflow)
 
+    def test_a5_workflow_runs_orchestrator_as_a_package_module(self):
+        workflow = (ROOT / ".github" / "workflows" / "a5-review-loop.yml").read_text(encoding="utf-8")
+        self.assertIn("python -m scripts.a5_review_orchestrator", workflow)
+        self.assertNotIn("python scripts/a5_review_orchestrator.py", workflow)
+
     def test_orchestrator_requires_app_token_before_trusted_execution(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(orchestrator.OrchestrationError, "AUTOMATION_APP_TOKEN"):

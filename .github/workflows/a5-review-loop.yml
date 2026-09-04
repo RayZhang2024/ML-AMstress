@@ -68,7 +68,7 @@ jobs:
           permission-contents: write
 
       - name: Run trusted A5 review and repair coordinator
-        run: python scripts/a5_review_orchestrator.py
+        run: python -m scripts.a5_review_orchestrator
         env:
           # This token remains in trusted orchestration only. A5.1 and A5.3
           # remove it from their respective untrusted child environments.
