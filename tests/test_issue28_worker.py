@@ -162,13 +162,27 @@ class WorkerPolicyTests(unittest.TestCase):
         allowed, rejected = worker.green_changed_paths(
             [
                 "docs/change.md",
+                "scripts/other_tool.py",
                 "scripts/codex_issue_worker.py",
                 ".github/workflows/candidate.yml",
+                "AGENTS.md",
+                "docs/AUTONOMOUS_DEVELOPMENT.md",
+                "docs/AUTONOMOUS_ORCHESTRATION.md",
                 "create_input.py",
             ]
         )
-        self.assertEqual(allowed, ("docs/change.md", "scripts/codex_issue_worker.py"))
-        self.assertEqual(rejected, (".github/workflows/candidate.yml", "create_input.py"))
+        self.assertEqual(allowed, ("docs/change.md", "scripts/other_tool.py"))
+        self.assertEqual(
+            rejected,
+            (
+                "scripts/codex_issue_worker.py",
+                ".github/workflows/candidate.yml",
+                "AGENTS.md",
+                "docs/AUTONOMOUS_DEVELOPMENT.md",
+                "docs/AUTONOMOUS_ORCHESTRATION.md",
+                "create_input.py",
+            ),
+        )
 
     def test_codex_process_has_no_github_write_credential_or_git_helper(self):
         captured = {}
@@ -302,6 +316,17 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}", self.workflow)
         self.assertNotIn("gh pr merge", self.workflow)
         self.assertNotIn("enablePullRequestAutoMerge", self.workflow)
+
+    def test_openai_secret_is_scoped_to_worker_step(self):
+        job_env_start = self.workflow.index("    env:\n")
+        steps_start = self.workflow.index("    steps:\n")
+        self.assertNotIn("OPENAI_API_KEY:", self.workflow[job_env_start:steps_start])
+
+        worker_start = self.workflow.index("      - name: Run fail-closed GREEN worker")
+        worker_env = self.workflow[worker_start:]
+        self.assertIn("OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}", worker_env)
+        install_region = self.workflow[steps_start:worker_start]
+        self.assertNotIn("OPENAI_API_KEY", install_region)
 
     def test_auth_and_controlled_setup_are_documented(self):
         for text in ("OPENAI_API_KEY", "GITHUB_TOKEN", "CODEX_CLI_PACKAGE", "status:review", "status:blocked"):

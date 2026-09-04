@@ -41,7 +41,14 @@ STATUS_PREFIX = "status:"
 RISK_PREFIX = "risk:"
 CLAIM_MARKER = "<!-- codex-worker-claim issue:{number} run:{run_id} branch:{branch} -->"
 ALLOWED_GREEN_ROOTS = ("docs/", "scripts/", "tests/")
-ALLOWED_GREEN_FILES = ("AGENTS.md", "README.md", "LICENSE")
+ALLOWED_GREEN_FILES = ("README.md", "LICENSE")
+PROTECTED_CONTROL_PLANE_ROOTS = (".github/",)
+PROTECTED_CONTROL_PLANE_FILES = (
+    "scripts/codex_issue_worker.py",
+    "AGENTS.md",
+    "docs/AUTONOMOUS_DEVELOPMENT.md",
+    "docs/AUTONOMOUS_ORCHESTRATION.md",
+)
 
 
 class WorkerError(Exception):
@@ -237,7 +244,12 @@ def green_changed_paths(paths):
     disallowed = []
     for path in paths:
         normalized = path.replace("\\", "/")
-        if normalized in ALLOWED_GREEN_FILES or normalized.startswith(ALLOWED_GREEN_ROOTS):
+        if (
+            normalized.startswith(PROTECTED_CONTROL_PLANE_ROOTS)
+            or normalized in PROTECTED_CONTROL_PLANE_FILES
+        ):
+            disallowed.append(normalized)
+        elif normalized in ALLOWED_GREEN_FILES or normalized.startswith(ALLOWED_GREEN_ROOTS):
             allowed.append(normalized)
         else:
             disallowed.append(normalized)

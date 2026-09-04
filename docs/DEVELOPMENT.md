@@ -44,17 +44,19 @@ has no competing branch or open PR. A deterministic `codex/issue-<number>-<slug>
 ref is created as the claim lock before the issue is marked
 `status:in-progress`. The worker runs Codex on that branch, rejects any diff
 outside GREEN paths (`docs/`, `scripts/`, `tests/`, and the small
-governance-file allowlist); all `.github/workflows/**` edits are rejected,
-rather than being part of the autonomous edit surface. It runs the normal-Python checks, pushes once, opens
+governance-file allowlist). Control-plane paths are explicitly protected:
+`.github/**`, `scripts/codex_issue_worker.py`, `AGENTS.md`,
+`docs/AUTONOMOUS_DEVELOPMENT.md`, and `docs/AUTONOMOUS_ORCHESTRATION.md` are
+always rejected, rather than being part of the autonomous edit surface. It runs the normal-Python checks, pushes once, opens
 one PR against `main`, and changes the issue to `status:review` only after PR
 creation. Failures preserve the branch and report `status:blocked`; no merge or
 auto-merge operation is available.
 
 The workflow requires these names only (never their values):
 
-- `OPENAI_API_KEY` — GitHub Actions secret used by the Codex CLI. It is passed
-  only through the process environment and is never printed or placed in a
-  prompt/comment/PR.
+- `OPENAI_API_KEY` — GitHub Actions secret used by the Codex CLI. It is scoped
+  only to the final worker step (dependency setup/install steps do not receive
+  it), and is never printed or placed in a prompt/comment/PR.
 - `GITHUB_TOKEN` — GitHub's built-in token, supplied only to the trusted worker
   step. The workflow requests `contents: write` to create/push the single claim
   branch, `issues: write` to record labels/comments, and `pull-requests: write`
