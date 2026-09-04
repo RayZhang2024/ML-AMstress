@@ -1,0 +1,2 @@
+# A5.4b Live Fixture
+CONTROL_VALUE: A5_4B_PASS
