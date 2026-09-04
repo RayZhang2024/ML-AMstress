@@ -8,6 +8,7 @@ auto-merge endpoint.
 
 from __future__ import print_function
 
+import base64
 import dataclasses
 import getpass
 import json
@@ -803,13 +804,17 @@ def push_branch(cwd, branch):
     token = os.environ.get("GITHUB_TOKEN")
     if not token:
         raise WorkerError("GITHUB_TOKEN is required for the final push")
+    credentials = "x-access-token:" + token
+    encoded_credentials = base64.b64encode(credentials.encode("utf-8")).decode(
+        "ascii"
+    )
     env = os.environ.copy()
     env.pop("OPENAI_API_KEY", None)
     env.pop("GITHUB_TOKEN", None)
     env.pop("GH_TOKEN", None)
     env["GIT_CONFIG_COUNT"] = "1"
-    env["GIT_CONFIG_KEY_0"] = "http.extraheader"
-    env["GIT_CONFIG_VALUE_0"] = "AUTHORIZATION: bearer " + token
+    env["GIT_CONFIG_KEY_0"] = "http.https://github.com/.extraheader"
+    env["GIT_CONFIG_VALUE_0"] = "AUTHORIZATION: basic " + encoded_credentials
     _run(["git", "push", "origin", branch], cwd=cwd, env=env)
 
 
