@@ -76,3 +76,20 @@ class ReviewStateContractTests(unittest.TestCase):
         source = inspect.getsource(contract).lower()
         for forbidden in ("subprocess", "requests", "urllib", "github", "socket", "http.client"):
             self.assertNotIn(forbidden, source)
+
+    def test_finding_ids_are_individually_bounded(self):
+        maximum_id = "F-" + ("9" * (contract.MAX_FINDING_ID_LENGTH - 2))
+        valid = state(validated_verdict=verdict("blocker", ids=(maximum_id,)))
+        self.assertEqual(contract.transition(valid).next_pr_review_state, "review:blocker")
+        maximum_ids = tuple(
+            "F-1" + ("%0*d" % (contract.MAX_FINDING_ID_LENGTH - 3, index))
+            for index in range(1, 51)
+        )
+        bounded = state(validated_verdict=verdict("blocker", ids=maximum_ids))
+        bounded_plan = contract.transition(bounded)
+        bounded_audit = contract.serialize_audit(bounded, bounded_plan)
+        self.assertEqual(bounded_audit, contract.serialize_audit(bounded, bounded_plan))
+        self.assertLessEqual(len(bounded_audit), 4096)
+        oversized = "F-" + ("9" * (contract.MAX_FINDING_ID_LENGTH - 1))
+        with self.assertRaises(contract.ReviewStateError):
+            contract.transition(state(validated_verdict=verdict("blocker", ids=(oversized,))))

@@ -15,6 +15,7 @@ EVENTS = frozenset(("initialize", "verdict", "new_head", "human_release"))
 RISKS = frozenset(("green", "yellow", "red"))
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 FINDING_ID_RE = re.compile(r"^F-[1-9][0-9]*$")
+MAX_FINDING_ID_LENGTH = 32
 
 
 class ReviewStateError(Exception):
@@ -99,7 +100,9 @@ def validate_state_input(state: ReviewStateInput) -> ReviewStateInput:
         _sha(verdict.reviewed_head_sha, "validated verdict reviewed_head_sha")
         if not isinstance(verdict.finding_ids, tuple) or len(verdict.finding_ids) > 50:
             raise ReviewStateError("finding_ids must be a bounded tuple")
-        if len(set(verdict.finding_ids)) != len(verdict.finding_ids) or any(not isinstance(x, str) or not FINDING_ID_RE.fullmatch(x) for x in verdict.finding_ids):
+        if len(set(verdict.finding_ids)) != len(verdict.finding_ids) or any(
+                not isinstance(x, str) or len(x) > MAX_FINDING_ID_LENGTH
+                or not FINDING_ID_RE.fullmatch(x) for x in verdict.finding_ids):
             raise ReviewStateError("finding_ids must be unique stable identifiers")
     if state.event_kind == "verdict" and verdict is None:
         raise ReviewStateError("verdict event requires a validated verdict")

@@ -17,9 +17,9 @@ All other initialized combinations fail closed. Uninitialized review state is al
 
 ## Immutable input and decisions
 
-`ReviewStateInput` is immutable and versioned (`schema_version: 1`). It contains repository, PR/issue numbers, current head SHA, exactly one issue status, exactly one review state (or uninitialized), the evidence head, an optional already-validated A5.1 verdict, and an event kind. Verdict input is bounded to verdict, reviewed head, effective risk, and stable finding IDs.
+`ReviewStateInput` is immutable and versioned (`schema_version: 1`). It contains repository, PR/issue numbers, current head SHA, exactly one issue status, exactly one review state (or uninitialized), the evidence head, an optional already-validated A5.1 verdict, and an event kind. Verdict input is bounded to verdict, reviewed head, effective risk, and at most 50 stable finding IDs of at most 32 characters each.
 
-`transition` returns a versioned plan with next issue/review states, evidence head, explicit no-op flag, and deterministic decision key. The key is SHA-256 over contract version, repository, PR number, and current head SHA; it never includes timestamps or model prose.
+`transition` returns a versioned plan with next issue/review states, evidence head, explicit no-op flag, and deterministic decision key. The key is SHA-256 over a canonical bounded trusted transition identity: contract version, repository and PR/issue identity, current head, event kind, current issue/review state and review-state head, plus validated verdict identity (verdict, reviewed head, effective risk, and finding IDs) when applicable. It never includes timestamps, model prose, prompts, or raw review content.
 
 ## Transition table
 
