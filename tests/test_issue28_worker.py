@@ -200,6 +200,58 @@ class WorkerPolicyTests(unittest.TestCase):
         finally:
             directory.cleanup()
 
+    def test_local_line_ending_policy_keeps_isolated_status_clean(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            environment = worker._probe_environment()
+
+            def git(*arguments):
+                result = subprocess.run(
+                    ["git"] + list(arguments),
+                    cwd=str(workspace),
+                    env=environment,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return result.stdout
+
+            git("init")
+            git("config", "user.email", "worker-test@example.invalid")
+            git("config", "user.name", "Worker Test")
+            (workspace / "tracked.txt").write_bytes(b"line one\nline two\n")
+            git("add", "tracked.txt")
+            git("commit", "-m", "initial")
+
+            # Reproduce a Windows checkout already materialized under inherited
+            # core.autocrlf=true, then switch to the isolated local policy.
+            git("config", "--local", "core.autocrlf", "true")
+            (workspace / "tracked.txt").write_bytes(b"line one\r\nline two\r\n")
+            git("config", "--local", "core.autocrlf", "false")
+            git("config", "--local", "core.eol", "lf")
+
+            status_code, stale_status = worker._probe(
+                ["git", "status", "--porcelain"], str(workspace)
+            )
+            self.assertEqual(status_code, 0)
+            self.assertTrue(stale_status.strip())
+
+            git("checkout-index", "--force", "--all")
+            status_code, normalized_status = worker._probe(
+                ["git", "status", "--porcelain"], str(workspace)
+            )
+            self.assertEqual(status_code, 0)
+            self.assertEqual(normalized_status.strip(), "")
+
+            (workspace / "tracked.txt").write_bytes(b"real modification\n")
+            status_code, dirty_status = worker._probe(
+                ["git", "status", "--porcelain"], str(workspace)
+            )
+            self.assertEqual(status_code, 0)
+            self.assertIn(" M tracked.txt", dirty_status)
+
     def test_eligible_green_issue_with_satisfied_dependencies(self):
         current = issue(body=GREEN_BODY.replace("- none", "- blocked-by: #22"))
         contract = worker.parse_contract(current["body"])
@@ -551,6 +603,28 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("--verify-local-python", preflight_step)
         self.assertIn("$ErrorActionPreference = 'Stop'", preflight_step)
         self.assertIn("Local Python executable could not run.", preflight_step)
+
+    def test_workflow_pins_local_line_endings_before_any_workspace_gate(self):
+        checkout = self.workflow.index("      - name: Check out main")
+        line_endings = self.workflow.index(
+            "      - name: Pin repository-local Git line endings"
+        )
+        local_python = self.workflow.index("      - name: Verify local Python")
+        diagnostic = self.workflow.index(
+            "      - name: Diagnose isolated workspace cleanliness"
+        )
+        worker_step = self.workflow.index("      - name: Run fail-closed GREEN worker")
+        self.assertLess(checkout, line_endings)
+        self.assertLess(line_endings, local_python)
+        self.assertLess(line_endings, diagnostic)
+        self.assertLess(line_endings, worker_step)
+        policy_step = self.workflow[line_endings:local_python]
+        self.assertIn("shell: powershell", policy_step)
+        self.assertIn("git config --local core.autocrlf false", policy_step)
+        self.assertIn("git config --local core.eol lf", policy_step)
+        self.assertIn("git checkout-index --force --all", policy_step)
+        self.assertNotIn("git clean", policy_step)
+        self.assertNotIn("git reset", policy_step)
 
     def test_workflow_diagnoses_workspace_after_dependencies_before_worker(self):
         dependencies = self.workflow.index(
