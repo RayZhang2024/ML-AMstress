@@ -1,5 +1,7 @@
 # Development workflow
 
+This line was added by the controlled GREEN worker integration exercise for Issue #30.
+
 ## Environments
 
 The GUI requires a normal Python 3 environment with the packages in `requirements.txt` (PyQt5, pandas, NumPy, matplotlib, openpyxl, scikit-learn, Optuna, and joblib). Install them with `python -m pip install -r requirements.txt` and launch with `python AM_gui_v7.py`.
