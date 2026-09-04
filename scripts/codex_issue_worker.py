@@ -39,9 +39,13 @@ DEPENDENCY_RE = re.compile(
 )
 RISK_RE = re.compile(r"\brisk:(green|yellow|red)\b")
 PYTHON_VERSION_RE = re.compile(r"\bPython\s+([0-9]+)\.([0-9]+)(?:\.[0-9]+)?\b")
+PORCELAIN_STATUS_RE = re.compile(r"^([ MADRCUT?!]{2}) (.*)$")
+WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^[A-Za-z]:[/\\\\]")
 STATUS_PREFIX = "status:"
 RISK_PREFIX = "risk:"
 CLAIM_MARKER = "<!-- codex-worker-claim issue:{number} run:{run_id} branch:{branch} -->"
+MAX_WORKSPACE_STATUS_ENTRIES = 20
+MAX_WORKSPACE_STATUS_PATH_LENGTH = 240
 ALLOWED_GREEN_ROOTS = ("docs/", "scripts/", "tests/")
 ALLOWED_GREEN_FILES = ("README.md", "LICENSE")
 PROTECTED_CONTROL_PLANE_ROOTS = (".github/",)
@@ -150,6 +154,63 @@ def verify_local_python(cwd=None):
     return executable, version
 
 
+def _sanitize_workspace_path(path):
+    """Return a bounded repository-relative path or a safe placeholder."""
+    normalized = path.strip().replace("\\", "/")
+    if (
+        not normalized
+        or normalized.startswith("/")
+        or normalized == ".."
+        or normalized.startswith("../")
+        or WINDOWS_ABSOLUTE_PATH_RE.match(normalized)
+        or normalized.startswith('"')
+        or any(ord(character) < 32 for character in normalized)
+    ):
+        return "<invalid-repository-path>"
+    if len(normalized) > MAX_WORKSPACE_STATUS_PATH_LENGTH:
+        return normalized[:MAX_WORKSPACE_STATUS_PATH_LENGTH - 3] + "..."
+    return normalized
+
+
+def format_workspace_status(porcelain_output, limit=MAX_WORKSPACE_STATUS_ENTRIES):
+    """Format bounded, safe status/path entries from Git porcelain output."""
+    entries = []
+    omitted = 0
+    for line in (porcelain_output or "").splitlines():
+        match = PORCELAIN_STATUS_RE.match(line)
+        if not match:
+            continue
+        if len(entries) >= limit:
+            omitted += 1
+            continue
+        status = match.group(1)
+        paths = match.group(2).split(" -> ")
+        safe_paths = " -> ".join(_sanitize_workspace_path(path) for path in paths)
+        entries.append("%s %s" % (status, safe_paths))
+    if omitted:
+        entries.append("... %d additional entries omitted" % omitted)
+    return "; ".join(entries)
+
+
+def diagnose_workspace(cwd=None):
+    """Emit only a safe isolated Git-status summary for Actions diagnostics."""
+    workspace = os.path.abspath(cwd or os.getcwd())
+    git_executable = shutil.which("git")
+    if not git_executable:
+        raise WorkerError("Git executable is not available for workspace diagnostic")
+    status_code, status_output = _probe(
+        [git_executable, "status", "--porcelain"], workspace
+    )
+    if status_code != 0:
+        raise WorkerError("could not inspect worker workspace status for diagnostic")
+    diagnostic = format_workspace_status(status_output)
+    if diagnostic:
+        print("GREEN worker workspace diagnostic: %s" % diagnostic)
+    else:
+        print("GREEN worker workspace diagnostic: clean")
+    return diagnostic
+
+
 def run_preflight(cwd=None):
     """Fail closed unless the intended Windows ChatGPT runner is ready."""
     workspace = os.path.abspath(cwd or os.getcwd())
@@ -225,7 +286,11 @@ def run_preflight(cwd=None):
             if status_code != 0:
                 errors.append("could not inspect worker workspace status")
             elif status_output.strip():
-                errors.append("worker workspace is not clean")
+                diagnostic = format_workspace_status(status_output)
+                errors.append(
+                    "worker workspace is not clean: %s"
+                    % (diagnostic or "<unparseable-porcelain-status>")
+                )
 
     for required in ("AGENTS.md", os.path.join("scripts", "codex_issue_worker.py")):
         if not os.path.isfile(os.path.join(workspace, required)):
@@ -814,6 +879,9 @@ def main(arguments=None):
     arguments = list(sys.argv[1:] if arguments is None else arguments)
     if arguments == ["--verify-local-python"]:
         verify_local_python()
+        return
+    if arguments == ["--diagnose-workspace"]:
+        diagnose_workspace()
         return
     if arguments:
         raise WorkerError("unsupported worker argument")

@@ -144,6 +144,62 @@ class WorkerPolicyTests(unittest.TestCase):
         self.assertEqual(executable, "python")
         self.assertEqual(version, (3, 13))
 
+    def test_workspace_status_diagnostic_accepts_clean_and_reports_paths(self):
+        self.assertEqual(worker.format_workspace_status("\n"), "")
+        self.assertEqual(
+            worker.format_workspace_status(" M docs/DEVELOPMENT.md\n"),
+            " M docs/DEVELOPMENT.md",
+        )
+        self.assertEqual(
+            worker.format_workspace_status("?? scratch/output.txt\n"),
+            "?? scratch/output.txt",
+        )
+
+    def test_workspace_status_diagnostic_is_bounded_and_sanitized(self):
+        output = "\n".join(" M tests/change-%d.py" % index for index in range(4))
+        diagnostic = worker.format_workspace_status(output, limit=2)
+        self.assertIn(" M tests/change-0.py", diagnostic)
+        self.assertIn(" M tests/change-1.py", diagnostic)
+        self.assertNotIn("tests/change-2.py", diagnostic)
+        self.assertIn("2 additional entries omitted", diagnostic)
+
+        with mock.patch.dict(os.environ, {"UNRELATED_SECRET": "do-not-leak"}):
+            diagnostic = worker.format_workspace_status(
+                " M C:\\Users\\runner\\do-not-leak.txt\n",
+            )
+        self.assertEqual(diagnostic, " M <invalid-repository-path>")
+        self.assertNotIn("do-not-leak", diagnostic)
+
+    def test_preflight_reports_sanitized_dirty_workspace(self):
+        directory = self._preflight_workspace()
+        try:
+            def fake_run(command, **kwargs):
+                if command[0] == "codex" and command[1] == "--version":
+                    output = "codex-cli 1.2.3"
+                elif command[0] == "codex":
+                    output = "Logged in using ChatGPT"
+                elif command[1:] == ["--version"]:
+                    output = "git version 2"
+                elif command[1:3] == ["rev-parse", "--is-inside-work-tree"]:
+                    output = "true"
+                elif command[1:] == ["status", "--porcelain"]:
+                    output = " M docs/DEVELOPMENT.md"
+                else:
+                    output = ""
+                return type("Result", (), {"returncode": 0, "stdout": output, "stderr": ""})()
+
+            with mock.patch.dict(os.environ, self._preflight_env(), clear=False), mock.patch.object(
+                worker.getpass, "getuser", return_value="runner-user"
+            ), mock.patch.object(
+                worker.shutil, "which", side_effect=lambda name: name
+            ), mock.patch.object(worker.subprocess, "run", side_effect=fake_run), self.assertRaises(
+                worker.WorkerError
+            ) as raised:
+                worker.run_preflight(directory.name)
+            self.assertIn("worker workspace is not clean:  M docs/DEVELOPMENT.md", str(raised.exception))
+        finally:
+            directory.cleanup()
+
     def test_eligible_green_issue_with_satisfied_dependencies(self):
         current = issue(body=GREEN_BODY.replace("- none", "- blocked-by: #22"))
         contract = worker.parse_contract(current["body"])
@@ -495,6 +551,22 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("--verify-local-python", preflight_step)
         self.assertIn("$ErrorActionPreference = 'Stop'", preflight_step)
         self.assertIn("Local Python executable could not run.", preflight_step)
+
+    def test_workflow_diagnoses_workspace_after_dependencies_before_worker(self):
+        dependencies = self.workflow.index(
+            "      - name: Install normal-Python worker test dependencies"
+        )
+        diagnostic = self.workflow.index(
+            "      - name: Diagnose isolated workspace cleanliness"
+        )
+        worker_step = self.workflow.index("      - name: Run fail-closed GREEN worker")
+        self.assertLess(dependencies, diagnostic)
+        self.assertLess(diagnostic, worker_step)
+        diagnostic_step = self.workflow[diagnostic:worker_step]
+        self.assertIn("shell: powershell", diagnostic_step)
+        self.assertIn("--diagnose-workspace", diagnostic_step)
+        self.assertNotIn("git clean", diagnostic_step)
+        self.assertNotIn("git reset", diagnostic_step)
 
     def test_auth_and_controlled_setup_are_documented(self):
         for text in (
