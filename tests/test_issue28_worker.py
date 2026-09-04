@@ -171,6 +171,39 @@ class WorkerPolicyTests(unittest.TestCase):
         self.assertEqual(diagnostic, " M <invalid-repository-path>")
         self.assertNotIn("do-not-leak", diagnostic)
 
+    def test_codex_prompt_separates_trusted_worker_and_local_duties(self):
+        prompt = " ".join(worker._codex_prompt(issue(), "codex/issue-53-test").split())
+        self.assertIn("trusted worker has already validated control-plane eligibility", prompt)
+        self.assertIn("Do not query GitHub or require GitHub API credentials", prompt)
+        self.assertIn("labels, status, risk, dependencies, open PRs, branch claims, races", prompt)
+        self.assertIn("branch creation and claim, issue labels/status", prompt)
+        self.assertIn("commit/push, PR creation, and merge/no-merge policy", prompt)
+        self.assertIn("Do not perform, require, or revalidate", prompt)
+        self.assertIn("context, not prerequisite tasks for you", prompt)
+        self.assertIn("local repository Necessity Gate", prompt)
+        self.assertIn("already satisfied", prompt)
+        self.assertIn("minimal files needed", prompt)
+        self.assertIn("Do-not-change constraint", prompt)
+        self.assertIn("scientific intent is ambiguous", prompt)
+
+    def test_codex_prompt_allows_missing_optional_tools_with_truthful_reporting(self):
+        prompt = " ".join(worker._codex_prompt(issue(), "codex/issue-53-test").split())
+        self.assertIn("focused local checks when tooling is available", prompt)
+        self.assertIn("inability to invoke Python or other optional tooling", prompt)
+        self.assertIn("not by itself a reason to decline", prompt)
+        self.assertIn("authoritative normal-Python validation", prompt)
+        self.assertIn("Report exactly which checks you ran and which you could not run", prompt)
+        self.assertIn("Exact issue contract", prompt)
+
+    def test_codex_prompt_treats_worker_owned_contract_steps_as_context(self):
+        body = GREEN_BODY + "\n## Worker operations\nCreate a branch and update issue labels.\n"
+        prompt = worker._codex_prompt(issue(body=body), "codex/issue-53-test")
+        instructions, contract = prompt.split("Exact issue contract:", 1)
+        instructions = " ".join(instructions.split())
+        self.assertIn("Do not query GitHub", instructions)
+        self.assertIn("context, not prerequisite tasks for you", instructions)
+        self.assertIn("Create a branch and update issue labels.", contract)
+
     def test_codex_noop_diagnostic_redacts_secrets_tokens_paths_and_controls(self):
         with mock.patch.dict(
             os.environ,
