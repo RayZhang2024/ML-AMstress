@@ -38,6 +38,11 @@ Abaqus/CAE compatibility or solver check.
 
 ## GREEN Codex worker (Issue #28)
 
+The current operational baseline and recovery catalogue are
+[AUTONOMOUS_WORKER_RUNBOOK.md](AUTONOMOUS_WORKER_RUNBOOK.md) and
+[AUTONOMOUS_TROUBLESHOOTING.md](AUTONOMOUS_TROUBLESHOOTING.md). They supplement
+this overview without changing the worker's review-first policy.
+
 The first worker is intentionally narrow. It runs only from an `issues:
 labeled` event whose label is `agent:codex`; it then re-fetches the issue and
 fails closed unless the issue is open, has exactly `status:ready` and
