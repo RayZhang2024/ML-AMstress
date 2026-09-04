@@ -109,10 +109,26 @@ def validate_state_input(state: ReviewStateInput) -> ReviewStateInput:
 
 
 def decision_key(state: ReviewStateInput) -> str:
-    """Return a stable identity for one exact PR head and contract version."""
+    """Return a stable identity for one exact trusted transition decision."""
     validate_state_input(state)
-    identity = "%s\n%s\n%s\n%s" % (STATE_CONTRACT_VERSION, state.repository, state.pull_request_number, state.current_head_sha)
-    return "a5.2:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    verdict = state.validated_verdict
+    identity = {
+        "schema_version": STATE_CONTRACT_VERSION,
+        "repository": state.repository,
+        "pull_request_number": state.pull_request_number,
+        "issue_number": state.issue_number,
+        "current_head_sha": state.current_head_sha,
+        "current_issue_status": state.current_issue_status,
+        "current_pr_review_state": state.current_pr_review_state,
+        "review_state_head_sha": state.review_state_head_sha,
+        "event_kind": state.event_kind,
+        "verdict": verdict.verdict if verdict else None,
+        "reviewed_head_sha": verdict.reviewed_head_sha if verdict else None,
+        "effective_risk": verdict.effective_risk if verdict else None,
+        "finding_ids": list(verdict.finding_ids) if verdict else [],
+    }
+    encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "a5.2:" + hashlib.sha256(encoded).hexdigest()
 
 
 def _plan(state: ReviewStateInput, issue: str, review: str, head: str, no_op: bool) -> TransitionPlan:

@@ -60,9 +60,15 @@ class ReviewStateContractTests(unittest.TestCase):
     def test_decision_key_audit_and_pure_boundary(self):
         item = state(validated_verdict=verdict("blocker", ids=("F-1",)))
         self.assertEqual(contract.decision_key(item), contract.decision_key(item))
+        initialize = state(current_pr_review_state=None, review_state_head_sha=None, validated_verdict=None, event_kind="initialize")
+        clean = state(validated_verdict=verdict("clean"))
+        self.assertNotEqual(contract.decision_key(initialize), contract.decision_key(clean))
+        self.assertNotEqual(contract.decision_key(clean), contract.decision_key(item))
         changed = state(current_head_sha=NEW_HEAD, review_state_head_sha=NEW_HEAD, validated_verdict=verdict("blocker", NEW_HEAD, ("F-1",)))
         self.assertNotEqual(contract.decision_key(item), contract.decision_key(changed))
-        audit = json.loads(contract.serialize_audit(item, contract.transition(item)))
+        serialized = contract.serialize_audit(item, contract.transition(item))
+        self.assertEqual(serialized, contract.serialize_audit(item, contract.transition(item)))
+        audit = json.loads(serialized)
         self.assertEqual(audit["finding_ids"], ["F-1"])
         self.assertNotIn("summary", audit)
         with self.assertRaises(contract.ReviewStateError):
