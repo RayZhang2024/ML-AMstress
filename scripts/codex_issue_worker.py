@@ -81,6 +81,10 @@ ALLOWED_GREEN_FILES = ("README.md", "LICENSE")
 PROTECTED_CONTROL_PLANE_ROOTS = (".github/",)
 PROTECTED_CONTROL_PLANE_FILES = (
     "scripts/codex_issue_worker.py",
+    "scripts/a5_reviewer.py",
+    "scripts/a5_review_state.py",
+    "scripts/a5_repair_worker.py",
+    "scripts/a5_review_orchestrator.py",
     "AGENTS.md",
     "docs/AUTONOMOUS_DEVELOPMENT.md",
     "docs/AUTONOMOUS_ORCHESTRATION.md",
