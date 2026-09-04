@@ -34,7 +34,7 @@ jobs:
           persist-credentials: false
 
       - name: Verify local Python
-        shell: pwsh
+        shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $python = Get-Command python -CommandType Application -ErrorAction SilentlyContinue
