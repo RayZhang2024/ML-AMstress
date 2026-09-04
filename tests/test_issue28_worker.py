@@ -344,6 +344,8 @@ class WorkerPolicyTests(unittest.TestCase):
                 "GIT_CONFIG_KEY_1": "core.eol",
                 "GIT_CONFIG_VALUE_1": "lf",
             },
+        ), mock.patch.object(
+            worker.shutil, "which", return_value=r"C:\Tools\codex.CMD"
         ), mock.patch.object(worker.subprocess, "run", side_effect=fake_run):
             worker.run_codex(issue(), "codex/issue-28-test", tempfile.gettempdir())
 
@@ -378,6 +380,8 @@ class WorkerPolicyTests(unittest.TestCase):
                     "GIT_CONFIG_GLOBAL": str(global_config),
                     "GIT_CONFIG_NOGLOBAL": "1",
                 },
+            ), mock.patch.object(
+                worker.shutil, "which", return_value=r"C:\Tools\codex.CMD"
             ), mock.patch.object(worker.subprocess, "run", side_effect=fake_run):
                 worker.run_codex(issue(), "codex/issue-28-test", directory)
 
@@ -392,6 +396,78 @@ class WorkerPolicyTests(unittest.TestCase):
                 check=False,
             )
             self.assertNotEqual(result.returncode, 0)
+
+    def test_run_codex_uses_preflight_resolved_windows_shim(self):
+        directory = self._preflight_workspace()
+        commands = []
+        resolved_codex = r"C:\Users\runner\AppData\Local\Programs\codex.CMD"
+        try:
+            def fake_run(command, **kwargs):
+                commands.append((command, kwargs))
+                if command[0] == resolved_codex and command[1] == "--version":
+                    output = "codex-cli 1.2.3"
+                elif command[0] == resolved_codex and command[1:] == ["login", "status"]:
+                    output = "Logged in using ChatGPT"
+                elif command[1:] == ["--version"]:
+                    output = "git version 2"
+                elif command[1:3] == ["rev-parse", "--is-inside-work-tree"]:
+                    output = "true"
+                else:
+                    output = ""
+                return type("Result", (), {"returncode": 0, "stdout": output, "stderr": ""})()
+
+            with mock.patch.dict(os.environ, self._preflight_env(), clear=False), mock.patch.object(
+                worker.getpass, "getuser", return_value="runner-user"
+            ), mock.patch.object(
+                worker.shutil,
+                "which",
+                side_effect=lambda name: resolved_codex if name == "codex" else "git",
+            ), mock.patch.object(worker.subprocess, "run", side_effect=fake_run):
+                worker.run_preflight(directory.name)
+                worker.run_codex(issue(), "codex/issue-28-test", directory.name)
+
+            command_vectors = [item[0] for item in commands]
+            self.assertIn([resolved_codex, "--version"], command_vectors)
+            self.assertIn([resolved_codex, "login", "status"], command_vectors)
+            actual = next(command for command in command_vectors if command[1:3] == ["exec", "--full-auto"])
+            self.assertEqual(actual[0], resolved_codex)
+            self.assertNotEqual(actual[0], "codex")
+            actual_kwargs = next(kwargs for command, kwargs in commands if command == actual)
+            self.assertNotIn("shell", actual_kwargs)
+        finally:
+            directory.cleanup()
+
+    def test_run_codex_supports_explicit_executable_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "codex.cmd"
+            executable.write_text("shim", encoding="utf-8")
+            captured = {}
+
+            def fake_run(command, **kwargs):
+                captured["command"] = command
+                captured["kwargs"] = kwargs
+                return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+            with mock.patch.dict(
+                os.environ, {"CODEX_EXECUTABLE": str(executable)}, clear=False
+            ), mock.patch.object(worker.shutil, "which", return_value=None), mock.patch.object(
+                worker.subprocess, "run", side_effect=fake_run
+            ):
+                worker.run_codex(issue(), "codex/issue-28-test", directory)
+
+            self.assertEqual(captured["command"][0], os.path.abspath(str(executable)))
+            self.assertNotIn("shell", captured["kwargs"])
+
+    def test_run_codex_rejects_missing_executable_without_launching(self):
+        with mock.patch.dict(
+            os.environ, {"CODEX_EXECUTABLE": "missing-codex"}, clear=False
+        ), mock.patch.object(worker.shutil, "which", return_value=None), mock.patch.object(
+            worker.os.path, "isfile", return_value=False
+        ), mock.patch.object(worker.subprocess, "run") as run:
+            with self.assertRaises(worker.WorkerError) as raised:
+                worker.run_codex(issue(), "codex/issue-28-test", tempfile.gettempdir())
+        self.assertIn("Codex executable is not available", str(raised.exception))
+        run.assert_not_called()
 
     def test_trusted_push_injects_token_only_for_git_command(self):
         captured = {}

@@ -81,8 +81,25 @@ class Eligibility:
     contract: object = None
 
 
-def _codex_command_tokens():
-    executable = os.environ.get("CODEX_EXECUTABLE", "codex").strip()
+def _configured_codex_executable():
+    return os.environ.get("CODEX_EXECUTABLE", "codex").strip()
+
+
+def resolve_codex_executable(executable=None):
+    """Resolve the configured Codex command for both preflight and execution."""
+    configured = executable if executable is not None else _configured_codex_executable()
+    if not configured:
+        return None
+    resolved = shutil.which(configured)
+    if resolved:
+        return resolved
+    if os.path.isfile(configured):
+        return os.path.abspath(configured)
+    return None
+
+
+def _codex_command_tokens(executable=None):
+    executable = executable if executable is not None else _configured_codex_executable()
     return [executable, "exec", "--full-auto"]
 
 
@@ -242,11 +259,8 @@ def run_preflight(cwd=None):
     if os.environ.get("OPENAI_API_KEY"):
         errors.append("OPENAI_API_KEY is unsupported; configure Codex ChatGPT login instead")
 
-    command = _codex_command_tokens()
-    executable = command[0] if command else ""
-    resolved_codex = shutil.which(executable) if executable else None
-    if not resolved_codex and executable and os.path.isfile(executable):
-        resolved_codex = executable
+    executable = _configured_codex_executable()
+    resolved_codex = resolve_codex_executable(executable)
     if not resolved_codex:
         errors.append("Codex executable is not available on PATH")
     else:
@@ -630,9 +644,13 @@ Exact issue contract:
 
 
 def run_codex(issue, branch, cwd):
-    command = _codex_command_tokens() + [_codex_prompt(issue, branch)]
-    if not command[0]:
-        raise WorkerError("CODEX_EXECUTABLE is not configured")
+    executable = _configured_codex_executable()
+    resolved_codex = resolve_codex_executable(executable)
+    if not resolved_codex:
+        if not executable:
+            raise WorkerError("CODEX_EXECUTABLE is not configured")
+        raise WorkerError("Codex executable is not available on PATH")
+    command = _codex_command_tokens(resolved_codex) + [_codex_prompt(issue, branch)]
     # Capture output so a provider/CLI cannot accidentally echo credentials into
     # Actions logs, comments, or PR text.  Only the exit status is reported.
     codex_env = os.environ.copy()
