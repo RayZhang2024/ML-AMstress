@@ -1,6 +1,9 @@
 import inspect
 import json
 import os
+from pathlib import Path
+import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -76,6 +79,11 @@ class RepairRequestTests(unittest.TestCase):
 
 
 class RepairExecutionTests(unittest.TestCase):
+    @staticmethod
+    def _git(cwd, *arguments):
+        return subprocess.run(("git", *arguments), cwd=cwd, check=True, text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
     def test_preflight_requires_clean_branch_and_exact_head(self):
         with mock.patch.object(worker, "_git_text", side_effect=("", "wrong", HEAD)):
             with self.assertRaises(worker.RepairError):
@@ -116,6 +124,24 @@ class RepairExecutionTests(unittest.TestCase):
         with self.assertRaises(worker.RepairError):
             worker.enforce_change_scope(request(allowed_paths=(".github/x",)), (".github/x",))
 
+    def test_changed_paths_reports_tracked_modification_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            self._git(directory, "init", "-q")
+            self._git(directory, "config", "user.name", "A5 test")
+            self._git(directory, "config", "user.email", "a5@example.invalid")
+            tracked = repository / "tracked.txt"
+            tracked.write_text("before\n", encoding="utf-8")
+            self._git(directory, "add", "tracked.txt")
+            self._git(directory, "commit", "-qm", "initial")
+            expected_head = self._git(directory, "rev-parse", "HEAD").stdout.strip()
+
+            tracked.write_text("after\n", encoding="utf-8")
+
+            paths = worker.changed_paths(directory, expected_head)
+            self.assertEqual(paths, ("tracked.txt",))
+            worker.enforce_change_scope(request(allowed_paths=("tracked.txt",)), paths)
+
     def test_validation_uses_argv_and_prevents_commit_push(self):
         calls = []
         def record(command, cwd, env=None, input_text=None):
@@ -153,9 +179,50 @@ class RepairExecutionTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "topsecret"}, clear=True), \
              mock.patch.object(worker, "_run", side_effect=record):
             worker.push_repair(request(), ".", NEW_HEAD)
-        self.assertIn("--force-with-lease=refs/heads:codex/issue-73-repair:" + HEAD, captured["command"])
+        self.assertIn("--force-with-lease=refs/heads/codex/issue-73-repair:" + HEAD, captured["command"])
         self.assertNotIn("topsecret", " ".join(captured["command"]))
         self.assertNotIn("OPENAI_API_KEY", captured["env"])
+
+    def test_push_lease_accepts_expected_head_and_rejects_moved_remote(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            remote, source, mover = root / "remote.git", root / "source", root / "mover"
+            branch = "codex/issue-73-repair"
+            self._git(directory, "init", "--bare", "-q", str(remote))
+            source.mkdir()
+            self._git(str(source), "init", "-q")
+            self._git(str(source), "config", "user.name", "A5 test")
+            self._git(str(source), "config", "user.email", "a5@example.invalid")
+            self._git(str(source), "checkout", "-qb", branch)
+            (source / "tracked.txt").write_text("initial\n", encoding="utf-8")
+            self._git(str(source), "add", "tracked.txt")
+            self._git(str(source), "commit", "-qm", "initial")
+            self._git(str(source), "remote", "add", "origin", str(remote))
+            self._git(str(source), "push", "-q", "origin", "HEAD:refs/heads/" + branch)
+            expected_head = self._git(str(source), "rev-parse", "HEAD").stdout.strip()
+            (source / "tracked.txt").write_text("repair\n", encoding="utf-8")
+            self._git(str(source), "commit", "-am", "repair")
+            new_head = self._git(str(source), "rev-parse", "HEAD").stdout.strip()
+
+            with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "test-token"}):
+                worker.push_repair(request(branch=branch, expected_head_sha=expected_head), str(source), new_head)
+            self.assertEqual(self._git(directory, "--git-dir", str(remote), "rev-parse", "refs/heads/" + branch).stdout.strip(),
+                             new_head)
+
+            self._git(directory, "clone", "-q", "--branch", branch, str(remote), str(mover))
+            self._git(str(mover), "config", "user.name", "A5 mover")
+            self._git(str(mover), "config", "user.email", "mover@example.invalid")
+            (mover / "moved.txt").write_text("moved\n", encoding="utf-8")
+            self._git(str(mover), "add", "moved.txt")
+            self._git(str(mover), "commit", "-qm", "move remote")
+            self._git(str(mover), "push", "-q", "origin", "HEAD:refs/heads/" + branch)
+            moved_head = self._git(str(mover), "rev-parse", "HEAD").stdout.strip()
+
+            with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "test-token"}):
+                with self.assertRaises(worker.RepairError):
+                    worker.push_repair(request(branch=branch, expected_head_sha=new_head), str(source), new_head)
+            self.assertEqual(self._git(directory, "--git-dir", str(remote), "rev-parse", "refs/heads/" + branch).stdout.strip(),
+                             moved_head)
 
     def test_module_has_no_github_api_or_merge_route(self):
         source = inspect.getsource(worker).lower()

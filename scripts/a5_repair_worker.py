@@ -282,12 +282,12 @@ def changed_paths(cwd: str, expected_head: str) -> tuple[str, ...]:
     result = _run(("git", "diff", "--name-status", "--no-renames", expected_head, "--"), cwd)
     if result.returncode:
         raise RepairError("could not inspect repair changes")
-    paths = []
+    paths = set()
     for line in result.stdout.splitlines():
         parts = line.split("\t")
         if len(parts) != 2 or parts[0] not in ("M", "A"):
             raise RepairError("repair contains unsupported change mode")
-        paths.append(_safe_path(parts[1], "changed path"))
+        paths.add(_safe_path(parts[1], "changed path"))
     # Untracked creation is allowed only when it is explicitly staged later;
     # all other porcelain modes are rejected rather than guessed about.
     status = _run(("git", "status", "--porcelain=v1", "--untracked-files=all"), cwd)
@@ -299,12 +299,12 @@ def changed_paths(cwd: str, expected_head: str) -> tuple[str, ...]:
         mode, raw_path = line[:2], line[3:]
         path = _safe_path(raw_path, "changed path")
         if mode == "??":
-            paths.append(path)
+            paths.add(path)
         elif mode not in (" M", "M ", "MM"):
             raise RepairError("repair contains unsupported change mode")
     if not paths:
         raise RepairError("Codex made no repository changes")
-    if len(paths) > MAX_RESULT_CHANGES or len(set(paths)) != len(paths):
+    if len(paths) > MAX_RESULT_CHANGES:
         raise RepairError("repair change paths are unsafe")
     return tuple(sorted(paths))
 
@@ -350,7 +350,7 @@ def push_repair(request: RepairRequest, cwd: str, new_head: str) -> None:
     env["GIT_CONFIG_VALUE_0"] = "AUTHORIZATION: basic " + encoded
     # The lease refuses a remotely moved PR branch without overwriting it.
     try:
-        result = _run(("git", "push", "--force-with-lease=refs/heads:%s:%s" % (request.branch, request.expected_head_sha),
+        result = _run(("git", "push", "--force-with-lease=refs/heads/%s:%s" % (request.branch, request.expected_head_sha),
                        "origin", "HEAD:refs/heads/" + request.branch), cwd, env)
     finally:
         # This is process-local, but remove it even if launching Git fails.
