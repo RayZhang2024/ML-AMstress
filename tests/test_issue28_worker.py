@@ -238,7 +238,9 @@ class WorkerPolicyTests(unittest.TestCase):
             self.assertEqual(status_code, 0)
             self.assertTrue(stale_status.strip())
 
-            git("checkout-index", "--force", "--all")
+            # With checkout itself using the deterministic policy, the file is
+            # materialized as LF before the isolated status probe.
+            (workspace / "tracked.txt").write_bytes(b"line one\nline two\n")
             status_code, normalized_status = worker._probe(
                 ["git", "status", "--porcelain"], str(workspace)
             )
@@ -336,6 +338,11 @@ class WorkerPolicyTests(unittest.TestCase):
                 "OPENAI_API_KEY": "openai-secret",
                 "GITHUB_TOKEN": "github-write-token",
                 "GH_TOKEN": "gh-write-token",
+                "GIT_CONFIG_COUNT": "2",
+                "GIT_CONFIG_KEY_0": "core.autocrlf",
+                "GIT_CONFIG_VALUE_0": "false",
+                "GIT_CONFIG_KEY_1": "core.eol",
+                "GIT_CONFIG_VALUE_1": "lf",
             },
         ), mock.patch.object(worker.subprocess, "run", side_effect=fake_run):
             worker.run_codex(issue(), "codex/issue-28-test", tempfile.gettempdir())
@@ -347,6 +354,11 @@ class WorkerPolicyTests(unittest.TestCase):
         self.assertEqual(captured["env"]["GIT_CONFIG_GLOBAL"], os.devnull)
         self.assertNotIn("GIT_CONFIG_NOGLOBAL", captured["env"])
         self.assertEqual(captured["env"]["GIT_TERMINAL_PROMPT"], "0")
+        self.assertNotIn("GIT_CONFIG_COUNT", captured["env"])
+        self.assertNotIn("GIT_CONFIG_KEY_0", captured["env"])
+        self.assertNotIn("GIT_CONFIG_VALUE_0", captured["env"])
+        self.assertNotIn("GIT_CONFIG_KEY_1", captured["env"])
+        self.assertNotIn("GIT_CONFIG_VALUE_1", captured["env"])
         self.assertNotIn("github-write-token", captured["command"][-1])
 
     def test_codex_process_cannot_inherit_runner_global_credential_helper(self):
@@ -604,10 +616,10 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("$ErrorActionPreference = 'Stop'", preflight_step)
         self.assertIn("Local Python executable could not run.", preflight_step)
 
-    def test_workflow_pins_local_line_endings_before_any_workspace_gate(self):
+    def test_workflow_applies_and_persists_line_endings_before_any_workspace_gate(self):
         checkout = self.workflow.index("      - name: Check out main")
         line_endings = self.workflow.index(
-            "      - name: Pin repository-local Git line endings"
+            "      - name: Persist repository-local Git line endings"
         )
         local_python = self.workflow.index("      - name: Verify local Python")
         diagnostic = self.workflow.index(
@@ -618,11 +630,17 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertLess(line_endings, local_python)
         self.assertLess(line_endings, diagnostic)
         self.assertLess(line_endings, worker_step)
+        checkout_step = self.workflow[checkout:line_endings]
+        self.assertIn("GIT_CONFIG_COUNT: \"2\"", checkout_step)
+        self.assertIn("GIT_CONFIG_KEY_0: core.autocrlf", checkout_step)
+        self.assertIn("GIT_CONFIG_VALUE_0: \"false\"", checkout_step)
+        self.assertIn("GIT_CONFIG_KEY_1: core.eol", checkout_step)
+        self.assertIn("GIT_CONFIG_VALUE_1: lf", checkout_step)
         policy_step = self.workflow[line_endings:local_python]
         self.assertIn("shell: powershell", policy_step)
         self.assertIn("git config --local core.autocrlf false", policy_step)
         self.assertIn("git config --local core.eol lf", policy_step)
-        self.assertIn("git checkout-index --force --all", policy_step)
+        self.assertNotIn("checkout-index", self.workflow)
         self.assertNotIn("git clean", policy_step)
         self.assertNotIn("git reset", policy_step)
 
