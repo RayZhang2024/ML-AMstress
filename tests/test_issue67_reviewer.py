@@ -100,6 +100,78 @@ class ReviewerContractTests(unittest.TestCase):
         self.assertNotIn(prompt, " ".join(captured["command"]))
         self.assertNotIn(raw_secret, " ".join(captured["command"]))
 
+    def test_nonzero_reviewer_exit_reports_bounded_stderr_diagnostic(self):
+        completed = subprocess.CompletedProcess(
+            ["codex"], 17, "stdout detail that must not win", "stderr safe diagnostic"
+        )
+        with mock.patch.object(reviewer, "resolve_codex_executable", return_value="C:/tools/codex.exe"), \
+             mock.patch.object(reviewer.subprocess, "run", return_value=completed):
+            with self.assertRaises(reviewer.ReviewError) as raised:
+                reviewer.review_snapshot(snapshot(), "C:/repo")
+        self.assertEqual(str(raised.exception), "reviewer-process exit 17: stderr safe diagnostic")
+        self.assertNotIn("stdout detail", str(raised.exception))
+
+    def test_nonzero_reviewer_exit_uses_stdout_only_when_stderr_is_empty(self):
+        completed = subprocess.CompletedProcess(["codex"], 9, "safe stdout fallback", "")
+        with mock.patch.object(reviewer, "resolve_codex_executable", return_value="C:/tools/codex.exe"), \
+             mock.patch.object(reviewer.subprocess, "run", return_value=completed):
+            with self.assertRaises(reviewer.ReviewError) as raised:
+                reviewer.review_snapshot(snapshot(), "C:/repo")
+        self.assertEqual(str(raised.exception), "reviewer-process exit 9: safe stdout fallback")
+
+    def test_reviewer_failure_diagnostic_redacts_sensitive_content_and_suppresses_prompt(self):
+        github = "ghp_abcdefghijklmnop"
+        app = "app-token-secret-value"
+        jwt = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0In0.signaturevalue"
+        text = (
+            "safe failure line\n"
+            "Authorization: Bearer bearer-secret-value\n"
+            'Basic "basic-secret-value"\n'
+            '"id_token": "id-token-secret-value"\n'
+            "refresh_token=refresh-token-secret-value\n"
+            "AUTOMATION_APP_TOKEN=%s\n" % app
+        ) + (
+            "github_pat_abcdefghijklmnop %s C:/Users/alice/private.txt /home/alice/private.txt %s\n"
+            "You are a read-only PR reviewer.\nSNAPSHOT_JSON:\nsecret issue body and diff"
+        ) % (github, jwt)
+        with mock.patch.dict(os.environ, {
+            "GITHUB_TOKEN": github,
+            "AUTOMATION_APP_TOKEN": app,
+            "OPENAI_API_KEY": "sk-abcdefghijklmnop",
+        }, clear=False):
+            diagnostic = reviewer.reviewer_process_failure_diagnostic(23, "", text)
+        self.assertIn("reviewer-process exit 23", diagnostic)
+        self.assertIn("safe failure line", diagnostic)
+        for forbidden in (
+            github, app, jwt, "bearer-secret-value", "basic-secret-value", "id-token-secret-value",
+            "refresh-token-secret-value", "C:/Users", "/home/alice", "You are a read-only PR reviewer.",
+            "secret issue body", "diff",
+        ):
+            self.assertNotIn(forbidden, diagnostic)
+
+    def test_reviewer_failure_diagnostic_is_deterministically_bounded(self):
+        diagnostic = reviewer.reviewer_process_failure_diagnostic(
+            1, "", "\n".join("line-%d %s" % (index, "x" * 300) for index in range(8))
+        )
+        self.assertLessEqual(len(diagnostic), reviewer.MAX_REVIEWER_FAILURE_DIAGNOSTIC_CHARS)
+        self.assertNotIn("line-0", diagnostic)
+        self.assertIn("line-7", diagnostic)
+        self.assertLessEqual(diagnostic.count(" | "), reviewer.MAX_REVIEWER_FAILURE_DIAGNOSTIC_LINES - 1)
+
+    def test_reviewer_failure_diagnostic_falls_back_to_category_and_exit_code(self):
+        self.assertEqual(
+            reviewer.reviewer_process_failure_diagnostic(2, "", "Bearer bearer-secret-value"),
+            "reviewer-process exit 2",
+        )
+
+    def test_reviewer_start_failure_does_not_chain_local_process_detail(self):
+        with mock.patch.object(reviewer, "resolve_codex_executable", return_value="C:/tools/codex.exe"), \
+             mock.patch.object(reviewer.subprocess, "run", side_effect=OSError("C:/Users/alice/codex.exe")):
+            with self.assertRaises(reviewer.ReviewError) as raised:
+                reviewer.review_snapshot(snapshot(), "C:/repo")
+        self.assertEqual(str(raised.exception), "reviewer process could not start")
+        self.assertNotIn("C:/Users", str(raised.exception))
+
     def test_credential_material_is_rejected_before_prompt_and_large_prompt_is_intact(self):
         with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "synthetic-secret-value"}, clear=False):
             with self.assertRaises(reviewer.ReviewError):

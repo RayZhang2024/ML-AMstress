@@ -16,6 +16,8 @@ import subprocess
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
+from scripts import codex_issue_worker as green_worker
+
 
 SNAPSHOT_SCHEMA_VERSION = 1
 VERDICT_SCHEMA_VERSION = 1
@@ -35,6 +37,23 @@ MAX_PATCH = 120_000
 MAX_CHANGED_FILES = 200
 MAX_CHECKS = 100
 MAX_LABELS = 50
+MAX_REVIEWER_FAILURE_DIAGNOSTIC_CHARS = 500
+MAX_REVIEWER_FAILURE_DIAGNOSTIC_LINES = 3
+LOCAL_ABSOLUTE_PATH_RE = re.compile(
+    r"(?i)(?:\b[A-Z]:[\\/][^\s\"']+|\\\\[^\s\"']+|(?<![:\w])/(?:[^\s\"']+))"
+)
+APP_TOKEN_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(?:automation[_-]?app[_-]?token|github[_-]?token|openai[_-]?api[_-]?key)\s*[=:]\s*['\"]?[A-Za-z0-9._~+/=-]{8,}"
+)
+GITHUB_PAT_RE = re.compile(r"\bgithub_pat_[A-Za-z0-9_]{8,}\b")
+QUOTED_AUTHORIZATION_VALUE_RE = re.compile(
+    r"(?i)\b(?:authorization\s*:\s*)?(?:bearer|basic)\s+['\"][^'\"]+['\"]"
+)
+REVIEWER_PROMPT_MARKERS = (
+    "You are a read-only PR reviewer.",
+    "VERDICT_SCHEMA:",
+    "SNAPSHOT_JSON:",
+)
 
 
 class ReviewError(Exception):
@@ -315,6 +334,60 @@ def reviewer_environment(parent: Mapping[str, str] | None = None) -> dict[str, s
     return environment
 
 
+def _reviewer_failure_tail(text: str) -> str | None:
+    """Return a bounded redacted tail without reviewer prompt or diff content."""
+    text = text or ""
+    markers = [text.find(marker) for marker in REVIEWER_PROMPT_MARKERS if text.find(marker) >= 0]
+    if markers:
+        text = text[:min(markers)]
+    for name in ("GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY", "AUTOMATION_APP_TOKEN"):
+        secret = os.environ.get(name)
+        if secret:
+            text = text.replace(secret, "[REDACTED]")
+    text = green_worker.AUTHORIZATION_VALUE_RE.sub("[REDACTED]", text)
+    text = QUOTED_AUTHORIZATION_VALUE_RE.sub("[REDACTED]", text)
+    text = green_worker.TOKEN_ASSIGNMENT_RE.sub("[REDACTED]", text)
+    text = green_worker.OAUTH_TOKEN_ASSIGNMENT_RE.sub("[REDACTED]", text)
+    text = APP_TOKEN_ASSIGNMENT_RE.sub("[REDACTED]", text)
+    text = green_worker.JWT_LIKE_TOKEN_RE.sub("[REDACTED]", text)
+    text = green_worker.COOKIE_VALUE_RE.sub("[REDACTED]", text)
+    text = green_worker.COMMON_API_KEY_RE.sub("[REDACTED]", text)
+    text = GITHUB_PAT_RE.sub("[REDACTED]", text)
+    text = LOCAL_ABSOLUTE_PATH_RE.sub("[REDACTED_PATH]", text)
+    text = re.sub(r"[\x00-\x09\x0b-\x1f\x7f]+", " ", text)
+
+    lines = []
+    for line in text.splitlines():
+        normalized = " ".join(line.split())
+        if (
+            not normalized
+            or green_worker.REDACTION_ONLY_RE.fullmatch(normalized)
+            or normalized.startswith(("diff --git ", "--- ", "+++ ", "@@ ", "+", "-"))
+            or "codex exec" in normalized.lower()
+        ):
+            continue
+        lines.append(normalized)
+    if not lines:
+        return None
+    return " | ".join(lines[-MAX_REVIEWER_FAILURE_DIAGNOSTIC_LINES:])
+
+
+def reviewer_process_failure_diagnostic(returncode: int, stdout: str, stderr: str) -> str:
+    """Format a stable, bounded diagnostic for a failed read-only reviewer."""
+    if isinstance(returncode, bool) or not isinstance(returncode, int):
+        raise ReviewError("reviewer process returned an invalid exit code")
+    prefix = "reviewer-process exit %d" % returncode
+    summary = _reviewer_failure_tail(stderr if stderr else stdout)
+    if not summary:
+        return prefix
+    available = MAX_REVIEWER_FAILURE_DIAGNOSTIC_CHARS - len(prefix) - 2
+    if available <= 0:
+        return prefix[:MAX_REVIEWER_FAILURE_DIAGNOSTIC_CHARS]
+    if len(summary) > available:
+        summary = "..." + summary[-max(0, available - 3):].lstrip()
+    return prefix + ": " + summary
+
+
 def review_snapshot(snapshot_data: Mapping[str, Any], cwd: str, executable: str | None = None) -> ReviewVerdict:
     """Invoke Codex read-only and return a validated verdict; never mutate GitHub."""
     snapshot = validate_snapshot(snapshot_data)
@@ -323,8 +396,10 @@ def review_snapshot(snapshot_data: Mapping[str, Any], cwd: str, executable: str 
     try:
         result = subprocess.run(command, cwd=cwd, env=reviewer_environment(), input=prompt,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
-    except (OSError, ValueError) as error:
-        raise ReviewError("reviewer process could not start") from error
+    except (OSError, ValueError):
+        raise ReviewError("reviewer process could not start") from None
     if result.returncode != 0:
-        raise ReviewError("reviewer process failed")
+        raise ReviewError(reviewer_process_failure_diagnostic(
+            result.returncode, result.stdout or "", result.stderr or ""
+        ))
     return parse_verdict(result.stdout, snapshot)
