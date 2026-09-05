@@ -52,6 +52,24 @@ Test.
 """
 
 
+ISSUE_102_ACCEPTANCE_CRITERIA = """## Acceptance criteria
+- [ ] Exactly one worker branch and one PR are created.
+- [ ] Exactly one changed file: `docs/A4_18_COMPLETION_OBSERVER_LIVE_FIXTURE.md`.
+- [ ] The file content is exactly the required two nonblank lines.
+- [ ] Hosted Normal Python CI passes on the exact PR head.
+- [ ] The GREEN worker reaches its normal terminal success state.
+- [ ] The A4.18 completion observer runs from that exact worker completion event.
+- [ ] Exactly one trusted `a4.18-completion` audit marker is recorded for the exact worker run ID.
+- [ ] The audit marker binds the issue number and claimed worker branch, records the trusted workflow `main` execution SHA separately from any PR head SHA, and is bounded/secret-safe.
+- [ ] Replayed/idempotent processing does not create a duplicate completion marker.
+- [ ] The observer does not overwrite the GREEN worker's issue status.
+- [ ] The fixture PR remains open and unmerged.
+
+## Tests/validation
+Test.
+"""
+
+
 class ExternalEvidenceBoundaryTests(unittest.TestCase):
     def test_existing_repair_attempt_bound_is_unchanged(self):
         self.assertEqual(repair.MAX_REPAIR_ATTEMPTS, 2)
@@ -64,6 +82,23 @@ class ExternalEvidenceBoundaryTests(unittest.TestCase):
         self.assertEqual([item.status for item in requirements[1:]], ["pending/unverified"] * 4)
         reviewer.validate_external_requirements(trusted)
         reviewer.validate_repairable_findings(trusted, verdict())
+
+    def test_full_issue_102_acceptance_criteria_keep_only_fixture_content_repairable(self):
+        trusted = reviewer.validate_snapshot(snapshot(ISSUE_102_ACCEPTANCE_CRITERIA))
+        requirements = trusted.acceptance_requirements
+        self.assertEqual(len(requirements), 11)
+        self.assertEqual([item.kind for item in requirements[:3]], [
+            "external", "repository", "repository",
+        ])
+        self.assertEqual([item.kind for item in requirements[3:]], ["external"] * 8)
+        self.assertTrue(all(item.kind == "external" for item in requirements if item.identifier not in ("AC-2", "AC-3")))
+        reviewer.validate_external_requirements(trusted)
+        lifecycle_finding = reviewer.Finding(
+            "F-1", "evidence", "Worker branch lifecycle evidence is unavailable.", "Edit the fixture.",
+            "[AC-1] Exactly one worker branch and one PR are created.",
+        )
+        with self.assertRaisesRegex(reviewer.ReviewError, "external acceptance requirement"):
+            reviewer.validate_repairable_findings(trusted, verdict(lifecycle_finding))
 
     def test_pending_and_satisfied_external_evidence_never_authorize_repair(self):
         pending = reviewer.validate_snapshot(snapshot(INITIAL_FIXTURE_CONTRACT))

@@ -33,10 +33,16 @@ FINDING_REQUIREMENT_RE = re.compile(r"^\[(AC-[1-9][0-9]*)\]\s+")
 ACCEPTANCE_HEADER_RE = re.compile(r"(?im)^## Acceptance criteria\s*$")
 SECTION_HEADER_RE = re.compile(r"(?m)^##\s+")
 CHECKBOX_RE = re.compile(r"^\s*-\s+\[[ xX]\]\s+(.+?)\s*$")
-EXTERNAL_REQUIREMENT_RE = re.compile(
+CONTROL_PLANE_REQUIREMENT_RE = re.compile(
     r"(?i)\b(?:workflow|hosted\s+ci|\bci\b|run\s*(?:id|identity)?|issue\s+(?:labels?|status)|"
-    r"audit\s+comment|idempotency|pr\s+(?:merged|open|state|head)|merge\s+state|"
-    r"workflow\s+sha|github(?:-side)?\s+(?:evidence|state)|github\s+actions)\b"
+    r"audit\s+comment|idempoten(?:cy|t(?:ly)?)|replay(?:ed)?\s+(?:processing|event|workflow)|"
+    r"pr\s+(?:merged|open|state|head)|merge\s+state|"
+    r"workflow\s+sha|github(?:-side)?\s+(?:evidence|state)|github\s+actions|"
+    r"(?:worker\s+)?(?:branch|pr|pull\s+request)\b.*\b(?:create(?:d)?|claim(?:ed)?|exist(?:s|ed)?|"
+    r"open|close(?:d)?|state|identity|head|merge(?:d)?|unmerge(?:d)?)\b|"
+    r"(?:green\s+)?(?:codex\s+)?worker(?:\s+workflow)?\b.*\b(?:terminal|success|complete(?:d|ion)?|state)\b|"
+    r"(?:a4\.18\s+)?(?:completion\s+)?observer\b.*\b(?:run|event|completion|complete(?:d|ion)?|"
+    r"trigger(?:ed)?|observe(?:d|s|r)?)\b)"
 )
 EXPLICIT_FILE_DELIVERABLE_RE = re.compile(
     r"(?i)\b(?:file|fixture|document(?:ation)?)\b.*\b(?:must|shall|contains?|include|exactly)\b|"
@@ -213,7 +219,7 @@ def classify_acceptance_requirements(issue_body: str, ci_checks: Sequence[CheckE
     statuses = {item.name.casefold(): item.status for item in ci_checks}
     worker_run_id = worker_metadata.get("worker_run_id", "")
     for number, text in enumerate(_acceptance_lines(issue_body), 1):
-        external = bool(EXTERNAL_REQUIREMENT_RE.search(text)) and not bool(EXPLICIT_FILE_DELIVERABLE_RE.search(text))
+        external = bool(CONTROL_PLANE_REQUIREMENT_RE.search(text)) and not bool(EXPLICIT_FILE_DELIVERABLE_RE.search(text))
         kind, status = "repository", "repository"
         if external:
             kind, status = "external", "pending/unverified"
