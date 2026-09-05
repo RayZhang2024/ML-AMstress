@@ -43,3 +43,13 @@ the next exact-head CI completion performs any further review.
 
 The loop contains no merge or auto-merge behavior. Ordinary GREEN workers are
 also denied all live A5 control-plane scripts and `.github/**` paths.
+
+Before A5.3 is authorized, trusted A5.1 classifies issue acceptance criteria as
+repository-editable or external/post-run. Workflow completion, run identities,
+labels/status, audit/idempotency, PR state, and GitHub-side SHA evidence are
+external unless the contract explicitly makes a repository file the deliverable.
+Pending external evidence is presented as pending/unverified and cannot create
+a repair finding. Contradictory trusted external evidence fails closed; it is
+never copied or invented in a repository repair. Every A5.3 finding must carry
+an exact repository acceptance-criterion reference, which trusted code verifies
+before any state transition, attempt marker, checkout, or Codex invocation.

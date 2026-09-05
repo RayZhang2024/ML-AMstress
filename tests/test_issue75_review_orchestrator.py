@@ -68,7 +68,7 @@ def clean_verdict():
 
 
 def blocker_verdict():
-    finding = reviewer.Finding("F-1", "tests", "test blocker", "update test", "test passes")
+    finding = reviewer.Finding("F-1", "tests", "test blocker", "update test", "[AC-1] test passes")
     return reviewer.ReviewVerdict(1, "blocker", HEAD, "green", "blocker", (finding,), "")
 
 
@@ -308,6 +308,21 @@ class StateAndRepairTests(unittest.TestCase):
         with self.assertRaises(orchestrator.OrchestrationError):
             orchestrator.orchestrate(client, event(), ".", lambda *_: verdict)
         self.assertEqual([item["name"] for item in client.pr_data["labels"]], ["review:pending"])
+
+    def test_external_only_finding_is_rejected_before_a53(self):
+        external_body = ISSUE_BODY.replace(
+            "## Acceptance criteria\nTest.",
+            "## Acceptance criteria\n- [ ] The fixture file contains exactly two lines.\n- [ ] Issue labels/status are observed on GitHub.",
+        )
+        client = FakeClient(linked_issue=issue(body=external_body))
+        external = reviewer.ReviewVerdict(1, "blocker", HEAD, "green", "pending", (reviewer.Finding(
+            "F-1", "evidence", "External evidence is pending.", "Write it into a fixture.",
+            "[AC-2] GitHub-side observation.",
+        ),), "")
+        with mock.patch.object(orchestrator, "_repair") as repair_call:
+            with self.assertRaises(orchestrator.OrchestrationError):
+                orchestrator.orchestrate(client, event(), ".", lambda *_: external)
+        repair_call.assert_not_called()
 
     def test_stale_head_after_review_is_rejected_before_mutation(self):
         client = FakeClient()

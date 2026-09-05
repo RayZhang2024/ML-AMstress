@@ -29,6 +29,20 @@ FINDING_CATEGORIES = frozenset(("scope", "policy", "security", "tests", "ci", "e
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 PATH_RE = re.compile(r"^(?!/)(?!.*(?:^|/)\.\.(?:/|$))[A-Za-z0-9._/ -]+$")
 FINDING_ID_RE = re.compile(r"^F-[1-9][0-9]*$")
+FINDING_REQUIREMENT_RE = re.compile(r"^\[(AC-[1-9][0-9]*)\]\s+")
+ACCEPTANCE_HEADER_RE = re.compile(r"(?im)^## Acceptance criteria\s*$")
+SECTION_HEADER_RE = re.compile(r"(?m)^##\s+")
+CHECKBOX_RE = re.compile(r"^\s*-\s+\[[ xX]\]\s+(.+?)\s*$")
+EXTERNAL_REQUIREMENT_RE = re.compile(
+    r"(?i)\b(?:workflow|hosted\s+ci|\bci\b|run\s*(?:id|identity)?|issue\s+(?:labels?|status)|"
+    r"audit\s+comment|idempotency|pr\s+(?:merged|open|state|head)|merge\s+state|"
+    r"workflow\s+sha|github(?:-side)?\s+(?:evidence|state)|github\s+actions)\b"
+)
+EXPLICIT_FILE_DELIVERABLE_RE = re.compile(
+    r"(?i)\b(?:file|fixture|document(?:ation)?)\b.*\b(?:must|shall|contains?|include|exactly)\b|"
+    r"\b(?:must|shall|contains?|include|exactly)\b.*\b(?:file|fixture|document(?:ation)?)\b"
+)
+NUMBER_RE = re.compile(r"\b[1-9][0-9]{4,}\b")
 SECRET_RE = re.compile(
     r"(?i)(?:\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|sk-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16})\b|"
     r"\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|secret)\s*[=:]\s*['\"]?[A-Za-z0-9._~+/=-]{8,})"
@@ -76,6 +90,14 @@ class CheckEvidence:
 
 
 @dataclasses.dataclass(frozen=True)
+class AcceptanceRequirement:
+    identifier: str
+    kind: str
+    status: str
+    text: str
+
+
+@dataclasses.dataclass(frozen=True)
 class ReviewSnapshot:
     schema_version: int
     repository: str
@@ -93,6 +115,7 @@ class ReviewSnapshot:
     changed_files: tuple[ChangedFile, ...]
     ci_checks: tuple[CheckEvidence, ...]
     worker_metadata: Mapping[str, str]
+    acceptance_requirements: tuple[AcceptanceRequirement, ...]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -162,6 +185,49 @@ def _risk(value: Any, name: str) -> str:
     return value
 
 
+def _acceptance_lines(issue_body: str) -> tuple[str, ...]:
+    """Extract bounded acceptance requirements without interpreting free prose."""
+    match = ACCEPTANCE_HEADER_RE.search(issue_body)
+    if not match:
+        return ()
+    remainder = issue_body[match.end():]
+    next_section = SECTION_HEADER_RE.search(remainder)
+    section = remainder[:next_section.start()] if next_section else remainder
+    values = []
+    for line in section.splitlines():
+        checkbox = CHECKBOX_RE.fullmatch(line)
+        value = checkbox.group(1) if checkbox else line.strip()
+        if value:
+            values.append(_text(value, "acceptance requirement", 2000))
+    if len(values) > 100:
+        raise ReviewError("acceptance requirements exceed the safe bound")
+    return tuple(values)
+
+
+def classify_acceptance_requirements(issue_body: str, ci_checks: Sequence[CheckEvidence],
+                                    worker_metadata: Mapping[str, str]) -> tuple[AcceptanceRequirement, ...]:
+    """Classify contract criteria as repository-editable or external evidence."""
+    requirements = []
+    statuses = {item.name.casefold(): item.status for item in ci_checks}
+    worker_run_id = worker_metadata.get("worker_run_id", "")
+    for number, text in enumerate(_acceptance_lines(issue_body), 1):
+        external = bool(EXTERNAL_REQUIREMENT_RE.search(text)) and not bool(EXPLICIT_FILE_DELIVERABLE_RE.search(text))
+        kind, status = "repository", "repository"
+        if external:
+            kind, status = "external", "pending/unverified"
+            numbers = set(NUMBER_RE.findall(text))
+            if numbers and worker_run_id and worker_run_id not in numbers:
+                status = "contradictory"
+            elif re.search(r"(?i)\b(?:hosted\s+)?(?:normal\s+python\s+)?ci\b.*\bpass", text):
+                ci_status = statuses.get("normal python ci") or statuses.get("normal python")
+                if ci_status == "failure":
+                    status = "contradictory"
+                elif ci_status == "success":
+                    status = "verified"
+        requirements.append(AcceptanceRequirement("AC-%d" % number, kind, status, text))
+    return tuple(requirements)
+
+
 def validate_snapshot(raw: Mapping[str, Any]) -> ReviewSnapshot:
     """Validate and freeze trusted snapshot data before prompt construction."""
     raw = _mapping(raw, "snapshot")
@@ -210,13 +276,14 @@ def validate_snapshot(raw: Mapping[str, Any]) -> ReviewSnapshot:
     metadata = _mapping(raw["worker_metadata"], "worker metadata")
     _exact_keys(metadata, frozenset(("worker_run_id", "branch")), "worker metadata")
     frozen_metadata = MappingProxyType({key: _text(value, "worker metadata %s" % key, 300) for key, value in metadata.items()})
+    requirements = classify_acceptance_requirements(raw["issue_body"], tuple(ci_checks), frozen_metadata)
     return ReviewSnapshot(
         raw["schema_version"], repository, _positive_int(raw["pull_request_number"], "pull_request_number"),
         _positive_int(raw["issue_number"], "issue_number"), shas[0], shas[1],
         _text(raw["pr_title"], "pr_title"), _text(raw["pr_body"], "pr_body"),
         _text(raw["issue_title"], "issue_title"), _text(raw["issue_body"], "issue_body"), labels,
         _risk(raw["declared_risk"], "declared_risk"), _risk(raw["trusted_risk_floor"], "trusted_risk_floor"),
-        tuple(changed_files), tuple(ci_checks), frozen_metadata,
+        tuple(changed_files), tuple(ci_checks), frozen_metadata, requirements,
     )
 
 
@@ -231,6 +298,10 @@ def _snapshot_payload(snapshot: ReviewSnapshot) -> dict[str, Any]:
         "changed_files": [{"path": item.path, "patch": item.patch} for item in snapshot.changed_files],
         "ci_checks": [{"name": item.name, "status": item.status} for item in snapshot.ci_checks],
         "worker_metadata": dict(snapshot.worker_metadata),
+        "acceptance_requirements": [
+            {"id": item.identifier, "kind": item.kind, "status": item.status, "text": item.text}
+            for item in snapshot.acceptance_requirements
+        ],
     }
 
 
@@ -242,7 +313,10 @@ def build_prompt(snapshot: ReviewSnapshot) -> str:
         "Do not query GitHub or require GitHub credentials. Do not edit files, run external side effects, push, create PRs, "
         "change labels/status, merge, or recommend autonomous repairs. Assess the exact issue contract against this exact PR "
         "head and diff: scope and Do-not-change constraints, tests/CI evidence, security boundaries, effective risk, and scientific "
-        "ambiguity. RED risk or scientific ambiguity requires verdict escalate. Output only one strict verdict JSON object, no markdown.\n"
+        "ambiguity. RED risk or scientific ambiguity requires verdict escalate. The trusted acceptance_requirements classify "
+        "repository-editable criteria versus external/post-run evidence. External requirements with pending/unverified status "
+        "must be summarized as pending/unverified, never emitted as blocker findings. A blocker finding must begin its "
+        "required_evidence with [AC-N] for a repository requirement. Output only one strict verdict JSON object, no markdown.\n"
         "VERDICT_SCHEMA: {schema_version:1, verdict:clean|blocker|escalate, reviewed_head_sha:string, effective_risk:green|yellow|red, "
         "summary:string, findings:[{id:F-N, category:scope|policy|security|tests|ci|evidence|scientific, message:string, "
         "required_action:string, required_evidence:string}], escalation_reason:string}.\n"
@@ -308,6 +382,26 @@ def parse_verdict(output: str, snapshot: ReviewSnapshot) -> ReviewVerdict:
         raise ReviewError("escalate verdict requires an escalation reason")
     return ReviewVerdict(raw["schema_version"], verdict, raw["reviewed_head_sha"], risk,
                          _text(raw["summary"], "summary", 2000), tuple(findings), escalation_reason)
+
+
+def validate_external_requirements(snapshot: ReviewSnapshot) -> None:
+    """Fail closed when trusted evidence contradicts a post-run requirement."""
+    if any(item.kind == "external" and item.status == "contradictory"
+           for item in snapshot.acceptance_requirements):
+        raise ReviewError("trusted external acceptance evidence is contradictory")
+
+
+def validate_repairable_findings(snapshot: ReviewSnapshot, verdict: ReviewVerdict) -> None:
+    """Authorize A5.3 only for findings tied to repository-editable criteria."""
+    if verdict.verdict != "blocker":
+        return
+    requirements = {item.identifier: item for item in snapshot.acceptance_requirements}
+    for finding in verdict.findings:
+        match = FINDING_REQUIREMENT_RE.match(finding.required_evidence)
+        if not match or match.group(1) not in requirements:
+            raise ReviewError("blocker finding is not tied to an acceptance requirement")
+        if requirements[match.group(1)].kind != "repository":
+            raise ReviewError("external acceptance requirement cannot authorize repository repair")
 
 
 def resolve_codex_executable(executable: str | None = None) -> str:
@@ -409,6 +503,7 @@ def _read_final_reviewer_output(path: str) -> str:
 def review_snapshot(snapshot_data: Mapping[str, Any], cwd: str, executable: str | None = None) -> ReviewVerdict:
     """Invoke Codex read-only and return a validated verdict; never mutate GitHub."""
     snapshot = validate_snapshot(snapshot_data)
+    validate_external_requirements(snapshot)
     prompt = build_prompt(snapshot)
     try:
         with tempfile.TemporaryDirectory(prefix="ml-amstress-a5-reviewer-") as temporary_directory:
@@ -423,6 +518,8 @@ def review_snapshot(snapshot_data: Mapping[str, Any], cwd: str, executable: str 
                 raise ReviewError(reviewer_process_failure_diagnostic(
                     result.returncode, result.stdout or "", result.stderr or ""
                 ))
-            return parse_verdict(_read_final_reviewer_output(final_output_path), snapshot)
+            verdict = parse_verdict(_read_final_reviewer_output(final_output_path), snapshot)
+            validate_repairable_findings(snapshot, verdict)
+            return verdict
     except OSError:
         raise ReviewError("reviewer process could not start") from None
