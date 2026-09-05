@@ -377,6 +377,17 @@ def _repair_marker(pr_number: int, issue_number: int, head: str, decision_key: s
     return result
 
 
+def _repair_failure_marker(attempt: int, error: Exception | None = None) -> str:
+    payload: dict[str, Any] = {"schema_version": 1, "attempt": attempt, "category": "trusted-repair-failed"}
+    detail = repair.audit_safe_error_detail(error) if error is not None else None
+    if detail is not None:
+        payload["detail"] = detail
+    result = "<!-- a5.4a-repair-failed:" + json.dumps(payload, sort_keys=True, separators=(",", ":")) + " -->"
+    if len(result) > MAX_AUDIT:
+        raise OrchestrationError("repair failure audit is unexpectedly unbounded")
+    return result
+
+
 def repair_attempt_count(comments: Sequence[Mapping[str, Any]], pr_number: int) -> int:
     values = _comments_with_marker(comments, REPAIR_MARKER_RE)
     attempts = []
@@ -480,8 +491,13 @@ def _repair(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any], commen
     try:
         checkout_exact_pr_branch(request.branch, request.expected_head_sha, cwd)
         result = repair.execute_repair(request, cwd)
+    except repair.RepairError as error:
+        failed = _repair_failure_marker(attempt, error)
+        if failed not in [item.get("body") for item in client.comments(pr["number"]) if _trusted_comment(item)]:
+            client.comment(pr["number"], failed)
+        return "repair-failed"
     except Exception:
-        failed = "<!-- a5.4a-repair-failed:{\"schema_version\":1,\"attempt\":%d,\"category\":\"trusted-repair-failed\"} -->" % attempt
+        failed = _repair_failure_marker(attempt)
         if failed not in [item.get("body") for item in client.comments(pr["number"]) if _trusted_comment(item)]:
             client.comment(pr["number"], failed)
         return "repair-failed"
