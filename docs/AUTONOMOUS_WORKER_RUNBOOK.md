@@ -3,6 +3,9 @@
 This is the authoritative operational guide for the current review-first GREEN worker, proven in the controlled Issue #30 integration. It does not authorize changes to worker behavior, workflow permissions, authentication, claim semantics, validation, or merge policy.
 
 Use it with [AUTONOMOUS_DEVELOPMENT.md](AUTONOMOUS_DEVELOPMENT.md) and [AUTONOMOUS_ORCHESTRATION.md](AUTONOMOUS_ORCHESTRATION.md). For recovery, see [AUTONOMOUS_TROUBLESHOOTING.md](AUTONOMOUS_TROUBLESHOOTING.md).
+GitHub-native terminal observations are documented separately in
+[A4_18_COMPLETION_OBSERVER.md](A4_18_COMPLETION_OBSERVER.md); they add an audit
+record only and do not change the worker's review-first lifecycle.
 
 ## Known-good baseline
 

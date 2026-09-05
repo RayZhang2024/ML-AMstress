@@ -1,0 +1,34 @@
+name: GREEN Codex worker completion observer
+
+on:
+  workflow_run:
+    workflows: ["GREEN Codex issue worker"]
+    types: [completed]
+
+# This observer only reads completed worker evidence and writes a bounded issue
+# audit comment. It cannot push, create/update PRs, repair, merge, or invoke Codex.
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: codex-green-completion-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  observe-terminal-worker-run:
+    if: github.event.workflow_run.name == 'GREEN Codex issue worker' && github.event.workflow_run.status == 'completed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out trusted main control plane
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Record exact terminal worker completion
+        run: python -m scripts.codex_completion_observer
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
