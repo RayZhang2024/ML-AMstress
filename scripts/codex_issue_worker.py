@@ -119,6 +119,9 @@ def _configured_codex_executable():
     return os.environ.get("CODEX_EXECUTABLE", "codex").strip()
 
 
+CODEX_WORKER_MODEL = "gpt-5.5"
+
+
 def resolve_codex_executable(executable=None):
     """Resolve the configured Codex command for both preflight and execution."""
     configured = executable if executable is not None else _configured_codex_executable()
@@ -137,6 +140,8 @@ def _codex_command_tokens(executable=None):
     return [
         executable,
         "exec",
+        "--model",
+        CODEX_WORKER_MODEL,
         "--sandbox",
         "workspace-write",
         "-c",
