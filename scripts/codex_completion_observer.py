@@ -53,8 +53,8 @@ class ObserverError(Exception):
 class WorkflowRun:
     run_id: int
     conclusion: str
-    branch: str
-    head_sha: str
+    workflow_head_branch: str
+    workflow_head_sha: str
     created_at: str
     updated_at: str
 
@@ -84,7 +84,7 @@ def _sha(value: Any, name: str) -> str:
     return value
 
 
-def _branch(value: Any, name: str) -> str:
+def _claim_branch(value: Any, name: str) -> str:
     if not isinstance(value, str) or not BRANCH_RE.fullmatch(value):
         raise ObserverError(name + " is invalid")
     return value
@@ -114,11 +114,17 @@ def parse_workflow_run(event: Mapping[str, Any]) -> WorkflowRun:
     return WorkflowRun(
         _number(run.get("id"), "workflow run id"),
         conclusion,
-        _branch(run.get("head_branch"), "workflow run branch"),
+        _workflow_branch(run.get("head_branch")),
         _sha(run.get("head_sha"), "workflow run head"),
         _timestamp(run.get("created_at"), "workflow run created timestamp"),
         _timestamp(run.get("updated_at"), "workflow run updated timestamp"),
     )
+
+
+def _workflow_branch(value: Any) -> str:
+    if value != BASE_BRANCH:
+        raise ObserverError("workflow run execution branch is not trusted main")
+    return BASE_BRANCH
 
 
 def parse_claim_marker(body: Any) -> Claim | None:
@@ -129,7 +135,7 @@ def parse_claim_marker(body: Any) -> Claim | None:
     match = CLAIM_MARKER_RE.fullmatch(first_line)
     if not match:
         return None
-    return Claim(int(match.group(1)), int(match.group(2)), match.group(3))
+    return Claim(int(match.group(1)), int(match.group(2)), _claim_branch(match.group(3), "claim branch"))
 
 
 def _trusted_comment(comment: Mapping[str, Any]) -> bool:
@@ -137,7 +143,7 @@ def _trusted_comment(comment: Mapping[str, Any]) -> bool:
     return isinstance(author, Mapping) and author.get("login") == TRUSTED_CLAIM_AUTHOR
 
 
-def resolve_claimed_issue(client: Any, run: WorkflowRun) -> tuple[int, Sequence[Mapping[str, Any]]]:
+def resolve_claimed_issue(client: Any, run: WorkflowRun) -> tuple[Claim, Sequence[Mapping[str, Any]]]:
     """Resolve exactly one issue by an exact trusted marker; never guess from text."""
     issues = client.open_issues()
     if not isinstance(issues, Sequence) or isinstance(issues, (str, bytes)) or len(issues) >= MAX_ISSUES:
@@ -158,8 +164,8 @@ def resolve_claimed_issue(client: Any, run: WorkflowRun) -> tuple[int, Sequence[
                 continue
             if claim.issue_number != number:
                 raise ObserverError("trusted claim marker issue identity is invalid")
-            if claim.run_id == run.run_id and claim.branch == run.branch:
-                matches.append((number, comments))
+            if claim.run_id == run.run_id:
+                matches.append((claim, comments))
     if len(matches) != 1:
         raise ObserverError("workflow run does not resolve to exactly one trusted issue claim")
     return matches[0]
@@ -180,9 +186,9 @@ def completion_key(run: WorkflowRun, issue_number: int) -> str:
     return "a4.18:" + hashlib.sha256(encoded).hexdigest()
 
 
-def _pr_identity(client: Any, run: WorkflowRun) -> PullRequestIdentity | None:
+def _pr_identity(client: Any, claim: Claim) -> PullRequestIdentity | None:
     """Optionally attach a PR only when its in-repository identity is exact."""
-    pulls = client.open_prs_for_branch(run.branch)
+    pulls = client.open_prs_for_branch(claim.branch)
     if not isinstance(pulls, Sequence) or isinstance(pulls, (str, bytes)) or len(pulls) > 1:
         raise ObserverError("open PR evidence is ambiguous")
     if not pulls:
@@ -194,27 +200,29 @@ def _pr_identity(client: Any, run: WorkflowRun) -> PullRequestIdentity | None:
     if not isinstance(base, Mapping) or not isinstance(head, Mapping):
         raise ObserverError("open PR identity is invalid")
     repository = head.get("repo")
-    if (base.get("ref") != BASE_BRANCH or head.get("ref") != run.branch
+    if (base.get("ref") != BASE_BRANCH or head.get("ref") != claim.branch
             or not isinstance(repository, Mapping) or repository.get("full_name") != REPOSITORY
-            or _sha(head.get("sha"), "PR head") != run.head_sha):
-        raise ObserverError("open PR does not match workflow run identity")
-    return PullRequestIdentity(_number(pr.get("number"), "PR number"), run.head_sha)
+            ):
+        raise ObserverError("open PR does not match trusted claim identity")
+    return PullRequestIdentity(_number(pr.get("number"), "PR number"), _sha(head.get("sha"), "PR head"))
 
 
-def completion_marker(run: WorkflowRun, issue_number: int, pr: PullRequestIdentity | None) -> str:
+def completion_marker(run: WorkflowRun, claim: Claim, pr: PullRequestIdentity | None) -> str:
     """Build one small machine-readable audit comment without model output."""
     payload = {
-        "branch": run.branch,
+        "branch": claim.branch,
         "conclusion": run.conclusion,
         "created_at": run.created_at,
-        "head_sha": run.head_sha,
-        "idempotency_key": completion_key(run, issue_number),
-        "issue_number": _number(issue_number, "issue number"),
+        "idempotency_key": completion_key(run, claim.issue_number),
+        "issue_number": claim.issue_number,
         "pr_number": None if pr is None else pr.number,
+        "pr_head_sha": None if pr is None else pr.head_sha,
         "repository": REPOSITORY,
         "run_id": run.run_id,
         "schema_version": SCHEMA_VERSION,
         "updated_at": run.updated_at,
+        "workflow_head_branch": run.workflow_head_branch,
+        "workflow_head_sha": run.workflow_head_sha,
     }
     marker = "<!-- a4.18-completion:" + json.dumps(payload, sort_keys=True, separators=(",", ":")) + " -->"
     if len(marker) > MAX_AUDIT:
@@ -243,25 +251,25 @@ def _completion_markers(comments: Sequence[Mapping[str, Any]]) -> list[dict[str,
     return values
 
 
-def record_completion_observation(client: Any, issue_number: int, comments: Sequence[Mapping[str, Any]],
+def record_completion_observation(client: Any, claim: Claim, comments: Sequence[Mapping[str, Any]],
                                   run: WorkflowRun, pr: PullRequestIdentity | None) -> bool:
     """Write at most one observation; labels and worker state remain untouched."""
-    key = completion_key(run, issue_number)
+    key = completion_key(run, claim.issue_number)
     matches = [item for item in _completion_markers(comments) if item.get("idempotency_key") == key]
     if len(matches) > 1:
         raise ObserverError("completion observation is ambiguous")
     if matches:
         return False
-    client.comment(issue_number, completion_marker(run, issue_number, pr))
+    client.comment(claim.issue_number, completion_marker(run, claim, pr))
     return True
 
 
 def observe(client: Any, event: Mapping[str, Any]) -> str:
     """Resolve and record one terminal worker outcome, without changing worker state."""
     run = parse_workflow_run(event)
-    issue_number, comments = resolve_claimed_issue(client, run)
-    pr = _pr_identity(client, run)
-    record_completion_observation(client, issue_number, comments, run, pr)
+    claim, comments = resolve_claimed_issue(client, run)
+    pr = _pr_identity(client, claim)
+    record_completion_observation(client, claim, comments, run, pr)
     return "worker-success" if run.conclusion == "success" else "worker-terminal-non-success"
 
 

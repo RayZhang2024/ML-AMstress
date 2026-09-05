@@ -8,12 +8,15 @@ checks out trusted `main` with persisted credentials disabled and runs
 
 The observer resolves an issue only when exactly one trusted
 `codex-worker-claim` marker binds the completed GitHub run ID and deterministic
-branch to that issue. It then creates one bounded, machine-readable issue
-comment containing the repository, run ID, terminal conclusion, GitHub run
-timestamps, branch, head SHA, and an optional exact PR identity. The deterministic idempotency key prevents a
-replayed delivery from adding another observation. Zero or multiple claim/PR
-matches, stale identity, malformed trusted audit, or API ambiguity stop without
-mutating an arbitrary issue.
+worker branch to that issue. The `workflow_run` branch/SHA identify the trusted
+`main` execution checkout; they are not the worker implementation branch or PR
+head. If a PR exists, the observer resolves it only through the claimed worker
+branch and records its separately verified PR head SHA. It then creates one
+bounded, machine-readable issue comment containing those distinct identities,
+the repository, run ID, terminal conclusion, and GitHub run timestamps. The
+deterministic idempotency key prevents a replayed delivery from adding another
+observation. Zero or multiple claim/PR matches, stale identity, malformed
+trusted audit, or API ambiguity stop without mutating an arbitrary issue.
 
 It never runs Codex, retries work, changes issue or review labels, performs
 repair, merges, or enables auto-merge. Successful worker completion therefore
