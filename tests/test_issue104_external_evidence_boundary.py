@@ -88,6 +88,30 @@ class ExternalEvidenceBoundaryTests(unittest.TestCase):
         with self.assertRaisesRegex(reviewer.ReviewError, "external acceptance evidence is contradictory"):
             reviewer.validate_external_requirements(trusted)
 
+    def test_only_explicit_green_worker_run_ids_are_compared_to_worker_metadata(self):
+        correct_worker = reviewer.validate_snapshot(snapshot("""## Acceptance criteria
+- [ ] GREEN Codex issue worker run ID 33977125059 completed.
+"""))
+        self.assertNotEqual(correct_worker.acceptance_requirements[0].status, "contradictory")
+
+        ci_run = reviewer.validate_snapshot(snapshot("""## Acceptance criteria
+- [ ] Normal Python CI run 33989353676 passes.
+"""))
+        self.assertEqual(ci_run.acceptance_requirements[0].kind, "external")
+        self.assertNotEqual(ci_run.acceptance_requirements[0].status, "contradictory")
+
+        observer_run = reviewer.validate_snapshot(snapshot("""## Acceptance criteria
+- [ ] Observer workflow run ID 33989353676 is recorded.
+"""))
+        self.assertEqual(observer_run.acceptance_requirements[0].kind, "external")
+        self.assertNotEqual(observer_run.acceptance_requirements[0].status, "contradictory")
+
+        unrelated_number = reviewer.validate_snapshot(snapshot("""## Acceptance criteria
+- [ ] GitHub-side audit comment 33989353676 is observed.
+"""))
+        self.assertEqual(unrelated_number.acceptance_requirements[0].kind, "external")
+        self.assertNotEqual(unrelated_number.acceptance_requirements[0].status, "contradictory")
+
     def test_real_repository_pass_to_fail_defect_remains_repairable(self):
         trusted = reviewer.validate_snapshot(snapshot(INITIAL_FIXTURE_CONTRACT))
         finding = reviewer.Finding(

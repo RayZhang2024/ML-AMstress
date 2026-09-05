@@ -42,7 +42,9 @@ EXPLICIT_FILE_DELIVERABLE_RE = re.compile(
     r"(?i)\b(?:file|fixture|document(?:ation)?)\b.*\b(?:must|shall|contains?|include|exactly)\b|"
     r"\b(?:must|shall|contains?|include|exactly)\b.*\b(?:file|fixture|document(?:ation)?)\b"
 )
-NUMBER_RE = re.compile(r"\b[1-9][0-9]{4,}\b")
+GREEN_WORKER_RUN_ID_RE = re.compile(
+    r"(?i)\b(?:green(?:\s+codex(?:\s+issue)?)?\s+)?worker(?:\s+workflow)?\s+run\s*(?:id)?\s*(?:is|=|:)?\s*([1-9][0-9]{4,})\b"
+)
 SECRET_RE = re.compile(
     r"(?i)(?:\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|sk-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16})\b|"
     r"\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|secret)\s*[=:]\s*['\"]?[A-Za-z0-9._~+/=-]{8,})"
@@ -215,8 +217,8 @@ def classify_acceptance_requirements(issue_body: str, ci_checks: Sequence[CheckE
         kind, status = "repository", "repository"
         if external:
             kind, status = "external", "pending/unverified"
-            numbers = set(NUMBER_RE.findall(text))
-            if numbers and worker_run_id and worker_run_id not in numbers:
+            worker_run_match = GREEN_WORKER_RUN_ID_RE.search(text)
+            if worker_run_match and worker_run_id and worker_run_match.group(1) != worker_run_id:
                 status = "contradictory"
             elif re.search(r"(?i)\b(?:hosted\s+)?(?:normal\s+python\s+)?ci\b.*\bpass", text):
                 ci_status = statuses.get("normal python ci") or statuses.get("normal python")
