@@ -1,3 +1,4 @@
+import inspect
 import os
 from pathlib import Path
 import subprocess
@@ -10,8 +11,8 @@ from scripts import a5_repair_worker as worker
 
 class Issue94RepairGitIdentityTests(unittest.TestCase):
     @staticmethod
-    def _git(cwd, *arguments, check=True):
-        return subprocess.run(("git", *arguments), cwd=cwd, check=check, text=True,
+    def _git(cwd, *arguments, check=True, env=None):
+        return subprocess.run(("git", *arguments), cwd=cwd, env=env, check=check, text=True,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     @staticmethod
@@ -126,6 +127,32 @@ class Issue94RepairGitIdentityTests(unittest.TestCase):
             self.assertNotEqual(self._git(directory, "config", "--local", "--get", "user.name", check=False).returncode, 0)
             self.assertNotEqual(self._git(directory, "config", "--local", "--get", "user.email", check=False).returncode, 0)
 
+    def test_plain_isolated_commit_reproduces_missing_identity_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            self._git(directory, "init", "-q")
+            self._git(directory, "checkout", "-qb", "codex/issue-94-test")
+            self._git(directory, "config", "user.name", "fixture setup")
+            self._git(directory, "config", "user.email", "fixture@example.invalid")
+            tracked = repository / "tracked.txt"
+            tracked.write_text("before\n", encoding="utf-8")
+            self._git(directory, "add", "tracked.txt")
+            self._git(directory, "commit", "-qm", "fixture base")
+            self._git(directory, "config", "--unset", "user.name")
+            self._git(directory, "config", "--unset", "user.email")
+            tracked.write_text("after\n", encoding="utf-8")
+            environment = worker._isolated_environment()
+            self._git(directory, "add", "tracked.txt", env=environment)
+            result = self._git(directory, "commit", "-m", "plain isolated commit", check=False, env=environment)
+
+            self.assertNotEqual(result.returncode, 0)
+            output = (result.stdout or "") + (result.stderr or "")
+            self.assertTrue(
+                "Author identity unknown" in output or "unable to auto-detect email address" in output
+            )
+            self.assertEqual(environment["GIT_CONFIG_GLOBAL"], os.devnull)
+            self.assertEqual(environment["GIT_CONFIG_NOSYSTEM"], "1")
+
     def test_commit_failure_remains_bounded(self):
         expected_head = "a" * 40
         request = self._request(expected_head, "codex/issue-94-test")
@@ -143,6 +170,25 @@ class Issue94RepairGitIdentityTests(unittest.TestCase):
                 worker.commit_repair(request, ".")
         self.assertNotIn("secret", str(caught.exception))
         self.assertEqual(len([command for command in calls if "commit" in command]), 1)
+
+    def test_commit_and_push_remain_argv_only_and_token_isolated(self):
+        self.assertNotIn("shell=", inspect.getsource(worker.commit_repair))
+        self.assertNotIn("shell=", inspect.getsource(worker._run))
+        captured = {}
+
+        def run(command, cwd, env=None, input_text=None):
+            captured["command"] = tuple(command)
+            captured["environment"] = dict(env)
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        request = self._request("a" * 40, "codex/issue-94-test")
+        with mock.patch.dict(os.environ, {"AUTOMATION_APP_TOKEN": "test-app-token"}, clear=True), \
+             mock.patch.object(worker, "_run", side_effect=run):
+            worker.push_repair(request, ".", "b" * 40)
+        self.assertNotIn("test-app-token", " ".join(captured["command"]))
+        self.assertNotIn("AUTOMATION_APP_TOKEN", captured["environment"])
+        self.assertEqual(captured["environment"]["GIT_CONFIG_GLOBAL"], os.devnull)
+        self.assertEqual(captured["environment"]["GIT_CONFIG_NOSYSTEM"], "1")
 
 
 if __name__ == "__main__":
