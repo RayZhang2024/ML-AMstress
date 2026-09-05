@@ -147,6 +147,46 @@ class ExternalEvidenceBoundaryTests(unittest.TestCase):
         self.assertEqual(unrelated_number.acceptance_requirements[0].kind, "external")
         self.assertNotEqual(unrelated_number.acceptance_requirements[0].status, "contradictory")
 
+    def test_workflow_implementation_behavior_remains_repository_editable(self):
+        trusted = reviewer.validate_snapshot(snapshot("""## Acceptance criteria
+- [ ] The workflow rejects unrelated workflow names.
+"""))
+        self.assertEqual(trusted.acceptance_requirements[0].kind, "repository")
+
+    def test_workflow_run_parser_implementation_remains_repository_editable(self):
+        trusted = reviewer.validate_snapshot(snapshot("""## Acceptance criteria
+- [ ] The observer parser validates workflow_run payloads.
+"""))
+        self.assertEqual(trusted.acceptance_requirements[0].kind, "repository")
+
+    def test_ci_parser_validation_remains_repository_editable(self):
+        trusted = reviewer.validate_snapshot(snapshot("""## Acceptance criteria
+- [ ] The CI status parser rejects malformed statuses.
+"""))
+        self.assertEqual(trusted.acceptance_requirements[0].kind, "repository")
+
+    def test_hosted_ci_pass_on_exact_head_is_external(self):
+        trusted = reviewer.validate_snapshot(snapshot("""## Acceptance criteria
+- [ ] Hosted Normal Python CI passes on the exact PR head.
+"""))
+        requirement = trusted.acceptance_requirements[0]
+        self.assertEqual((requirement.kind, requirement.status), ("external", "verified"))
+
+    def test_observed_worker_completion_is_external(self):
+        trusted = reviewer.validate_snapshot(snapshot("""## Acceptance criteria
+- [ ] GREEN worker workflow completion is observed.
+"""))
+        self.assertEqual(trusted.acceptance_requirements[0].kind, "external")
+
+    def test_live_control_plane_observations_are_external(self):
+        requirements = reviewer.validate_snapshot(snapshot("""## Acceptance criteria
+- [ ] Hosted Normal Python CI passes on the exact PR head.
+- [ ] The GREEN worker reaches its normal terminal success state.
+- [ ] Exactly one audit marker is recorded.
+- [ ] The fixture PR remains open and unmerged.
+""")).acceptance_requirements
+        self.assertEqual([item.kind for item in requirements], ["external"] * 4)
+
     def test_real_repository_pass_to_fail_defect_remains_repairable(self):
         trusted = reviewer.validate_snapshot(snapshot(INITIAL_FIXTURE_CONTRACT))
         finding = reviewer.Finding(

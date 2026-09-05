@@ -34,15 +34,28 @@ ACCEPTANCE_HEADER_RE = re.compile(r"(?im)^## Acceptance criteria\s*$")
 SECTION_HEADER_RE = re.compile(r"(?m)^##\s+")
 CHECKBOX_RE = re.compile(r"^\s*-\s+\[[ xX]\]\s+(.+?)\s*$")
 CONTROL_PLANE_REQUIREMENT_RE = re.compile(
-    r"(?i)\b(?:workflow|hosted\s+ci|\bci\b|run\s*(?:id|identity)?|issue\s+(?:labels?|status)|"
-    r"audit\s+comment|idempoten(?:cy|t(?:ly)?)|replay(?:ed)?\s+(?:processing|event|workflow)|"
-    r"pr\s+(?:merged|open|state|head)|merge\s+state|"
-    r"workflow\s+sha|github(?:-side)?\s+(?:evidence|state)|github\s+actions|"
-    r"(?:worker\s+)?(?:branch|pr|pull\s+request)\b.*\b(?:create(?:d)?|claim(?:ed)?|exist(?:s|ed)?|"
-    r"open|close(?:d)?|state|identity|head|merge(?:d)?|unmerge(?:d)?)\b|"
-    r"(?:green\s+)?(?:codex\s+)?worker(?:\s+workflow)?\b.*\b(?:terminal|success|complete(?:d|ion)?|state)\b|"
-    r"(?:a4\.18\s+)?(?:completion\s+)?observer\b.*\b(?:run|event|completion|complete(?:d|ion)?|"
-    r"trigger(?:ed)?|observe(?:d|s|r)?)\b)"
+    r"(?ix)\b(?:"
+    # A control-plane requirement needs an observation/result signal.  Terms
+    # such as "workflow", "CI", and "run" deliberately do not match alone:
+    # they also occur in repository-editable implementation contracts.
+    r"hosted\s+(?:normal\s+python\s+)?ci\b.*\b(?:pass(?:es|ed)?|success|succeeds?)\b|"
+    r"(?:normal\s+python\s+)?ci\s+run\b.*\bpass(?:es|ed)?\b|"
+    r"(?:normal\s+python\s+)?ci\b.*\bpass(?:es|ed)?\b.*\b(?:exact\s+)?pr\s+head\b|"
+    r"issue\s+(?:labels?|status)\b.*\b(?:observed|github(?:-side)?)\b|"
+    r"(?:github(?:-side)?\s+)?audit\s+comment\b.*\b(?:observed|count|idempoten)\b|"
+    r"(?:audit|completion)\s+marker\b.*\b(?:recorded|binds?|duplicate|idempoten|replay)\b|"
+    r"(?:replayed|idempotent)\s+(?:processing|event|workflow)\b.*\bduplicate\s+(?:completion\s+)?marker\b|"
+    r"(?:green\s+)?(?:codex\s+)?worker(?:\s+workflow)?\b.*\b(?:completion\s+is\s+observed|"
+    r"reaches?\b.*\bterminal\b.*\b(?:success|state)|completed)\b|"
+    r"(?:a4\.18\s+)?(?:completion\s+)?observer\b.*\b(?:runs?|observed|triggered)\b.*\b(?:completion|event)\b|"
+    r"(?:completion\s+)?observer\b.*\bdoes\s+not\s+overwrite\b.*\bissue\s+status\b|"
+    r"(?:observer\s+)?workflow\s+run\s*id\b.*\b(?:is\s+)?recorded\b|"
+    r"(?:worker\s+)?(?:branch|pr|pull\s+request)\b.*\b(?:created|claimed|exists?|remains\s+open|"
+    r"(?:is|are)\s+(?:open|closed|merged|unmerged)|head\s+sha)\b|"
+    r"(?:pr|pull\s+request)\s+(?:merged|open|state|head)\b.*\b(?:observed|remains?|is|are)\b|"
+    r"workflow\s+sha\b.*\b(?:observed|recorded|separately)\b|"
+    r"github(?:-side)?\s+(?:evidence|state)\b"
+    r")"
 )
 EXPLICIT_FILE_DELIVERABLE_RE = re.compile(
     r"(?i)\b(?:file|fixture|document(?:ation)?)\b.*\b(?:must|shall|contains?|include|exactly)\b|"
