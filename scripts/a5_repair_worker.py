@@ -17,6 +17,7 @@ from typing import Any, Callable, Sequence
 
 
 REPAIR_CONTRACT_VERSION = 1
+CODEX_REPAIR_MODEL = "gpt-5.5"
 MAX_REPAIR_ATTEMPTS = 2
 MAX_FINDINGS = 25
 MAX_ALLOWED_PATHS = 50
@@ -39,10 +40,45 @@ PROTECTED_PATHS = frozenset((
 PROTECTED_PREFIXES = (".github/",)
 DEFAULT_VALIDATION_COMMANDS = (("python", "-m", "compileall", "-q", "."),
                                ("python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"))
+AUDIT_SAFE_ERROR_MESSAGES = frozenset((
+    "Codex executable is not configured",
+    "Codex executable is not available",
+    "trusted subprocess could not start",
+    "working tree is not clean",
+    "current branch does not match repair branch",
+    "local HEAD does not match expected repair head",
+    "Codex execution failed",
+    "Codex changed the repair branch",
+    "Codex changed local HEAD",
+    "could not inspect repair changes",
+    "could not inspect repair workspace",
+    "repair contains unsupported git status",
+    "repair contains unsupported change mode",
+    "Codex made no repository changes",
+    "repair change paths are unsafe",
+    "repair changed a path outside the trusted scope",
+    "validation command list is invalid",
+    "validation command must be trusted argv",
+    "local validation failed",
+    "git diff check failed",
+    "could not stage repair",
+    "could not create repair commit",
+    "repair commit does not descend from expected head",
+    "trusted App push credential is unavailable",
+    "remote repair branch moved or push failed",
+))
 
 
 class RepairError(Exception):
     """A bounded, audit-safe repair failure."""
+
+
+def audit_safe_error_detail(error: Exception) -> str | None:
+    """Return only explicitly reviewed static RepairError text for GitHub audit."""
+    if not isinstance(error, RepairError):
+        return None
+    message = str(error)
+    return message if message in AUDIT_SAFE_ERROR_MESSAGES else None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -264,7 +300,8 @@ def preflight(request: RepairRequest, cwd: str) -> None:
 
 
 def run_codex(request: RepairRequest, cwd: str, executable: str | None = None) -> None:
-    command = [resolve_codex_executable(executable), "exec", "--sandbox", "workspace-write", "-c", 'approval_policy="never"', "-"]
+    command = [resolve_codex_executable(executable), "exec", "--model", CODEX_REPAIR_MODEL,
+               "--sandbox", "workspace-write", "-c", 'approval_policy="never"', "-"]
     result = _run(command, cwd, _isolated_environment(), build_repair_prompt(request))
     if result.returncode:
         raise RepairError("Codex execution failed")
