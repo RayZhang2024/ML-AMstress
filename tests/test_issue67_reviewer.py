@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 import subprocess
 import unittest
 from unittest import mock
@@ -77,8 +78,14 @@ class ReviewerContractTests(unittest.TestCase):
     def test_read_only_command_and_credential_free_stdin_invocation(self):
         raw_secret = "ghp_abcdefghijklmnopqrstuvwxyz"
         prompt = reviewer.build_prompt(self.valid_snapshot)
-        command = reviewer.reviewer_command("C:/tools/codex.exe")
-        self.assertEqual(command, ["C:/tools/codex.exe", "exec", "--sandbox", "read-only", "-c", 'approval_policy="never"', "-"])
+        command = reviewer.reviewer_command("C:/tools/codex.exe", "C:/temporary/final.json")
+        self.assertEqual(command, [
+            "C:/tools/codex.exe", "exec", "--model", "gpt-5.5", "--sandbox", "read-only", "-c", 'approval_policy="never"',
+            "--output-last-message", "C:/temporary/final.json", "-",
+        ])
+        self.assertNotIn("--approve-for-me", command)
+        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", command)
+        self.assertNotIn("workspace-write", command)
         self.assertNotIn(raw_secret, command)
         self.assertNotIn(raw_secret, prompt)
         environment = reviewer.reviewer_environment({"GITHUB_TOKEN": raw_secret, "GH_TOKEN": raw_secret,
@@ -91,7 +98,8 @@ class ReviewerContractTests(unittest.TestCase):
         captured = {}
         def fake_run(command, **kwargs):
             captured.update(command=command, **kwargs)
-            return subprocess.CompletedProcess(command, 0, verdict(), "")
+            Path(command[command.index("--output-last-message") + 1]).write_text(verdict(), encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, "session progress is not a verdict", "")
         with mock.patch.object(reviewer, "resolve_codex_executable", return_value="C:/tools/codex.exe"), \
              mock.patch.object(reviewer.subprocess, "run", side_effect=fake_run):
             result = reviewer.review_snapshot(snapshot(), "C:/repo")
@@ -99,6 +107,11 @@ class ReviewerContractTests(unittest.TestCase):
         self.assertEqual(captured["input"], prompt)
         self.assertNotIn(prompt, " ".join(captured["command"]))
         self.assertNotIn(raw_secret, " ".join(captured["command"]))
+        self.assertFalse(captured.get("shell", False))
+        for name in ("GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY", "AUTOMATION_APP_TOKEN"):
+            self.assertNotIn(name, captured["env"])
+        final_path = Path(captured["command"][captured["command"].index("--output-last-message") + 1])
+        self.assertFalse(final_path.exists())
 
     def test_nonzero_reviewer_exit_reports_bounded_stderr_diagnostic(self):
         completed = subprocess.CompletedProcess(
@@ -182,8 +195,46 @@ class ReviewerContractTests(unittest.TestCase):
         captured = {}
         def fake_run(command, **kwargs):
             captured.update(command=command, **kwargs)
-            return subprocess.CompletedProcess(command, 0, verdict(), "")
+            Path(command[command.index("--output-last-message") + 1]).write_text(verdict(), encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, "", "")
         with mock.patch.object(reviewer, "resolve_codex_executable", return_value="C:/tools/codex.exe"), \
              mock.patch.object(reviewer.subprocess, "run", side_effect=fake_run):
             reviewer.review_snapshot(snapshot(changed_files=[{"path": "tests/large.py", "patch": large_patch}]), "C:/repo")
         self.assertIn(large_patch, captured["input"])
+
+    def test_success_reads_only_bounded_final_message_and_preserves_strict_parsing(self):
+        captured = {}
+
+        def fake_run(command, **kwargs):
+            captured.update(command=command, **kwargs)
+            Path(command[command.index("--output-last-message") + 1]).write_text(
+                verdict(reviewed_head_sha="c" * 40), encoding="utf-8"
+            )
+            return subprocess.CompletedProcess(command, 0, "session id: not-a-verdict", "progress")
+
+        with mock.patch.object(reviewer, "resolve_codex_executable", return_value="C:/tools/codex.exe"), \
+             mock.patch.object(reviewer.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(reviewer.ReviewError) as raised:
+                reviewer.review_snapshot(snapshot(), "C:/repo")
+        self.assertEqual(str(raised.exception), "verdict reviewed_head_sha does not match snapshot")
+        self.assertNotIn("session id", str(raised.exception))
+
+    def test_missing_or_oversized_final_message_fails_closed(self):
+        def missing_output(command, **kwargs):
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with mock.patch.object(reviewer, "resolve_codex_executable", return_value="C:/tools/codex.exe"), \
+             mock.patch.object(reviewer.subprocess, "run", side_effect=missing_output):
+            with self.assertRaisesRegex(reviewer.ReviewError, "reviewer final result is unavailable"):
+                reviewer.review_snapshot(snapshot(), "C:/repo")
+
+        def oversized_output(command, **kwargs):
+            Path(command[command.index("--output-last-message") + 1]).write_bytes(
+                b"x" * (reviewer.MAX_REVIEWER_FINAL_OUTPUT_BYTES + 1)
+            )
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with mock.patch.object(reviewer, "resolve_codex_executable", return_value="C:/tools/codex.exe"), \
+             mock.patch.object(reviewer.subprocess, "run", side_effect=oversized_output):
+            with self.assertRaisesRegex(reviewer.ReviewError, "reviewer final result is unavailable"):
+                reviewer.review_snapshot(snapshot(), "C:/repo")
