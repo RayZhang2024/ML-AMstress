@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
@@ -39,6 +40,7 @@ MAX_CHECKS = 100
 MAX_LABELS = 50
 MAX_REVIEWER_FAILURE_DIAGNOSTIC_CHARS = 500
 MAX_REVIEWER_FAILURE_DIAGNOSTIC_LINES = 3
+MAX_REVIEWER_FINAL_OUTPUT_BYTES = 200_000
 LOCAL_ABSOLUTE_PATH_RE = re.compile(
     r"(?i)(?:\b[A-Z]:[\\/][^\s\"']+|\\\\[^\s\"']+|(?<![:\w])/(?:[^\s\"']+))"
 )
@@ -319,9 +321,12 @@ def resolve_codex_executable(executable: str | None = None) -> str:
     raise ReviewError("configured Codex executable is unavailable")
 
 
-def reviewer_command(resolved_executable: str) -> list[str]:
-    """Return credential-free, no-shell command tokens for Codex stdin mode."""
-    return [resolved_executable, "exec", "--sandbox", "read-only", "-c", 'approval_policy="never"', "-"]
+def reviewer_command(resolved_executable: str, final_output_path: str) -> list[str]:
+    """Return credential-free tokens for stdin input and the final-message channel."""
+    return [
+        resolved_executable, "exec", "--sandbox", "read-only", "-c", 'approval_policy="never"',
+        "--output-last-message", final_output_path, "-",
+    ]
 
 
 def reviewer_environment(parent: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -388,18 +393,35 @@ def reviewer_process_failure_diagnostic(returncode: int, stdout: str, stderr: st
     return prefix + ": " + summary
 
 
+def _read_final_reviewer_output(path: str) -> str:
+    """Read only a bounded final response, never Codex's mixed progress stream."""
+    try:
+        size = os.path.getsize(path)
+        if size < 1 or size > MAX_REVIEWER_FINAL_OUTPUT_BYTES:
+            raise OSError("final reviewer output is missing or oversized")
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read(MAX_REVIEWER_FINAL_OUTPUT_BYTES + 1)
+    except (OSError, UnicodeError):
+        raise ReviewError("reviewer final result is unavailable") from None
+
+
 def review_snapshot(snapshot_data: Mapping[str, Any], cwd: str, executable: str | None = None) -> ReviewVerdict:
     """Invoke Codex read-only and return a validated verdict; never mutate GitHub."""
     snapshot = validate_snapshot(snapshot_data)
     prompt = build_prompt(snapshot)
-    command = reviewer_command(resolve_codex_executable(executable))
     try:
-        result = subprocess.run(command, cwd=cwd, env=reviewer_environment(), input=prompt,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
-    except (OSError, ValueError):
+        with tempfile.TemporaryDirectory(prefix="ml-amstress-a5-reviewer-") as temporary_directory:
+            final_output_path = os.path.join(temporary_directory, "final-reviewer-message.json")
+            command = reviewer_command(resolve_codex_executable(executable), final_output_path)
+            try:
+                result = subprocess.run(command, cwd=cwd, env=reviewer_environment(), input=prompt,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            except (OSError, ValueError):
+                raise ReviewError("reviewer process could not start") from None
+            if result.returncode != 0:
+                raise ReviewError(reviewer_process_failure_diagnostic(
+                    result.returncode, result.stdout or "", result.stderr or ""
+                ))
+            return parse_verdict(_read_final_reviewer_output(final_output_path), snapshot)
+    except OSError:
         raise ReviewError("reviewer process could not start") from None
-    if result.returncode != 0:
-        raise ReviewError(reviewer_process_failure_diagnostic(
-            result.returncode, result.stdout or "", result.stderr or ""
-        ))
-    return parse_verdict(result.stdout, snapshot)
