@@ -18,6 +18,8 @@ from typing import Any, Callable, Sequence
 
 REPAIR_CONTRACT_VERSION = 1
 CODEX_REPAIR_MODEL = "gpt-5.5"
+A5_GIT_COMMIT_NAME = "ml-amstress-automation[bot]"
+A5_GIT_COMMIT_EMAIL = "325049579+ml-amstress-automation[bot]@users.noreply.github.com"
 MAX_REPAIR_ATTEMPTS = 2
 MAX_FINDINGS = 25
 MAX_ALLOWED_PATHS = 50
@@ -255,6 +257,8 @@ def _isolated_environment(remove_tokens: bool = True) -> dict[str, str]:
     if remove_tokens:
         for name in ("GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY", "AUTOMATION_APP_TOKEN"):
             env.pop(name, None)
+    for name in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
+        env.pop(name, None)
     for name in list(env):
         if name == "GIT_CONFIG_COUNT" or name.startswith("GIT_CONFIG_KEY_") or name.startswith("GIT_CONFIG_VALUE_"):
             env.pop(name, None)
@@ -368,7 +372,11 @@ def commit_repair(request: RepairRequest, cwd: str) -> str:
     message = "A5.3 repair PR #%d attempt %d" % (request.pull_request_number, request.attempt_number)
     if _run(("git", "add", "--", *changed_paths(cwd, request.expected_head_sha)), cwd).returncode:
         raise RepairError("could not stage repair")
-    if _run(("git", "commit", "-m", message), cwd).returncode:
+    commit_command = ("git", "-c", "user.useConfigOnly=true",
+                      "-c", "user.name=" + A5_GIT_COMMIT_NAME,
+                      "-c", "user.email=" + A5_GIT_COMMIT_EMAIL,
+                      "commit", "-m", message)
+    if _run(commit_command, cwd, _isolated_environment()).returncode:
         raise RepairError("could not create repair commit")
     new_head = _git_text(("git", "rev-parse", "HEAD"), cwd)
     if _run(("git", "merge-base", "--is-ancestor", request.expected_head_sha, new_head), cwd).returncode:
