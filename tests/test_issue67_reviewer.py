@@ -80,7 +80,7 @@ class ReviewerContractTests(unittest.TestCase):
         prompt = reviewer.build_prompt(self.valid_snapshot)
         command = reviewer.reviewer_command("C:/tools/codex.exe", "C:/temporary/final.json")
         self.assertEqual(command, [
-            "C:/tools/codex.exe", "exec", "--sandbox", "read-only", "-c", 'approval_policy="never"',
+            "C:/tools/codex.exe", "exec", "--model", "gpt-5.5", "--sandbox", "read-only", "-c", 'approval_policy="never"',
             "--output-last-message", "C:/temporary/final.json", "-",
         ])
         self.assertNotIn("--approve-for-me", command)
