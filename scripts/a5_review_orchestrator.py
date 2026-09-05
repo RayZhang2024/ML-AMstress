@@ -549,12 +549,18 @@ def orchestrate(client: Any, event: Mapping[str, Any], cwd: str,
         return "review-clean"
 
     snapshot, paths = build_snapshot(pr, issue, run, client.changed_files(pr_number))
+    trusted_snapshot = reviewer.validate_snapshot(snapshot)
+    reviewer.validate_external_requirements(trusted_snapshot)
     authorization = authorization_fingerprint(client, pr, issue, run)
     if current.review_label not in ("review:pending", "review:blocker") or current.review_head_sha != run.head_sha:
         raise OrchestrationError("current review state is not pending for the exact CI head")
     verdict = review_runner(snapshot, cwd)
     if not isinstance(verdict, reviewer.ReviewVerdict):
         raise OrchestrationError("reviewer returned an invalid verdict object")
+    try:
+        reviewer.validate_repairable_findings(trusted_snapshot, verdict)
+    except reviewer.ReviewError as error:
+        raise OrchestrationError("reviewer repair boundary rejected the verdict") from error
     if verdict.effective_risk != "green" and verdict.verdict != "escalate":
         raise OrchestrationError("non-GREEN reviewer risk must not advance or repair automatically")
     pr, issue, comments = _refetch_unchanged(client, pr_number, issue_number, run.head_sha, run, current, authorization)
