@@ -97,22 +97,28 @@ class A62ExactPrValidationTests(unittest.TestCase):
 
     def test_metadata_rejects_stale_closed_wrong_base_fork_and_linkage(self):
         inputs = validation.parse_inputs(environment())
-        for changed in (
-            pr(head="c" * 40), pr(state="closed"), pr(base="release"), pr(repo="other/repo"),
-            pr(body="Refs #113\n"), pr(body="Refs #112\nRefs #112\n"),
+        for changed, reason in (
+            (pr(head="c" * 40), "target PR head is stale"),
+            (pr(state="closed"), "target PR is not open"),
+            (pr(base="release"), "target PR base is not main"),
+            (pr(repo="other/repo"), "target PR is not same-repository"),
+            (pr(body="Refs #113\n"), "PR does not reference the requested issue"),
+            (pr(body="Refs #112\nRefs #112\n"), "PR issue linkage is ambiguous"),
         ):
-            with self.assertRaises(validation.ValidationError):
-                validation.validate_metadata(changed, issue(), (), inputs)
+            with self.assertRaisesRegex(validation.ValidationError, reason):
+                validation.validate_metadata(changed, issue(), ("docs/example.md",), inputs)
 
     def test_metadata_rejects_missing_issue_bad_labels_status_and_red(self):
         inputs = validation.parse_inputs(environment())
-        for target in (
-            issue(state="closed"), issue(("status:review", "status:ready", "risk:yellow")),
-            issue(("status:review", "risk:yellow", "risk:green")), issue(("status:ready", "risk:yellow")),
-            issue(("status:review", "risk:red")),
+        for target, reason in (
+            (issue(state="closed"), "target issue is not open"),
+            (issue(("status:review", "status:ready", "risk:yellow")), "target issue status is ambiguous"),
+            (issue(("status:review", "risk:yellow", "risk:green")), "target issue risk is ambiguous"),
+            (issue(("status:ready", "risk:yellow")), "target issue is not in review"),
+            (issue(("status:review", "risk:red")), "red target work is not authorized"),
         ):
-            with self.assertRaises(validation.ValidationError):
-                validation.validate_metadata(pr(), target, (), inputs)
+            with self.assertRaisesRegex(validation.ValidationError, reason):
+                validation.validate_metadata(pr(), target, ("docs/example.md",), inputs)
 
     def test_metadata_rejects_missing_or_mismatched_live_identity_fields(self):
         inputs = validation.parse_inputs(environment())
@@ -144,6 +150,26 @@ class A62ExactPrValidationTests(unittest.TestCase):
             record = validation.execute(client, inputs, environment())
         self.assertEqual(record["failure_category"], "metadata-rejected")
         checkout.assert_not_called()
+
+    def test_metadata_changes_during_pagination_fail_before_checkout_or_profile(self):
+        inputs = validation.parse_inputs(environment())
+        for mutate in (
+            lambda client: setattr(client, "pr_data", pr(head="c" * 40)),
+            lambda client: setattr(client, "pr_data", pr(changed_files=2)),
+            lambda client: setattr(client, "issue_data", issue(("status:ready", "risk:yellow"))),
+        ):
+            client = FakeClient()
+            def files(number, expected_count, client=client, mutate=mutate):
+                self.assertEqual((number, expected_count), (1120, 1))
+                mutate(client)
+                return ("docs/example.md",)
+            client.files = files
+            with mock.patch.object(validation, "checkout_exact_target") as checkout, \
+                    mock.patch.object(validation, "run_profile") as profile:
+                record = validation.execute(client, inputs, environment())
+            self.assertEqual(record["failure_category"], "metadata-race")
+            checkout.assert_not_called()
+            profile.assert_not_called()
 
     def test_complete_pagination_rejects_protected_path_after_first_100_and_mismatch(self):
         pages = [

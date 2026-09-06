@@ -155,9 +155,23 @@ def protected_path(path: str) -> bool:
     )
 
 
-def validate_metadata(pr: Mapping[str, object], issue: Mapping[str, object],
-                      paths: tuple[str, ...], inputs: ValidationInputs) -> str:
-    """Validate all authorization facts without inferring from target content."""
+def authorization_snapshot(pr: Mapping[str, object], issue: Mapping[str, object]) -> tuple[object, ...]:
+    """Return only authorization-relevant live state for an intra-gate race check."""
+    if not isinstance(pr, Mapping) or not isinstance(issue, Mapping):
+        raise ValidationError("metadata identity is malformed")
+    base = pr.get("base") if isinstance(pr.get("base"), dict) else {}
+    head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
+    repo = head.get("repo") if isinstance(head.get("repo"), dict) else {}
+    return (
+        pr.get("number"), pr.get("state"), base.get("ref"), head.get("sha"), repo.get("full_name"),
+        pr.get("changed_files"), pr.get("body"), issue.get("number"), issue.get("state"),
+        _label_names(issue, "status:"), _label_names(issue, "risk:"),
+    )
+
+
+def validate_authorization_metadata(pr: Mapping[str, object], issue: Mapping[str, object],
+                                    inputs: ValidationInputs) -> str:
+    """Validate all non-file authorization facts without inferring from target content."""
     if pr.get("number") != inputs.pull_request_number:
         raise ValidationError("target PR identity is malformed")
     if issue.get("number") != inputs.issue_number:
@@ -165,8 +179,6 @@ def validate_metadata(pr: Mapping[str, object], issue: Mapping[str, object],
     changed_files = pr.get("changed_files")
     if isinstance(changed_files, bool) or not isinstance(changed_files, int) or not 0 <= changed_files <= MAX_CHANGED_FILES:
         raise ValidationError("target PR changed-file count is malformed")
-    if len(paths) != changed_files:
-        raise ValidationError("target PR file enumeration is incomplete")
     if pr.get("state", "").casefold() != "open":
         raise ValidationError("target PR is not open")
     base = pr.get("base") if isinstance(pr.get("base"), dict) else {}
@@ -192,9 +204,18 @@ def validate_metadata(pr: Mapping[str, object], issue: Mapping[str, object],
         raise ValidationError("target issue is not in review")
     if risks[0] == "risk:red":
         raise ValidationError("red target work is not authorized")
+    return risks[0]
+
+
+def validate_metadata(pr: Mapping[str, object], issue: Mapping[str, object],
+                      paths: tuple[str, ...], inputs: ValidationInputs) -> str:
+    """Validate complete authorization metadata, including reconciled changed paths."""
+    risk = validate_authorization_metadata(pr, issue, inputs)
+    if len(paths) != pr.get("changed_files"):
+        raise ValidationError("target PR file enumeration is incomplete")
     if any(protected_path(path) for path in paths):
         raise ValidationError("protected-path")
-    return risks[0]
+    return risk
 
 
 def stripped_target_environment(parent: Mapping[str, str]) -> dict[str, str]:
@@ -330,12 +351,20 @@ class GitHubClient:
 
 
 def resolve_metadata(client: object, inputs: ValidationInputs) -> str:
-    """Resolve all live authorization metadata from trusted GitHub REST only."""
-    pr = client.pr(inputs.pull_request_number)
-    changed_files = pr.get("changed_files") if isinstance(pr, Mapping) else None
-    issue = client.issue(inputs.issue_number)
-    paths = client.files(inputs.pull_request_number, changed_files)
-    return validate_metadata(pr, issue, paths, inputs)
+    """Authorize only a complete changed-file set bound to one stable live snapshot."""
+    initial_pr = client.pr(inputs.pull_request_number)
+    initial_issue = client.issue(inputs.issue_number)
+    initial_snapshot = authorization_snapshot(initial_pr, initial_issue)
+    validate_authorization_metadata(initial_pr, initial_issue, inputs)
+    paths = client.files(inputs.pull_request_number, initial_pr.get("changed_files"))
+
+    # PR files are paginated separately from PR/issue metadata. Re-read those
+    # facts after every page sequence and reject any mixed live observation.
+    current_pr = client.pr(inputs.pull_request_number)
+    current_issue = client.issue(inputs.issue_number)
+    if authorization_snapshot(current_pr, current_issue) != initial_snapshot:
+        raise ValidationError("metadata-race")
+    return validate_metadata(current_pr, current_issue, paths, inputs)
 
 
 def authorization_evidence(inputs: ValidationInputs, risk: str, run_id: str, controller_sha: str) -> dict[str, object]:
