@@ -18,7 +18,9 @@ not sufficient. The job requires repository variables:
 
 The runtime requires exact Windows/x64, runner-name, Windows-user, and
 dedicated-label matches, and rejects either identity if it matches the existing
-Codex runner/user variables. Evidence never includes the username.
+Codex runner/user variables. Both Codex-reference variables are mandatory and
+the configured A7 runner and user must be distinct from them. Evidence never
+includes the username.
 
 Repository code cannot prove Windows account or ACL isolation. Before any live
 acceptance, a maintainer must provision a separate Windows account/runner with
@@ -41,8 +43,12 @@ Abaqus/CAE 2021 launcher only for this fixed fixture. The fixture must write
 exactly `A7.1_ISOLATED_TARGET_CAE_SMOKE_PASSED` to the fresh controller-provided
 sentinel path. Zero exit without that exact single marker, stale/missing/wrong
 marker, timeout, unavailable runtime, or identity failure is not a pass.
-The target child has credential-family stripping and no persisted checkout
-credentials. It must not call production AM helpers or create models, geometry,
+The target child has no inherited controller environment: it receives only the
+allowlisted Windows process values `SYSTEMROOT`, `WINDIR`, `COMSPEC`, `PATH`,
+`PATHEXT`, `TEMP`, and `TMP`; explicit Abaqus/SIMULIA/DSLS and license families;
+and the controller-provided sentinel path. It has no persisted checkout
+credentials or GitHub Actions command-file/controller/identity variables. It
+must not call production AM helpers or create models, geometry,
 mesh, jobs, materials, BCs, thermal behavior, UTEMP, GUI, or ML results.
 
 ## Bounded evidence

@@ -57,6 +57,15 @@ class A71IsolatedTargetValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(validation.ValidationError, "target-identity"):
             validation.validate_isolated_target_identity(env, "codex-user")
 
+    def test_missing_or_matching_codex_reference_configuration_fails_closed(self):
+        for changed in (
+            {"CODEX_EXPECTED_RUNNER_NAME": ""}, {"CODEX_EXPECTED_WINDOWS_USER": ""},
+            {"A7_EXPECTED_VALIDATION_RUNNER_NAME": "codex-runner"},
+            {"A7_EXPECTED_VALIDATION_WINDOWS_USER": "codex-user"},
+        ):
+            with self.assertRaisesRegex(validation.ValidationError, "target-identity"):
+                validation.validate_isolated_target_identity(environment(**changed), "validation-user")
+
     def test_fixed_profile_and_fixture_path_are_controller_owned(self):
         profile = validation.PROFILES["isolated-target-cae-smoke"]
         self.assertTrue(profile.executes_target_code)
@@ -116,6 +125,26 @@ class A71IsolatedTargetValidationTests(unittest.TestCase):
         for name in ("GITHUB_TOKEN", "OPENAI_API_KEY", "ACTIONS_RUNTIME_TOKEN", "SSH_AUTH_SOCK"):
             self.assertNotIn(name, child)
         self.assertEqual(child["DSLS_LICENSE_FILE"], "license")
+
+    def test_target_child_environment_is_strict_allowlist_not_controller_copy(self):
+        parent = environment(SYSTEMROOT="C:/Windows", WINDIR="C:/Windows", COMSPEC="cmd.exe", PATH="safe",
+                             PATHEXT=".EXE", TEMP="temp", TMP="tmp", DSLS_LICENSE_FILE="license",
+                             ABAQUSLM_LICENSE_FILE="abaqus-license", GITHUB_ENV="unsafe", GITHUB_OUTPUT="unsafe",
+                             GITHUB_PATH="unsafe", GITHUB_STEP_SUMMARY="unsafe", GITHUB_STATE="unsafe",
+                             GITHUB_EVENT_PATH="unsafe", GITHUB_WORKSPACE="unsafe",
+                             GITHUB_TOKEN="unsafe", ACTIONS_RUNTIME_TOKEN="unsafe", OPENAI_API_KEY="unsafe",
+                             CODEX_TOKEN="unsafe", SSH_AUTH_SOCK="unsafe")
+        child = validation.target_child_environment(parent, "sentinel")
+        for name in ("GITHUB_ENV", "GITHUB_OUTPUT", "GITHUB_PATH", "GITHUB_STEP_SUMMARY", "GITHUB_STATE",
+                     "GITHUB_EVENT_PATH", "GITHUB_WORKSPACE",
+                     "GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN", "OPENAI_API_KEY", "CODEX_TOKEN", "SSH_AUTH_SOCK",
+                     "A7_EXPECTED_VALIDATION_WINDOWS_USER", "A7_EXPECTED_VALIDATION_RUNNER_NAME",
+                     "CODEX_EXPECTED_WINDOWS_USER", "CODEX_EXPECTED_RUNNER_NAME"):
+            self.assertNotIn(name, child)
+        for name in ("SYSTEMROOT", "WINDIR", "COMSPEC", "PATH", "PATHEXT", "TEMP", "TMP",
+                     "DSLS_LICENSE_FILE", "ABAQUSLM_LICENSE_FILE"):
+            self.assertIn(name, child)
+        self.assertEqual(child[validation.TARGET_SENTINEL_ENVIRONMENT], "sentinel")
 
     def test_target_evidence_is_bounded_and_sensitive_fields_absent(self):
         inputs = validation.ValidationInputs(1, 2, HEAD, "isolated-target-cae-smoke")

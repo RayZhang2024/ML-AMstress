@@ -52,6 +52,9 @@ CREDENTIAL_NAMES = frozenset((
     "CODEX_API_KEY", "CODEX_AUTH_TOKEN", "CODEX_TOKEN", "API_TOKEN",
     "SSH_AUTH_SOCK",
 ))
+TARGET_CHILD_SYSTEM_ENVIRONMENT = frozenset(("SYSTEMROOT", "WINDIR", "COMSPEC", "PATH", "PATHEXT", "TEMP", "TMP"))
+TARGET_CHILD_RUNTIME_PREFIXES = ("ABAQUS_", "SIMULIA_", "DSLS_")
+TARGET_CHILD_RUNTIME_NAMES = frozenset(("LM_LICENSE_FILE", "ABAQUSLM_LICENSE_FILE"))
 
 
 class ValidationError(Exception):
@@ -273,23 +276,27 @@ def validate_isolated_target_identity(environment: Mapping[str, str], user: str 
     """Require the externally provisioned validation identity before target code."""
     import getpass
     actual_user = (user if user is not None else getpass.getuser()).strip()
+    validation_runner = environment.get("A7_EXPECTED_VALIDATION_RUNNER_NAME", "").strip()
+    validation_user = environment.get("A7_EXPECTED_VALIDATION_WINDOWS_USER", "").strip()
+    codex_runner = environment.get("CODEX_EXPECTED_RUNNER_NAME", "").strip()
+    codex_user = environment.get("CODEX_EXPECTED_WINDOWS_USER", "").strip()
     required = (
         environment.get("RUNNER_OS", "").casefold() == "windows",
         environment.get("RUNNER_ARCH", "").upper() == "X64",
         environment.get("A7_VALIDATION_RUNNER_LABEL", "") == ISOLATED_RUNNER_LABELS[-1],
-        bool(environment.get("A7_EXPECTED_VALIDATION_RUNNER_NAME", "").strip()),
-        bool(environment.get("A7_EXPECTED_VALIDATION_WINDOWS_USER", "").strip()),
-        environment.get("RUNNER_NAME", "").casefold() == environment.get("A7_EXPECTED_VALIDATION_RUNNER_NAME", "").casefold(),
-        actual_user.casefold() == environment.get("A7_EXPECTED_VALIDATION_WINDOWS_USER", "").casefold(),
+        bool(validation_runner), bool(validation_user), bool(codex_runner), bool(codex_user),
+        environment.get("RUNNER_NAME", "").casefold() == validation_runner.casefold(),
+        actual_user.casefold() == validation_user.casefold(),
         environment.get("A7_VALIDATION_ISOLATION_READY", "") == ISOLATION_READY_VALUE,
+        validation_runner.casefold() != codex_runner.casefold(),
+        validation_user.casefold() != codex_user.casefold(),
     )
     if not all(required):
         raise ValidationError("target-identity")
     # Explicitly reject an identity configured for the Codex worker even if a
     # maintainer accidentally adds the validation label to that runner.
-    for actual, codex in ((environment.get("RUNNER_NAME", ""), environment.get("CODEX_EXPECTED_RUNNER_NAME", "")),
-                          (actual_user, environment.get("CODEX_EXPECTED_WINDOWS_USER", ""))):
-        if codex.strip() and actual.casefold() == codex.strip().casefold():
+    for actual, codex in ((environment.get("RUNNER_NAME", ""), codex_runner), (actual_user, codex_user)):
+        if actual.casefold() == codex.casefold():
             raise ValidationError("target-identity")
 
 
@@ -302,9 +309,23 @@ def _exact_target_sentinel(path: str) -> bool:
     return value == TARGET_SENTINEL.encode("ascii")
 
 
+def target_child_environment(parent: Mapping[str, str], sentinel_path: str | None = None) -> dict[str, str]:
+    """Construct the only environment visible to PR-authored target code."""
+    environment = {}
+    for name, value in parent.items():
+        upper = name.upper()
+        if (upper in TARGET_CHILD_SYSTEM_ENVIRONMENT or upper in TARGET_CHILD_RUNTIME_NAMES
+                or upper.startswith(TARGET_CHILD_RUNTIME_PREFIXES)):
+            if isinstance(value, str):
+                environment[name] = value
+    if sentinel_path is not None:
+        environment[TARGET_SENTINEL_ENVIRONMENT] = sentinel_path
+    return environment
+
+
 def _target_process(command: list[str], workspace: str, environment: Mapping[str, str], timeout: int,
                     runner: Callable[..., subprocess.CompletedProcess[str]]) -> subprocess.CompletedProcess[str]:
-    return runner(command, cwd=workspace, env=stripped_target_environment(environment), timeout=timeout,
+    return runner(command, cwd=workspace, env=dict(environment), timeout=timeout,
                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
 
 
@@ -319,7 +340,8 @@ def run_isolated_target_smoke(workspace: str, environment: Mapping[str, str],
     try:
         launcher = preflight.resolve_approved_launcher(environment.get("A6_APPROVED_LAUNCHER"), exists)
         timeout = preflight.configured_timeout(environment.get("A6_TIMEOUT_SECONDS"))
-        version = _target_process([launcher, "information=release"], workspace, environment, timeout, runner)
+        child_environment = target_child_environment(environment)
+        version = _target_process([launcher, "information=release"], workspace, child_environment, timeout, runner)
         release = preflight.parse_abaqus_release((version.stdout or "") + "\n" + (version.stderr or ""))
         if version.returncode != 0:
             return ValidationResult("unavailable", "unavailable", "runtime-unavailable", "passed")
@@ -328,8 +350,7 @@ def run_isolated_target_smoke(workspace: str, environment: Mapping[str, str],
         marker = os.path.join(workspace, TARGET_SENTINEL_FILENAME)
         if marker_exists(marker):
             return ValidationResult("failed", release, "target-sentinel-stale", "passed")
-        child = dict(environment)
-        child[TARGET_SENTINEL_ENVIRONMENT] = marker
+        child = target_child_environment(environment, marker)
         result = _target_process([launcher, "cae", "noGUI=" + fixture], workspace, child, timeout, runner)
         if result.returncode != 0:
             return ValidationResult("failed", release, "target-execution-failed", "passed")
