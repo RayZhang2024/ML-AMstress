@@ -39,7 +39,7 @@ PROTECTED_PATHS = frozenset((
     "scripts/codex_issue_worker.py", "AGENTS.md", "docs/AUTONOMOUS_DEVELOPMENT.md",
     "docs/AUTONOMOUS_ORCHESTRATION.md", "docs/AUTONOMOUS_WORKER_RUNBOOK.md",
 ))
-PROTECTED_PREFIXES = (".github/",)
+PROTECTED_PREFIXES = (".github/", "scripts/a6_")
 DEFAULT_VALIDATION_COMMANDS = (("python", "-m", "compileall", "-q", "."),
                                ("python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"))
 AUDIT_SAFE_ERROR_MESSAGES = frozenset((

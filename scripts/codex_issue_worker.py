@@ -78,7 +78,7 @@ REDACTION_ONLY_RE = re.compile(
 )
 ALLOWED_GREEN_ROOTS = ("docs/", "scripts/", "tests/")
 ALLOWED_GREEN_FILES = ("README.md", "LICENSE")
-PROTECTED_CONTROL_PLANE_ROOTS = (".github/",)
+PROTECTED_CONTROL_PLANE_ROOTS = (".github/", "scripts/a6_")
 PROTECTED_CONTROL_PLANE_FILES = (
     "scripts/codex_issue_worker.py",
     "scripts/a5_reviewer.py",

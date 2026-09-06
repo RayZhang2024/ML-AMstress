@@ -50,7 +50,8 @@ class RepairRequestTests(unittest.TestCase):
 
     def test_path_and_text_policy_is_exact_and_protected(self):
         for path in ("/absolute", "C:/absolute", "../escape", "tests/../escape", ".github/x.yml",
-                     "scripts/codex_issue_worker.py", "AGENTS.md"):
+                     "scripts/codex_issue_worker.py", "scripts/a6_abaqus_preflight.py",
+                     "scripts/a6_abaqus_probe.py", "AGENTS.md"):
             with self.assertRaises(worker.RepairError):
                 worker.validate_request(request(allowed_paths=(path,)))
         with self.assertRaises(worker.RepairError):
