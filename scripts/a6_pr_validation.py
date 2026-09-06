@@ -1,0 +1,351 @@
+"""Trusted, bounded exact-PR Abaqus validation controller for A6.2.
+
+This controller is always loaded from trusted ``main``.  It authorizes a
+specific same-repository review PR, checks out that exact commit only in a
+fresh temporary target workspace, and selects commands from this module's
+fixed profile table.  Target files never provide commands, policy, or
+evidence.
+"""
+from __future__ import annotations
+
+import dataclasses
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+from typing import Callable, Mapping
+
+from scripts import a5_repair_worker as repair
+from scripts import a6_abaqus_preflight as preflight
+from scripts import codex_issue_worker as green_worker
+
+
+REPOSITORY = "RayZhang2024/ML-AMstress"
+BASE_BRANCH = "main"
+EVIDENCE_PREFIX = "A6_PR_VALIDATION_EVIDENCE="
+SCHEMA_VERSION = 1
+RUNNER_ROLE = preflight.RUNNER_ROLE
+RUNNER_LABELS = preflight.RUNNER_LABELS
+MAX_IDENTIFIER = 2_000_000_000
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+RUN_ID_RE = re.compile(r"^[1-9][0-9]{0,19}$")
+PR_ISSUE_REFERENCE_RE = re.compile(r"(?m)^Refs #([1-9][0-9]*)\s*$")
+STATUS_LABELS = frozenset(("status:ready", "status:in-progress", "status:review", "status:blocked"))
+RISK_LABELS = frozenset(("risk:green", "risk:yellow", "risk:red"))
+CREDENTIAL_NAMES = frozenset((
+    "GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY", "AUTOMATION_APP_TOKEN",
+    "CODEX_API_KEY", "CODEX_AUTH_TOKEN", "CODEX_TOKEN", "API_TOKEN",
+    "SSH_AUTH_SOCK",
+))
+
+
+class ValidationError(Exception):
+    """A stable, bounded A6.2 authorization or runtime failure."""
+
+
+@dataclasses.dataclass(frozen=True)
+class ValidationInputs:
+    pull_request_number: int
+    issue_number: int
+    expected_head_sha: str
+    profile: str
+
+
+@dataclasses.dataclass(frozen=True)
+class ValidationProfile:
+    identifier: str
+    timeout_seconds: int
+    executes_target_code: bool
+
+
+@dataclasses.dataclass(frozen=True)
+class ValidationResult:
+    outcome: str
+    release: str
+    failure_category: str
+
+
+# This is intentionally the only enabled profile. It invokes controller-owned
+# A6.1 code and never imports, executes, or configures target-branch content.
+PROFILES = {
+    "inert-cae-runtime-probe": ValidationProfile("inert-cae-runtime-probe", 120, False),
+}
+FAILURE_CATEGORIES = frozenset((
+    "none", "controller-contract", "metadata-rejected", "metadata-race",
+    "protected-path", "profile-unknown", "target-code-isolation", "target-checkout-failed",
+    "target-head-stale", "timeout", "runtime-unavailable", "probe-failed", "internal-error",
+))
+
+
+def _positive(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, str) or not value.isdecimal():
+        raise ValidationError(name + " is malformed")
+    number = int(value)
+    if not 1 <= number <= MAX_IDENTIFIER:
+        raise ValidationError(name + " is outside the approved bound")
+    return number
+
+
+def parse_inputs(environment: Mapping[str, str]) -> ValidationInputs:
+    """Accept exactly four bounded dispatch inputs; no command-like input exists."""
+    inputs = ValidationInputs(
+        _positive(environment.get("A6_TARGET_PR_NUMBER", ""), "target PR number"),
+        _positive(environment.get("A6_TARGET_ISSUE_NUMBER", ""), "target issue number"),
+        environment.get("A6_EXPECTED_HEAD_SHA", "").strip(),
+        environment.get("A6_VALIDATION_PROFILE", "").strip(),
+    )
+    if not SHA_RE.fullmatch(inputs.expected_head_sha):
+        raise ValidationError("expected head SHA is malformed")
+    if inputs.profile not in PROFILES:
+        raise ValidationError("profile-unknown")
+    return inputs
+
+
+def validate_controller_environment(environment: Mapping[str, str]) -> tuple[str, str]:
+    """Refuse a manual dispatch from any repository/ref other than trusted main."""
+    if environment.get("GITHUB_REPOSITORY") != REPOSITORY:
+        raise ValidationError("controller repository is not trusted")
+    if environment.get("GITHUB_REF") != "refs/heads/main":
+        raise ValidationError("controller ref is not trusted main")
+    run_id = environment.get("GITHUB_RUN_ID", "").strip()
+    sha = environment.get("GITHUB_SHA", "").strip()
+    if not RUN_ID_RE.fullmatch(run_id) or not SHA_RE.fullmatch(sha):
+        raise ValidationError("controller GitHub identity is unavailable")
+    return run_id, sha
+
+
+def _label_names(item: Mapping[str, object], prefix: str) -> tuple[str, ...]:
+    values = item.get("labels", ())
+    names = []
+    if not isinstance(values, list):
+        raise ValidationError("metadata labels are malformed")
+    for value in values:
+        name = value.get("name") if isinstance(value, dict) else value
+        if isinstance(name, str) and name.startswith(prefix):
+            names.append(name)
+    return tuple(sorted(names))
+
+
+def linked_issue_number(pr: Mapping[str, object]) -> int:
+    """Require exactly one canonical, line-only ``Refs #N`` PR reference."""
+    body = pr.get("body")
+    if not isinstance(body, str):
+        raise ValidationError("PR issue linkage is missing")
+    matches = PR_ISSUE_REFERENCE_RE.findall(body)
+    if len(matches) != 1:
+        raise ValidationError("PR issue linkage is ambiguous")
+    return int(matches[0])
+
+
+def protected_path(path: str) -> bool:
+    """Reuse the established A4/A5 protection surface, never target policy."""
+    normalized = path.replace("\\", "/")
+    return (
+        repair.is_protected_path(normalized)
+        or normalized.startswith(green_worker.PROTECTED_CONTROL_PLANE_ROOTS)
+        or normalized in green_worker.PROTECTED_CONTROL_PLANE_FILES
+    )
+
+
+def validate_metadata(pr: Mapping[str, object], issue: Mapping[str, object],
+                      paths: tuple[str, ...], inputs: ValidationInputs) -> str:
+    """Validate all authorization facts without inferring from target content."""
+    if pr.get("number") not in (None, inputs.pull_request_number):
+        raise ValidationError("target PR identity is malformed")
+    if issue.get("number") not in (None, inputs.issue_number):
+        raise ValidationError("target issue identity is malformed")
+    if pr.get("state", "").casefold() != "open":
+        raise ValidationError("target PR is not open")
+    base = pr.get("base") if isinstance(pr.get("base"), dict) else {}
+    head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
+    repo = head.get("repo") if isinstance(head.get("repo"), dict) else {}
+    if base.get("ref") != BASE_BRANCH:
+        raise ValidationError("target PR base is not main")
+    if repo.get("full_name") != REPOSITORY:
+        raise ValidationError("target PR is not same-repository")
+    if head.get("sha") != inputs.expected_head_sha:
+        raise ValidationError("target PR head is stale")
+    if linked_issue_number(pr) != inputs.issue_number:
+        raise ValidationError("PR does not reference the requested issue")
+    if issue.get("state", "").casefold() != "open":
+        raise ValidationError("target issue is not open")
+    statuses = _label_names(issue, "status:")
+    risks = _label_names(issue, "risk:")
+    if len(statuses) != 1 or statuses[0] not in STATUS_LABELS:
+        raise ValidationError("target issue status is ambiguous")
+    if len(risks) != 1 or risks[0] not in RISK_LABELS:
+        raise ValidationError("target issue risk is ambiguous")
+    if statuses[0] != "status:review":
+        raise ValidationError("target issue is not in review")
+    if risks[0] == "risk:red":
+        raise ValidationError("red target work is not authorized")
+    if any(protected_path(path) for path in paths):
+        raise ValidationError("protected-path")
+    return risks[0]
+
+
+def stripped_target_environment(parent: Mapping[str, str]) -> dict[str, str]:
+    """Preserve only runtime/license context while removing reusable credentials."""
+    environment = dict(parent)
+    for name in list(environment):
+        if name in CREDENTIAL_NAMES or (name.startswith("CODEX_") and ("TOKEN" in name or "KEY" in name)):
+            environment.pop(name, None)
+    environment["GIT_TERMINAL_PROMPT"] = "0"
+    environment["GIT_CONFIG_NOSYSTEM"] = "1"
+    environment["GIT_CONFIG_GLOBAL"] = os.devnull
+    return environment
+
+
+def _git(command: list[str], cwd: str, environment: Mapping[str, str], timeout: int,
+         runner: Callable[..., subprocess.CompletedProcess[str]]) -> subprocess.CompletedProcess[str]:
+    return runner(command, cwd=cwd, env=stripped_target_environment(environment), timeout=timeout,
+                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+
+
+def checkout_exact_target(workspace: str, expected_sha: str, environment: Mapping[str, str],
+                          runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run) -> None:
+    """Fetch only the expected immutable commit into a new credential-free workspace."""
+    for command in (
+        ["git", "init", "-q"],
+        ["git", "remote", "add", "origin", "https://github.com/" + REPOSITORY + ".git"],
+        ["git", "fetch", "--depth=1", "origin", expected_sha],
+        ["git", "checkout", "--detach", "--quiet", "FETCH_HEAD"],
+        ["git", "rev-parse", "HEAD"],
+    ):
+        result = _git(command, workspace, environment, 60, runner)
+        if result.returncode != 0:
+            raise ValidationError("target-checkout-failed")
+        if command[-1] == "HEAD" and result.stdout.strip() != expected_sha:
+            raise ValidationError("target-head-stale")
+
+
+def run_profile(profile: ValidationProfile, target_workspace: str, environment: Mapping[str, str]) -> ValidationResult:
+    """Run an allowlisted controller-owned profile; the initial profile ignores target files."""
+    if profile.executes_target_code:
+        # A later profile needs a separately proven Windows execution identity.
+        raise ValidationError("target-code-isolation")
+    if profile.identifier != "inert-cae-runtime-probe" or not os.path.isdir(target_workspace):
+        raise ValidationError("profile-unknown")
+    profile_environment = stripped_target_environment(environment)
+    profile_environment["A6_TIMEOUT_SECONDS"] = str(profile.timeout_seconds)
+    result = preflight.run_preflight(environment=profile_environment)
+    category = result.failure_category
+    if category not in ("none", "runtime-unavailable", "timeout", "probe-failed"):
+        category = "probe-failed"
+    return ValidationResult(result.outcome, result.release, category)
+
+
+def evidence(result: ValidationResult, inputs: ValidationInputs, effective_risk: str,
+             run_id: str, controller_sha: str) -> dict[str, object]:
+    """Construct the sole bounded A6.2 evidence record."""
+    category = result.failure_category if result.failure_category in FAILURE_CATEGORIES else "internal-error"
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "github_run_id": run_id,
+        "trusted_controller_sha": controller_sha,
+        "target_pr_number": inputs.pull_request_number,
+        "target_issue_number": inputs.issue_number,
+        "target_head_sha": inputs.expected_head_sha,
+        "effective_risk": effective_risk,
+        "validation_profile": inputs.profile,
+        "runner_role": RUNNER_ROLE,
+        "runner_labels": list(RUNNER_LABELS),
+        "approved_abaqus_command": preflight.APPROVED_ABAQUS_COMMAND_ID,
+        "abaqus_release": result.release,
+        "outcome": result.outcome,
+        "failure_category": category,
+    }
+
+
+class GitHubClient:
+    """Read-only REST client; all exceptions are intentionally bounded."""
+    def __init__(self, token: str | None):
+        if not token:
+            raise ValidationError("trusted GitHub read token is unavailable")
+        self.token = token
+
+    def _get(self, path: str) -> object:
+        request = urllib.request.Request("https://api.github.com" + path, headers={
+            "Accept": "application/vnd.github+json", "Authorization": "Bearer " + self.token,
+            "User-Agent": "ml-amstress-a6-validation",
+        })
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except (urllib.error.URLError, urllib.error.HTTPError, ValueError, OSError):
+            raise ValidationError("trusted GitHub metadata is unavailable") from None
+
+    def pr(self, number: int) -> Mapping[str, object]:
+        value = self._get("/repos/" + REPOSITORY + "/pulls/" + str(number))
+        if not isinstance(value, dict):
+            raise ValidationError("trusted GitHub metadata is malformed")
+        return value
+
+    def issue(self, number: int) -> Mapping[str, object]:
+        value = self._get("/repos/" + REPOSITORY + "/issues/" + str(number))
+        if not isinstance(value, dict):
+            raise ValidationError("trusted GitHub metadata is malformed")
+        return value
+
+    def files(self, number: int) -> tuple[str, ...]:
+        value = self._get("/repos/" + REPOSITORY + "/pulls/" + str(number) + "/files?per_page=100")
+        if not isinstance(value, list) or len(value) > 100:
+            raise ValidationError("trusted GitHub file metadata is malformed")
+        paths = []
+        for item in value:
+            path = item.get("filename") if isinstance(item, dict) else None
+            if not isinstance(path, str) or not path or len(path) > 240:
+                raise ValidationError("trusted GitHub file metadata is malformed")
+            paths.append(path)
+        return tuple(sorted(set(paths)))
+
+
+def execute(client: object, inputs: ValidationInputs, environment: Mapping[str, str],
+            git_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run) -> dict[str, object]:
+    """Gate twice, use a fresh target checkout, then run one inert trusted profile."""
+    run_id, controller_sha = validate_controller_environment(environment)
+    effective_risk = "unavailable"
+    result = ValidationResult("failed", "unavailable", "metadata-rejected")
+    try:
+        pr = client.pr(inputs.pull_request_number)
+        issue = client.issue(inputs.issue_number)
+        paths = client.files(inputs.pull_request_number)
+        effective_risk = validate_metadata(pr, issue, paths, inputs)
+        # Re-fetch all authorization-relevant data immediately before checkout.
+        current_pr = client.pr(inputs.pull_request_number)
+        current_issue = client.issue(inputs.issue_number)
+        current_paths = client.files(inputs.pull_request_number)
+        effective_risk = validate_metadata(current_pr, current_issue, current_paths, inputs)
+        with tempfile.TemporaryDirectory(prefix="ml-amstress-a6-target-") as target_workspace:
+            checkout_exact_target(target_workspace, inputs.expected_head_sha, environment, git_runner)
+            result = run_profile(PROFILES[inputs.profile], target_workspace, environment)
+    except ValidationError as error:
+        category = str(error)
+        if category not in FAILURE_CATEGORIES:
+            category = "metadata-rejected"
+        result = ValidationResult("failed", "unavailable", category)
+    except subprocess.TimeoutExpired:
+        result = ValidationResult("failed", "unavailable", "timeout")
+    except Exception:
+        result = ValidationResult("failed", "unavailable", "internal-error")
+    return evidence(result, inputs, effective_risk, run_id, controller_sha)
+
+
+def main() -> int:
+    environment = dict(os.environ)
+    try:
+        inputs = parse_inputs(environment)
+        record = execute(GitHubClient(environment.get("GITHUB_TOKEN")), inputs, environment)
+    except ValidationError:
+        # No untrusted input or exception detail may reach Actions logs.
+        return 1
+    print(EVIDENCE_PREFIX + json.dumps(record, sort_keys=True, separators=(",", ":")))
+    return 0 if record["outcome"] == "passed" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
