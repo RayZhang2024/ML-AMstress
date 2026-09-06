@@ -31,6 +31,13 @@ AUTHORIZATION_PREFIX = "A6_PR_AUTHORIZATION="
 SCHEMA_VERSION = 1
 RUNNER_ROLE = preflight.RUNNER_ROLE
 RUNNER_LABELS = preflight.RUNNER_LABELS
+ISOLATED_RUNNER_ROLE = "windows-x64-abaqus-validation"
+ISOLATED_RUNNER_LABELS = ("self-hosted", "windows", "x64", "ml-amstress-abaqus-validation")
+ISOLATION_READY_VALUE = "isolated"
+TARGET_FIXTURE_PATH = "tests/fixtures/a7_1_target_cae_smoke.py"
+TARGET_SENTINEL_ENVIRONMENT = "A7_TARGET_SENTINEL_FILE"
+TARGET_SENTINEL_FILENAME = "a7-target-smoke.marker"
+TARGET_SENTINEL = "A7.1_ISOLATED_TARGET_CAE_SMOKE_PASSED"
 MAX_IDENTIFIER = 2_000_000_000
 MAX_CHANGED_FILES = 1_000
 FILES_PER_PAGE = 100
@@ -45,6 +52,9 @@ CREDENTIAL_NAMES = frozenset((
     "CODEX_API_KEY", "CODEX_AUTH_TOKEN", "CODEX_TOKEN", "API_TOKEN",
     "SSH_AUTH_SOCK",
 ))
+TARGET_CHILD_SYSTEM_ENVIRONMENT = frozenset(("SYSTEMROOT", "WINDIR", "COMSPEC", "PATH", "PATHEXT", "TEMP", "TMP"))
+TARGET_CHILD_RUNTIME_PREFIXES = ("ABAQUS_", "SIMULIA_", "DSLS_")
+TARGET_CHILD_RUNTIME_NAMES = frozenset(("LM_LICENSE_FILE", "ABAQUSLM_LICENSE_FILE"))
 
 
 class ValidationError(Exception):
@@ -71,17 +81,21 @@ class ValidationResult:
     outcome: str
     release: str
     failure_category: str
+    isolation_result: str = "not-applicable"
 
 
 # This is intentionally the only enabled profile. It invokes controller-owned
 # A6.1 code and never imports, executes, or configures target-branch content.
 PROFILES = {
     "inert-cae-runtime-probe": ValidationProfile("inert-cae-runtime-probe", 120, False),
+    "isolated-target-cae-smoke": ValidationProfile("isolated-target-cae-smoke", 120, True),
 }
 FAILURE_CATEGORIES = frozenset((
     "none", "controller-contract", "metadata-rejected", "metadata-race",
     "protected-path", "profile-unknown", "target-code-isolation", "target-checkout-failed",
     "target-head-stale", "timeout", "runtime-unavailable", "probe-failed", "internal-error",
+    "target-identity", "target-fixture-missing", "target-sentinel-missing", "target-sentinel-stale",
+    "target-execution-failed",
 ))
 
 
@@ -258,10 +272,103 @@ def checkout_exact_target(workspace: str, expected_sha: str, environment: Mappin
             raise ValidationError("target-head-stale")
 
 
+def validate_isolated_target_identity(environment: Mapping[str, str], user: str | None = None) -> None:
+    """Require the externally provisioned validation identity before target code."""
+    import getpass
+    actual_user = (user if user is not None else getpass.getuser()).strip()
+    validation_runner = environment.get("A7_EXPECTED_VALIDATION_RUNNER_NAME", "").strip()
+    validation_user = environment.get("A7_EXPECTED_VALIDATION_WINDOWS_USER", "").strip()
+    codex_runner = environment.get("CODEX_EXPECTED_RUNNER_NAME", "").strip()
+    codex_user = environment.get("CODEX_EXPECTED_WINDOWS_USER", "").strip()
+    required = (
+        environment.get("RUNNER_OS", "").casefold() == "windows",
+        environment.get("RUNNER_ARCH", "").upper() == "X64",
+        environment.get("A7_VALIDATION_RUNNER_LABEL", "") == ISOLATED_RUNNER_LABELS[-1],
+        bool(validation_runner), bool(validation_user), bool(codex_runner), bool(codex_user),
+        environment.get("RUNNER_NAME", "").casefold() == validation_runner.casefold(),
+        actual_user.casefold() == validation_user.casefold(),
+        environment.get("A7_VALIDATION_ISOLATION_READY", "") == ISOLATION_READY_VALUE,
+        validation_runner.casefold() != codex_runner.casefold(),
+        validation_user.casefold() != codex_user.casefold(),
+    )
+    if not all(required):
+        raise ValidationError("target-identity")
+    # Explicitly reject an identity configured for the Codex worker even if a
+    # maintainer accidentally adds the validation label to that runner.
+    for actual, codex in ((environment.get("RUNNER_NAME", ""), codex_runner), (actual_user, codex_user)):
+        if actual.casefold() == codex.casefold():
+            raise ValidationError("target-identity")
+
+
+def _exact_target_sentinel(path: str) -> bool:
+    try:
+        with open(path, "rb") as stream:
+            value = stream.read(len(TARGET_SENTINEL.encode("ascii")) + 1)
+    except OSError:
+        return False
+    return value == TARGET_SENTINEL.encode("ascii")
+
+
+def target_child_environment(parent: Mapping[str, str], sentinel_path: str | None = None) -> dict[str, str]:
+    """Construct the only environment visible to PR-authored target code."""
+    environment = {}
+    for name, value in parent.items():
+        upper = name.upper()
+        if (upper in TARGET_CHILD_SYSTEM_ENVIRONMENT or upper in TARGET_CHILD_RUNTIME_NAMES
+                or upper.startswith(TARGET_CHILD_RUNTIME_PREFIXES)):
+            if isinstance(value, str):
+                environment[name] = value
+    if sentinel_path is not None:
+        environment[TARGET_SENTINEL_ENVIRONMENT] = sentinel_path
+    return environment
+
+
+def _target_process(command: list[str], workspace: str, environment: Mapping[str, str], timeout: int,
+                    runner: Callable[..., subprocess.CompletedProcess[str]]) -> subprocess.CompletedProcess[str]:
+    return runner(command, cwd=workspace, env=dict(environment), timeout=timeout,
+                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+
+
+def run_isolated_target_smoke(workspace: str, environment: Mapping[str, str],
+                              runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+                              exists: Callable[[str], bool] = os.path.isfile,
+                              marker_exists: Callable[[str], bool] = os.path.lexists) -> ValidationResult:
+    """Run only the fixed future inert fixture from the exact target workspace."""
+    fixture = os.path.join(workspace, *TARGET_FIXTURE_PATH.split("/"))
+    if not exists(fixture):
+        return ValidationResult("failed", "unavailable", "target-fixture-missing", "passed")
+    try:
+        launcher = preflight.resolve_approved_launcher(environment.get("A6_APPROVED_LAUNCHER"), exists)
+        timeout = preflight.configured_timeout(environment.get("A6_TIMEOUT_SECONDS"))
+        child_environment = target_child_environment(environment)
+        version = _target_process([launcher, "information=release"], workspace, child_environment, timeout, runner)
+        release = preflight.parse_abaqus_release((version.stdout or "") + "\n" + (version.stderr or ""))
+        if version.returncode != 0:
+            return ValidationResult("unavailable", "unavailable", "runtime-unavailable", "passed")
+        if release != preflight.EXPECTED_ABAQUS_RELEASE:
+            return ValidationResult("failed", release, "probe-failed", "passed")
+        marker = os.path.join(workspace, TARGET_SENTINEL_FILENAME)
+        if marker_exists(marker):
+            return ValidationResult("failed", release, "target-sentinel-stale", "passed")
+        child = target_child_environment(environment, marker)
+        result = _target_process([launcher, "cae", "noGUI=" + fixture], workspace, child, timeout, runner)
+        if result.returncode != 0:
+            return ValidationResult("failed", release, "target-execution-failed", "passed")
+        if not _exact_target_sentinel(marker):
+            return ValidationResult("failed", release, "target-sentinel-missing", "passed")
+        return ValidationResult("passed", release, "none", "passed")
+    except subprocess.TimeoutExpired:
+        return ValidationResult("failed", "unavailable", "timeout", "passed")
+    except (OSError, ValueError, preflight.PreflightError):
+        return ValidationResult("unavailable", "unavailable", "runtime-unavailable", "passed")
+
+
 def run_profile(profile: ValidationProfile, target_workspace: str, environment: Mapping[str, str]) -> ValidationResult:
     """Run an allowlisted controller-owned profile; the initial profile ignores target files."""
+    if profile.identifier == "isolated-target-cae-smoke" and profile.executes_target_code:
+        validate_isolated_target_identity(environment)
+        return run_isolated_target_smoke(target_workspace, environment)
     if profile.executes_target_code:
-        # A later profile needs a separately proven Windows execution identity.
         raise ValidationError("target-code-isolation")
     if profile.identifier != "inert-cae-runtime-probe" or not os.path.isdir(target_workspace):
         raise ValidationError("profile-unknown")
@@ -287,8 +394,9 @@ def evidence(result: ValidationResult, inputs: ValidationInputs, effective_risk:
         "target_head_sha": inputs.expected_head_sha,
         "effective_risk": effective_risk,
         "validation_profile": inputs.profile,
-        "runner_role": RUNNER_ROLE,
-        "runner_labels": list(RUNNER_LABELS),
+        "runner_role": ISOLATED_RUNNER_ROLE if inputs.profile == "isolated-target-cae-smoke" else RUNNER_ROLE,
+        "runner_labels": list(ISOLATED_RUNNER_LABELS if inputs.profile == "isolated-target-cae-smoke" else RUNNER_LABELS),
+        "isolation_result": result.isolation_result,
         "approved_abaqus_command": preflight.APPROVED_ABAQUS_COMMAND_ID,
         "abaqus_release": result.release,
         "outcome": result.outcome,
@@ -392,14 +500,18 @@ def execute(client: object, inputs: ValidationInputs, environment: Mapping[str, 
         # This is deliberately the second gate: the hosted gate has already
         # completed, but its observation may not authorize a later runtime.
         effective_risk = resolve_metadata(client, inputs)
+        profile = PROFILES[inputs.profile]
+        if profile.executes_target_code:
+            validate_isolated_target_identity(environment)
         with tempfile.TemporaryDirectory(prefix="ml-amstress-a6-target-") as target_workspace:
             checkout_exact_target(target_workspace, inputs.expected_head_sha, environment, git_runner)
-            result = run_profile(PROFILES[inputs.profile], target_workspace, environment)
+            result = run_profile(profile, target_workspace, environment)
     except ValidationError as error:
         category = str(error)
         if category not in FAILURE_CATEGORIES:
             category = "metadata-rejected"
-        result = ValidationResult("failed", "unavailable", category)
+        isolation = "failed" if inputs.profile == "isolated-target-cae-smoke" and category == "target-identity" else "not-applicable"
+        result = ValidationResult("failed", "unavailable", category, isolation)
     except subprocess.TimeoutExpired:
         result = ValidationResult("failed", "unavailable", "timeout")
     except Exception:

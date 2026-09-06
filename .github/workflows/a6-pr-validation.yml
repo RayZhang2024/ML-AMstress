@@ -21,6 +21,7 @@ on:
         type: choice
         options:
           - inert-cae-runtime-probe
+          - isolated-target-cae-smoke
 
 permissions:
   contents: read
@@ -67,7 +68,7 @@ jobs:
 
   validate-exact-pr:
     needs: metadata-gate
-    if: needs.metadata-gate.outputs.authorized == 'true' && github.repository == 'RayZhang2024/ML-AMstress' && github.ref == 'refs/heads/main'
+    if: needs.metadata-gate.outputs.authorized == 'true' && inputs.validation_profile == 'inert-cae-runtime-probe' && github.repository == 'RayZhang2024/ML-AMstress' && github.ref == 'refs/heads/main'
     runs-on: [self-hosted, windows, x64, ml-amstress-abaqus]
     timeout-minutes: 8
     env:
@@ -96,6 +97,47 @@ jobs:
           if ($null -eq $output -or $output.Count -ne 1 -or
               -not $output[0].StartsWith('A6_PR_VALIDATION_EVIDENCE=')) {
             Write-Error 'A6.2 validation did not return bounded evidence.'
+            exit 1
+          }
+          $output[0] | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+          Write-Output $output[0]
+          exit $exitCode
+
+  validate-isolated-target-code:
+    needs: metadata-gate
+    if: needs.metadata-gate.outputs.authorized == 'true' && inputs.validation_profile == 'isolated-target-cae-smoke' && github.repository == 'RayZhang2024/ML-AMstress' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, windows, x64, ml-amstress-abaqus-validation]
+    timeout-minutes: 8
+    env:
+      A6_APPROVED_LAUNCHER: C:/SIMULIA/Commands/abq2021.bat
+      A6_TIMEOUT_SECONDS: "60"
+      A6_TARGET_PR_NUMBER: ${{ inputs.target_pr_number }}
+      A6_TARGET_ISSUE_NUMBER: ${{ inputs.target_issue_number }}
+      A6_EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+      A6_VALIDATION_PROFILE: ${{ inputs.validation_profile }}
+      A7_EXPECTED_VALIDATION_RUNNER_NAME: ${{ vars.A7_EXPECTED_VALIDATION_RUNNER_NAME }}
+      A7_EXPECTED_VALIDATION_WINDOWS_USER: ${{ vars.A7_EXPECTED_VALIDATION_WINDOWS_USER }}
+      A7_VALIDATION_ISOLATION_READY: ${{ vars.A7_VALIDATION_ISOLATION_READY }}
+      A7_VALIDATION_RUNNER_LABEL: ml-amstress-abaqus-validation
+      CODEX_EXPECTED_RUNNER_NAME: ${{ vars.CODEX_EXPECTED_RUNNER_NAME }}
+      CODEX_EXPECTED_WINDOWS_USER: ${{ vars.CODEX_EXPECTED_WINDOWS_USER }}
+    steps:
+      - name: Check out trusted main controller
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Run bounded isolated target-code validation
+        shell: powershell
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [string[]]$output = @(& python -m scripts.a6_pr_validation)
+          $exitCode = $LASTEXITCODE
+          if ($null -eq $output -or $output.Count -ne 1 -or
+              -not $output[0].StartsWith('A6_PR_VALIDATION_EVIDENCE=')) {
+            Write-Error 'A7.1 validation did not return bounded evidence.'
             exit 1
           }
           $output[0] | Add-Content -Path $env:GITHUB_STEP_SUMMARY
