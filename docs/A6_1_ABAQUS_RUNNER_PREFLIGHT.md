@@ -36,11 +36,14 @@ The executable `scripts/a6_` control-plane prefix is excluded from both the
 ordinary GREEN worker and A5 repair edit surfaces.
 
 The workflow invokes `scripts/a6_abaqus_preflight.py`, which runs a bounded
-release query and then the separate `scripts/a6_abaqus_probe.py` in a temporary
-directory. The probe only prints its fixed success marker. It creates no
-model, geometry, mesh, material, boundary condition, thermal step, UTEMP
-input, solver job, or project file, and it does not invoke production Abaqus
-helpers.
+release query and then the separate `scripts/a6_abaqus_probe.py` in a fresh
+temporary directory. The probe writes only its fixed success marker to the
+preflight-provided marker file in that directory; the preflight requires both
+CAE exit code zero and exact marker content. It does not rely on launcher
+stdout/stderr, and a pre-existing, missing, or malformed marker fails closed.
+The temporary directory is removed automatically. The probe creates no model,
+geometry, mesh, material, boundary condition, thermal step, UTEMP input,
+solver job, or project file, and it does not invoke production Abaqus helpers.
 
 ## Outcomes and evidence
 
