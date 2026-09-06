@@ -1,3 +1,8 @@
+"""A7.1 isolated target-code smoke fixture.
+
+Refs #118
+"""
+
 import os
 
 
