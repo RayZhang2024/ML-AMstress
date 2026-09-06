@@ -53,6 +53,15 @@ class A61AbaqusPreflightTests(unittest.TestCase):
         self.assertNotIn("issues: write", WORKFLOW)
         self.assertNotIn("pull-requests: write", WORKFLOW)
 
+    def test_powershell_wrapper_normalizes_scalar_evidence_output_before_indexing(self):
+        command = "[string[]]$output = @(& python -m scripts.a6_abaqus_preflight)"
+        self.assertIn(command, WORKFLOW)
+        self.assertNotIn("$output = & python -m scripts.a6_abaqus_preflight", WORKFLOW)
+        self.assertLess(WORKFLOW.index(command), WORKFLOW.index("$exitCode = $LASTEXITCODE"))
+        self.assertIn("$output.Count -ne 1", WORKFLOW)
+        self.assertIn("$output[0].StartsWith('A6_PREFLIGHT_EVIDENCE=')", WORKFLOW)
+        self.assertIn("exit $exitCode", WORKFLOW)
+
     def test_runner_label_contract_is_dedicated_and_distinct_from_codex(self):
         self.assertEqual(preflight.RUNNER_LABELS, (
             "self-hosted", "windows", "x64", "ml-amstress-abaqus",
