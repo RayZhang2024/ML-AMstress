@@ -35,7 +35,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $output = & python -m scripts.a6_abaqus_preflight
+          [string[]]$output = @(& python -m scripts.a6_abaqus_preflight)
           $exitCode = $LASTEXITCODE
           if ($null -eq $output -or $output.Count -ne 1 -or
               -not $output[0].StartsWith('A6_PREFLIGHT_EVIDENCE=')) {
