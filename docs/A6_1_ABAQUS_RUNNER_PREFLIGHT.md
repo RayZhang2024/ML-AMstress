@@ -32,6 +32,8 @@ The [A6.1 workflow](../.github/workflows/a6-abaqus-preflight.yml) is manual
 out the exact trusted dispatch SHA with `persist-credentials: false`. It has only `contents: read`
 permission and does not create or modify issues, labels, pull requests,
 branches, or merge state. It does not execute PR or fork content.
+The executable `scripts/a6_` control-plane prefix is excluded from both the
+ordinary GREEN worker and A5 repair edit surfaces.
 
 The workflow invokes `scripts/a6_abaqus_preflight.py`, which runs a bounded
 release query and then the separate `scripts/a6_abaqus_probe.py` in a temporary
