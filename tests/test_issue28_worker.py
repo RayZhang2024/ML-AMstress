@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from scripts import a5_review_orchestrator as orchestrator
+from scripts import a6_pr_validation as a6_validation
 from scripts import codex_issue_worker as worker
 
 
@@ -863,6 +865,10 @@ class WorkerPolicyTests(unittest.TestCase):
         self.assertIn("status:in-progress", labels_events[0][1])
         self.assertIn("status:review", labels_events[-1][1])
         self.assertTrue(any(event[0] == "create_pr" for event in client.events))
+        pr_body = next(event[3] for event in client.events if event[0] == "create_pr")
+        self.assertTrue(pr_body.startswith("Refs #28\n"))
+        self.assertEqual(orchestrator.canonical_linked_issue({"body": pr_body}), 28)
+        self.assertEqual(a6_validation.linked_issue_number({"body": pr_body}), 28)
         self.assertTrue(
             any(
                 "codex-worker-claim issue:28 run:run-success" in event[1]

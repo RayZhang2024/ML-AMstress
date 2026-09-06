@@ -17,9 +17,11 @@ next `pull_request:synchronize` event for `Normal Python CI`; no merge or
 auto-merge operation is introduced.
 
 The orchestrator resolves exactly one open, in-repository `codex/issue-*` PR
-for the CI head, verifies its canonical `Closes #N` link and eligible open
+for the CI head, verifies its canonical standalone `Refs #N` link and eligible open
 GREEN `agent:codex` issue, and fails closed on stale, forked, ambiguous, or
-non-GREEN evidence. It constructs the A5.1 snapshot from trusted API evidence;
+non-GREEN evidence. A5 retains only a single unambiguous legacy closing-keyword
+link for historical replay; mixed, duplicate, malformed, or conflicting link
+forms fail closed. It constructs the A5.1 snapshot from trusted API evidence;
 A5.1 remains read-only and receives no GitHub credential.
 
 The trusted A5 REST boundary uses a fixed application User-Agent. Every API

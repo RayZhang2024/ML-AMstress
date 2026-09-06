@@ -39,7 +39,10 @@ MAX_AUDIT = 4096
 TRUSTED_AUDIT_AUTHOR = "github-actions[bot]"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 BRANCH_RE = re.compile(r"^codex/issue-[1-9][0-9]*-[a-z0-9][a-z0-9-]{0,80}$")
-CLOSES_RE = re.compile(r"(?im)^\s*(?:closes?|fix(?:es)?|resolves?)\s+#([1-9][0-9]*)\s*$")
+REFS_RE = re.compile(r"(?m)^Refs #([1-9][0-9]*)\s*$")
+REFS_LINE_RE = re.compile(r"(?im)^\s*refs\b.*$")
+LEGACY_CLOSING_RE = re.compile(r"(?im)^\s*(?:closes?|fix(?:es)?|resolves?)\s+#([1-9][0-9]*)\s*$")
+LEGACY_CLOSING_LINE_RE = re.compile(r"(?im)^\s*(?:closes?|fix(?:es)?|resolves?)\b.*$")
 STATE_MARKER_RE = re.compile(r"^<!-- a5\.4a-state:(\{.*\}) -->$")
 CI_MARKER_RE = re.compile(r"^<!-- a5\.4a-ci:(\{.*\}) -->$")
 REPAIR_MARKER_RE = re.compile(r"^<!-- a5\.4a-repair:(\{.*\}) -->$")
@@ -105,12 +108,19 @@ def parse_workflow_run(event: Mapping[str, Any]) -> WorkflowRun:
 
 
 def canonical_linked_issue(pr: Mapping[str, Any]) -> int:
-    """Return the one canonical closing issue reference from a bounded PR body."""
+    """Return exactly one canonical ``Refs #N`` link, or one unambiguous legacy link."""
     body = _bounded_text(pr.get("body", ""), "PR body")
-    references = {int(match.group(1)) for match in CLOSES_RE.finditer(body)}
-    if len(references) != 1:
-        raise OrchestrationError("PR must link exactly one canonical closing issue")
-    return next(iter(references))
+    references = REFS_RE.findall(body)
+    ref_lines = REFS_LINE_RE.findall(body)
+    legacy = LEGACY_CLOSING_RE.findall(body)
+    legacy_lines = LEGACY_CLOSING_LINE_RE.findall(body)
+    if references:
+        if len(references) != 1 or len(ref_lines) != 1 or legacy or legacy_lines:
+            raise OrchestrationError("PR must link exactly one canonical issue")
+        return int(references[0])
+    if ref_lines or len(legacy) != 1 or len(legacy_lines) != 1:
+        raise OrchestrationError("PR must link exactly one canonical issue")
+    return int(legacy[0])
 
 
 def _label_names(item: Mapping[str, Any]) -> tuple[str, ...]:
