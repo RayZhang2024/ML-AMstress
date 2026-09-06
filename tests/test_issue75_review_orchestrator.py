@@ -51,7 +51,7 @@ def issue(**changes):
 
 
 def pull_request(**changes):
-    value = {"number": 175, "state": "open", "title": "Issue #75", "body": "Closes #75",
+    value = {"number": 175, "state": "open", "title": "Issue #75", "body": "Refs #75",
              "labels": labels(), "base": {"ref": "main", "sha": "c" * 40},
              "head": {"sha": HEAD, "ref": BRANCH, "repo": {"full_name": orchestrator.REPOSITORY}}}
     value.update(changes)
@@ -244,7 +244,9 @@ class TrustedRestBoundaryTests(unittest.TestCase):
 
     def test_exact_one_pr_link_and_internal_identity_are_required(self):
         self.assertEqual(orchestrator.canonical_linked_issue(pull_request()), 75)
-        for body in ("", "Closes #75\nFixes #76"):
+        self.assertEqual(orchestrator.canonical_linked_issue(pull_request(body="Closes #75")), 75)
+        for body in ("", "Refs #75\nRefs #75", "Refs #75\nCloses #75", "Refs #75 extra",
+                     "Closes #75\nFixes #76"):
             with self.assertRaises(orchestrator.OrchestrationError):
                 orchestrator.canonical_linked_issue(pull_request(body=body))
         with self.assertRaises(orchestrator.OrchestrationError):

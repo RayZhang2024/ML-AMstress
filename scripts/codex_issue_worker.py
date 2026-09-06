@@ -986,7 +986,7 @@ class Worker(object):
             if disallowed:
                 raise WorkerError("effective risk escalated after commit: %s" % ", ".join(disallowed))
             pr_body = (
-                "Closes #%d\n\n"
+                "Refs #%d\n\n"
                 "GREEN-only Codex worker result.\n\n"
                 "- Branch: `%s`\n"
                 "- Effective risk: GREEN (enforced changed-path allowlist)\n"
