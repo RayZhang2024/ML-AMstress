@@ -27,15 +27,15 @@ def environment(**overrides):
 
 
 def successful_runner(captured=None):
-    results = iter((
-        subprocess.CompletedProcess([], 0, "Abaqus/CAE 2021\n", ""),
-        subprocess.CompletedProcess([], 0, preflight.PROBE_SUCCESS_MARKER + "\n", ""),
-    ))
-
     def run(command, **kwargs):
         if captured is not None:
             captured.append((command, kwargs))
-        return next(results)
+        if command[1] == "information=release":
+            return subprocess.CompletedProcess(command, 0, "Abaqus/CAE 2021\n", "")
+        Path(kwargs["env"][preflight.PROBE_MARKER_ENVIRONMENT]).write_bytes(
+            preflight.PROBE_SUCCESS_MARKER.encode("ascii")
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
 
     return run
 
@@ -97,6 +97,11 @@ class A61AbaqusPreflightTests(unittest.TestCase):
         self.assertEqual(calls[0][0][1:], ["information=release"])
         self.assertEqual(calls[1][0][1], "cae")
         self.assertTrue(calls[1][0][2].endswith(preflight.PROBE_FILENAME))
+        self.assertEqual(Path(calls[1][1]["env"][preflight.PROBE_MARKER_ENVIRONMENT]).name,
+                         preflight.PROBE_MARKER_FILENAME)
+        self.assertEqual(calls[1][1]["env"][preflight.PROBE_MARKER_ENVIRONMENT],
+                         str(Path(calls[1][1]["cwd"]) / preflight.PROBE_MARKER_FILENAME))
+        self.assertFalse(Path(calls[1][1]["env"][preflight.PROBE_MARKER_ENVIRONMENT]).exists())
 
     def test_missing_launcher_is_unavailable_and_unexpected_launcher_fails(self):
         missing = preflight.run_preflight(
@@ -127,14 +132,46 @@ class A61AbaqusPreflightTests(unittest.TestCase):
         )
         self.assertEqual(wrong_release.failure_category, "release-unexpected")
 
-        results = iter((
-            subprocess.CompletedProcess([], 0, "Abaqus 2021", ""),
-            subprocess.CompletedProcess([], 0, "unexpected output", ""),
-        ))
+        results = iter((subprocess.CompletedProcess([], 0, "Abaqus 2021", ""),
+                        subprocess.CompletedProcess([], 0, "", "")))
         marker_missing = preflight.run_preflight(
             environment(), lambda command, **kwargs: next(results), exists=lambda value: True, user="abaqus-user"
         )
         self.assertEqual(marker_missing.failure_category, "probe-marker-missing")
+
+    def test_wrong_or_stale_probe_marker_cannot_pass(self):
+        def wrong_marker_runner(command, **kwargs):
+            if command[1] == "information=release":
+                return subprocess.CompletedProcess(command, 0, "Abaqus 2021", "")
+            Path(kwargs["env"][preflight.PROBE_MARKER_ENVIRONMENT]).write_text("wrong marker", encoding="ascii")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        wrong = preflight.run_preflight(
+            environment(), wrong_marker_runner, exists=lambda value: True, user="abaqus-user"
+        )
+        self.assertEqual(wrong.failure_category, "probe-marker-missing")
+
+        calls = []
+        stale = preflight.run_preflight(
+            environment(), successful_runner(calls), exists=lambda value: True, user="abaqus-user",
+            marker_exists=lambda value: True,
+        )
+        self.assertEqual(stale.failure_category, "probe-marker-stale")
+        self.assertEqual(len(calls), 1)
+
+    def test_nonzero_cae_exit_fails_even_with_a_marker(self):
+        def failing_cae_runner(command, **kwargs):
+            if command[1] == "information=release":
+                return subprocess.CompletedProcess(command, 0, "Abaqus 2021", "")
+            Path(kwargs["env"][preflight.PROBE_MARKER_ENVIRONMENT]).write_bytes(
+                preflight.PROBE_SUCCESS_MARKER.encode("ascii")
+            )
+            return subprocess.CompletedProcess(command, 1, "", "")
+
+        result = preflight.run_preflight(
+            environment(), failing_cae_runner, exists=lambda value: True, user="abaqus-user"
+        )
+        self.assertEqual(result.failure_category, "probe-failed")
 
     def test_timeout_is_bounded_and_fails_closed(self):
         def timeout_runner(command, **kwargs):
@@ -184,6 +221,8 @@ class A61AbaqusPreflightTests(unittest.TestCase):
             self.assertNotIn(helper, rendered)
         probe_source = (ROOT / "scripts" / preflight.PROBE_FILENAME).read_text(encoding="utf-8")
         self.assertIn(preflight.PROBE_SUCCESS_MARKER, probe_source)
+        self.assertIn(preflight.PROBE_MARKER_ENVIRONMENT, probe_source)
+        self.assertNotIn("print(", probe_source)
         self.assertNotIn("mdb.", probe_source)
         self.assertNotIn("Job(", probe_source)
 

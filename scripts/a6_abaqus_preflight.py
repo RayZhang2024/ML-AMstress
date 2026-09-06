@@ -26,13 +26,15 @@ RUNNER_LABELS = ("self-hosted", "windows", "x64", "ml-amstress-abaqus")
 RUNNER_ROLE = "windows-x64-abaqus"
 PROBE_FILENAME = "a6_abaqus_probe.py"
 PROBE_SUCCESS_MARKER = "A6.1_ABAQUS_CAE_PROBE_PASSED"
+PROBE_MARKER_ENVIRONMENT = "A6_PROBE_MARKER_FILE"
+PROBE_MARKER_FILENAME = "a6-probe-completion.marker"
 DEFAULT_TIMEOUT_SECONDS = 60
 MAX_TIMEOUT_SECONDS = 120
 OUTCOMES = frozenset(("passed", "failed", "unavailable"))
 FAILURE_CATEGORIES = frozenset((
     "none", "runner-contract", "launcher-not-approved", "launcher-missing",
     "launcher-unusable", "release-unexpected", "runtime-unavailable",
-    "probe-failed", "probe-marker-missing", "timeout", "internal-error",
+    "probe-failed", "probe-marker-missing", "probe-marker-stale", "timeout", "internal-error",
 ))
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 RUN_ID_RE = re.compile(r"^[1-9][0-9]{0,19}$")
@@ -138,6 +140,16 @@ def probe_command(launcher: str, probe_path: str) -> list[str]:
     return [launcher, "cae", "noGUI=" + os.path.abspath(probe_path)]
 
 
+def _exact_probe_marker(path: str) -> bool:
+    """Read only the bounded fixed marker; never publish its contents."""
+    try:
+        with open(path, "rb") as marker_file:
+            value = marker_file.read(len(PROBE_SUCCESS_MARKER.encode("ascii")) + 1)
+    except OSError:
+        return False
+    return value == PROBE_SUCCESS_MARKER.encode("ascii")
+
+
 def _result(outcome: str, release: str = "unavailable",
             failure_category: str = "none") -> PreflightResult:
     if outcome not in OUTCOMES or failure_category not in FAILURE_CATEGORIES:
@@ -149,7 +161,8 @@ def run_preflight(environment: Mapping[str, str] | None = None,
                   runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
                   exists: Callable[[str], bool] = os.path.isfile,
                   user: str | None = None,
-                  probe_path: str | None = None) -> PreflightResult:
+                  probe_path: str | None = None,
+                  marker_exists: Callable[[str], bool] = os.path.lexists) -> PreflightResult:
     """Execute only release and inert noGUI probes, returning a bounded outcome."""
     environment = dict(os.environ if environment is None else environment)
     if validate_runner_environment(environment, user):
@@ -175,13 +188,19 @@ def run_preflight(environment: Mapping[str, str] | None = None,
             if release != EXPECTED_ABAQUS_RELEASE:
                 return _result("failed", release, "release-unexpected")
 
-            cae_result = _run(probe_command(launcher, workspace_probe), temporary_directory, timeout, runner, environment)
+            marker_path = os.path.join(temporary_directory, PROBE_MARKER_FILENAME)
+            if marker_exists(marker_path):
+                return _result("failed", release, "probe-marker-stale")
+            probe_environment = dict(environment)
+            probe_environment[PROBE_MARKER_ENVIRONMENT] = marker_path
+            cae_result = _run(probe_command(launcher, workspace_probe), temporary_directory, timeout, runner,
+                              probe_environment)
             cae_output = _combined_output(cae_result)
             if cae_result.returncode != 0:
                 return _result("unavailable" if LICENSE_UNAVAILABLE_RE.search(cae_output) else "failed",
                                release, "runtime-unavailable" if LICENSE_UNAVAILABLE_RE.search(cae_output)
                                else "probe-failed")
-            if PROBE_SUCCESS_MARKER not in cae_output:
+            if not _exact_probe_marker(marker_path):
                 return _result("failed", release, "probe-marker-missing")
             return _result("passed", release)
     except subprocess.TimeoutExpired:
