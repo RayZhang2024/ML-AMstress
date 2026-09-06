@@ -27,10 +27,14 @@ from scripts import codex_issue_worker as green_worker
 REPOSITORY = "RayZhang2024/ML-AMstress"
 BASE_BRANCH = "main"
 EVIDENCE_PREFIX = "A6_PR_VALIDATION_EVIDENCE="
+AUTHORIZATION_PREFIX = "A6_PR_AUTHORIZATION="
 SCHEMA_VERSION = 1
 RUNNER_ROLE = preflight.RUNNER_ROLE
 RUNNER_LABELS = preflight.RUNNER_LABELS
 MAX_IDENTIFIER = 2_000_000_000
+MAX_CHANGED_FILES = 1_000
+FILES_PER_PAGE = 100
+MAX_FILE_PAGES = MAX_CHANGED_FILES // FILES_PER_PAGE
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 RUN_ID_RE = re.compile(r"^[1-9][0-9]{0,19}$")
 PR_ISSUE_REFERENCE_RE = re.compile(r"(?m)^Refs #([1-9][0-9]*)\s*$")
@@ -154,10 +158,15 @@ def protected_path(path: str) -> bool:
 def validate_metadata(pr: Mapping[str, object], issue: Mapping[str, object],
                       paths: tuple[str, ...], inputs: ValidationInputs) -> str:
     """Validate all authorization facts without inferring from target content."""
-    if pr.get("number") not in (None, inputs.pull_request_number):
+    if pr.get("number") != inputs.pull_request_number:
         raise ValidationError("target PR identity is malformed")
-    if issue.get("number") not in (None, inputs.issue_number):
+    if issue.get("number") != inputs.issue_number:
         raise ValidationError("target issue identity is malformed")
+    changed_files = pr.get("changed_files")
+    if isinstance(changed_files, bool) or not isinstance(changed_files, int) or not 0 <= changed_files <= MAX_CHANGED_FILES:
+        raise ValidationError("target PR changed-file count is malformed")
+    if len(paths) != changed_files:
+        raise ValidationError("target PR file enumeration is incomplete")
     if pr.get("state", "").casefold() != "open":
         raise ValidationError("target PR is not open")
     base = pr.get("base") if isinstance(pr.get("base"), dict) else {}
@@ -192,7 +201,12 @@ def stripped_target_environment(parent: Mapping[str, str]) -> dict[str, str]:
     """Preserve only runtime/license context while removing reusable credentials."""
     environment = dict(parent)
     for name in list(environment):
-        if name in CREDENTIAL_NAMES or (name.startswith("CODEX_") and ("TOKEN" in name or "KEY" in name)):
+        upper = name.upper()
+        namespace_credential = (
+            upper.startswith(("GITHUB_", "GH_", "ACTIONS_", "OPENAI_", "CODEX_", "AUTOMATION_", "REPOSITORY_"))
+            and any(marker in upper for marker in ("TOKEN", "KEY", "SECRET", "CREDENTIAL", "AUTH"))
+        )
+        if name in CREDENTIAL_NAMES or upper in ("API_TOKEN", "API_KEY") or namespace_credential:
             environment.pop(name, None)
     environment["GIT_TERMINAL_PROMPT"] = "0"
     environment["GIT_CONFIG_NOSYSTEM"] = "1"
@@ -291,35 +305,64 @@ class GitHubClient:
             raise ValidationError("trusted GitHub metadata is malformed")
         return value
 
-    def files(self, number: int) -> tuple[str, ...]:
-        value = self._get("/repos/" + REPOSITORY + "/pulls/" + str(number) + "/files?per_page=100")
-        if not isinstance(value, list) or len(value) > 100:
+    def files(self, number: int, expected_count: int) -> tuple[str, ...]:
+        """Enumerate every PR file page, bounded and reconciled to PR metadata."""
+        if isinstance(expected_count, bool) or not isinstance(expected_count, int) or not 0 <= expected_count <= MAX_CHANGED_FILES:
             raise ValidationError("trusted GitHub file metadata is malformed")
         paths = []
-        for item in value:
-            path = item.get("filename") if isinstance(item, dict) else None
-            if not isinstance(path, str) or not path or len(path) > 240:
+        for page in range(1, MAX_FILE_PAGES + 1):
+            if len(paths) >= expected_count:
+                break
+            value = self._get("/repos/" + REPOSITORY + "/pulls/" + str(number)
+                              + "/files?per_page=" + str(FILES_PER_PAGE) + "&page=" + str(page))
+            if not isinstance(value, list) or len(value) > FILES_PER_PAGE:
                 raise ValidationError("trusted GitHub file metadata is malformed")
-            paths.append(path)
-        return tuple(sorted(set(paths)))
+            if not value:
+                break
+            for item in value:
+                path = item.get("filename") if isinstance(item, dict) else None
+                if not isinstance(path, str) or not path or len(path) > 240:
+                    raise ValidationError("trusted GitHub file metadata is malformed")
+                paths.append(path)
+        if len(paths) != expected_count or len(set(paths)) != len(paths):
+            raise ValidationError("trusted GitHub file metadata is incomplete")
+        return tuple(sorted(paths))
+
+
+def resolve_metadata(client: object, inputs: ValidationInputs) -> str:
+    """Resolve all live authorization metadata from trusted GitHub REST only."""
+    pr = client.pr(inputs.pull_request_number)
+    changed_files = pr.get("changed_files") if isinstance(pr, Mapping) else None
+    issue = client.issue(inputs.issue_number)
+    paths = client.files(inputs.pull_request_number, changed_files)
+    return validate_metadata(pr, issue, paths, inputs)
+
+
+def authorization_evidence(inputs: ValidationInputs, risk: str, run_id: str, controller_sha: str) -> dict[str, object]:
+    """Emit the hosted gate's only bounded handoff record."""
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "github_run_id": run_id,
+        "trusted_controller_sha": controller_sha,
+        "target_pr_number": inputs.pull_request_number,
+        "target_issue_number": inputs.issue_number,
+        "target_head_sha": inputs.expected_head_sha,
+        "effective_risk": risk,
+        "validation_profile": inputs.profile,
+        "authorization": "passed",
+    }
 
 
 def execute(client: object, inputs: ValidationInputs, environment: Mapping[str, str],
             git_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run) -> dict[str, object]:
-    """Gate twice, use a fresh target checkout, then run one inert trusted profile."""
+    """Re-check live metadata on self-hosted runner, then run one inert profile."""
     run_id, controller_sha = validate_controller_environment(environment)
     effective_risk = "unavailable"
     result = ValidationResult("failed", "unavailable", "metadata-rejected")
     try:
-        pr = client.pr(inputs.pull_request_number)
-        issue = client.issue(inputs.issue_number)
-        paths = client.files(inputs.pull_request_number)
-        effective_risk = validate_metadata(pr, issue, paths, inputs)
-        # Re-fetch all authorization-relevant data immediately before checkout.
-        current_pr = client.pr(inputs.pull_request_number)
-        current_issue = client.issue(inputs.issue_number)
-        current_paths = client.files(inputs.pull_request_number)
-        effective_risk = validate_metadata(current_pr, current_issue, current_paths, inputs)
+        # This is deliberately the second gate: the hosted gate has already
+        # completed, but its observation may not authorize a later runtime.
+        effective_risk = resolve_metadata(client, inputs)
         with tempfile.TemporaryDirectory(prefix="ml-amstress-a6-target-") as target_workspace:
             checkout_exact_target(target_workspace, inputs.expected_head_sha, environment, git_runner)
             result = run_profile(PROFILES[inputs.profile], target_workspace, environment)
@@ -339,7 +382,15 @@ def main() -> int:
     environment = dict(os.environ)
     try:
         inputs = parse_inputs(environment)
-        record = execute(GitHubClient(environment.get("GITHUB_TOKEN")), inputs, environment)
+        client = GitHubClient(environment.get("GITHUB_TOKEN"))
+        if sys.argv[1:] == ["--metadata-gate"]:
+            run_id, controller_sha = validate_controller_environment(environment)
+            record = authorization_evidence(inputs, resolve_metadata(client, inputs), run_id, controller_sha)
+            print(AUTHORIZATION_PREFIX + json.dumps(record, sort_keys=True, separators=(",", ":")))
+            return 0
+        if sys.argv[1:]:
+            raise ValidationError("unsupported controller argument")
+        record = execute(client, inputs, environment)
     except ValidationError:
         # No untrusted input or exception detail may reach Actions logs.
         return 1

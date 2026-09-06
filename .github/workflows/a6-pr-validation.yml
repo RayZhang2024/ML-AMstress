@@ -32,8 +32,42 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  validate-exact-pr:
+  metadata-gate:
     if: github.repository == 'RayZhang2024/ML-AMstress' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      authorized: ${{ steps.gate.outputs.authorized }}
+      target_head_sha: ${{ steps.gate.outputs.target_head_sha }}
+    env:
+      A6_TARGET_PR_NUMBER: ${{ inputs.target_pr_number }}
+      A6_TARGET_ISSUE_NUMBER: ${{ inputs.target_issue_number }}
+      A6_EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+      A6_VALIDATION_PROFILE: ${{ inputs.validation_profile }}
+    steps:
+      - name: Check out trusted main controller
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Resolve bounded trusted metadata
+        id: gate
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          output="$(python -m scripts.a6_pr_validation --metadata-gate)"
+          if [ "$(printf '%s\n' "$output" | wc -l)" -ne 1 ] || [[ "$output" != A6_PR_AUTHORIZATION=* ]]; then
+            echo 'A6.2 metadata gate did not return bounded authorization.' >&2
+            exit 1
+          fi
+          printf '%s\n' "$output" >> "$GITHUB_STEP_SUMMARY"
+          echo 'authorized=true' >> "$GITHUB_OUTPUT"
+          echo "target_head_sha=${{ inputs.expected_head_sha }}" >> "$GITHUB_OUTPUT"
+
+  validate-exact-pr:
+    needs: metadata-gate
+    if: needs.metadata-gate.outputs.authorized == 'true' && github.repository == 'RayZhang2024/ML-AMstress' && github.ref == 'refs/heads/main'
     runs-on: [self-hosted, windows, x64, ml-amstress-abaqus]
     timeout-minutes: 8
     env:

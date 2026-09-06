@@ -35,12 +35,12 @@ def environment(**overrides):
     return values
 
 
-def issue(labels=("status:review", "risk:yellow"), state="open"):
-    return {"state": state, "labels": [{"name": name} for name in labels]}
+def issue(labels=("status:review", "risk:yellow"), state="open", number=112):
+    return {"number": number, "state": state, "labels": [{"name": name} for name in labels]}
 
 
-def pr(head=HEAD, state="open", base="main", repo=validation.REPOSITORY, body="Refs #112\n"):
-    return {"state": state, "base": {"ref": base}, "head": {"sha": head, "repo": {"full_name": repo}}, "body": body}
+def pr(head=HEAD, state="open", base="main", repo=validation.REPOSITORY, body="Refs #112\n", number=1120, changed_files=1):
+    return {"number": number, "changed_files": changed_files, "state": state, "base": {"ref": base}, "head": {"sha": head, "repo": {"full_name": repo}}, "body": body}
 
 
 class FakeClient:
@@ -57,7 +57,9 @@ class FakeClient:
     def issue(self, _):
         return self.issue_data
 
-    def files(self, _):
+    def files(self, _, expected_count):
+        if expected_count != len(self.paths):
+            raise validation.ValidationError("trusted GitHub file metadata is incomplete")
         return tuple(self.paths)
 
 
@@ -74,6 +76,10 @@ class A62ExactPrValidationTests(unittest.TestCase):
         self.assertNotIn("write", WORKFLOW)
         self.assertIn("persist-credentials: false", WORKFLOW)
         self.assertIn("ref: " + "$" + "{{ github.sha }}", WORKFLOW)
+        self.assertIn("metadata-gate:", WORKFLOW)
+        self.assertIn("runs-on: ubuntu-latest", WORKFLOW)
+        self.assertIn("needs: metadata-gate", WORKFLOW)
+        self.assertLess(WORKFLOW.index("metadata-gate:"), WORKFLOW.index("runs-on: [self-hosted, windows, x64, ml-amstress-abaqus]"))
 
     def test_inputs_are_bounded_and_command_injection_is_not_an_input_surface(self):
         values = validation.parse_inputs(environment())
@@ -108,6 +114,13 @@ class A62ExactPrValidationTests(unittest.TestCase):
             with self.assertRaises(validation.ValidationError):
                 validation.validate_metadata(pr(), target, (), inputs)
 
+    def test_metadata_rejects_missing_or_mismatched_live_identity_fields(self):
+        inputs = validation.parse_inputs(environment())
+        for target_pr, target_issue in ((dict(pr(), number=None), issue()), (pr(), dict(issue(), number=None)),
+                                        (dict(pr(), number=1), issue()), (pr(), dict(issue(), number=1))):
+            with self.assertRaises(validation.ValidationError):
+                validation.validate_metadata(target_pr, target_issue, ("docs/example.md",), inputs)
+
     def test_controller_identity_rejects_arbitrary_ref_or_repository(self):
         self.assertEqual(validation.validate_controller_environment(environment()), ("34050000001", "b" * 40))
         for changed in ({"GITHUB_REF": "refs/heads/feature"}, {"GITHUB_REPOSITORY": "fork/repo"}):
@@ -124,16 +137,29 @@ class A62ExactPrValidationTests(unittest.TestCase):
 
     def test_gate_is_rechecked_for_force_push_and_metadata_races(self):
         client = FakeClient()
-        def current_pr(_):
-            client.calls += 1
-            if client.calls > 1:
-                return pr(head="c" * 40)
-            return pr()
-        client.pr = current_pr
+        inputs = validation.parse_inputs(environment())
+        self.assertEqual(validation.resolve_metadata(client, inputs), "risk:yellow")
+        client.pr_data = pr(head="c" * 40)
         with mock.patch.object(validation, "checkout_exact_target") as checkout:
-            record = validation.execute(client, validation.parse_inputs(environment()), environment())
+            record = validation.execute(client, inputs, environment())
         self.assertEqual(record["failure_category"], "metadata-rejected")
         checkout.assert_not_called()
+
+    def test_complete_pagination_rejects_protected_path_after_first_100_and_mismatch(self):
+        pages = [
+            [{"filename": "docs/%03d.md" % number} for number in range(100)],
+            [{"filename": "scripts/a6_pr_validation.py"}],
+        ]
+        client = validation.GitHubClient.__new__(validation.GitHubClient)
+        client._get = mock.Mock(side_effect=pages)
+        paths = client.files(1120, 101)
+        self.assertEqual(len(paths), 101)
+        with self.assertRaises(validation.ValidationError):
+            validation.validate_metadata(pr(changed_files=101), issue(), paths, validation.parse_inputs(environment()))
+        incomplete = validation.GitHubClient.__new__(validation.GitHubClient)
+        incomplete._get = mock.Mock(side_effect=[[{"filename": "docs/one.md"}], []])
+        with self.assertRaisesRegex(validation.ValidationError, "incomplete"):
+            incomplete.files(1120, 101)
 
     def test_exact_target_workspace_is_separate_credential_free_and_head_bound(self):
         calls = []
@@ -171,10 +197,17 @@ class A62ExactPrValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as workspace:
             with mock.patch.object(validation.preflight, "run_preflight", side_effect=inert):
                 result = validation.run_profile(validation.PROFILES["inert-cae-runtime-probe"], workspace,
-                                                environment(GITHUB_TOKEN="secret", CODEX_TOKEN="secret"))
+                                                environment(GITHUB_TOKEN="secret", GH_TOKEN="secret", ACTIONS_RUNTIME_TOKEN="secret",
+                                                            ACTIONS_ID_TOKEN_REQUEST_TOKEN="secret", OPENAI_API_KEY="secret",
+                                                            CODEX_TOKEN="secret", CODEX_AUTH_TOKEN="secret", AUTOMATION_APP_TOKEN="secret",
+                                                            API_TOKEN="secret", SSH_AUTH_SOCK="secret", DSLS_LICENSE_FILE="27000@license"))
         self.assertEqual(result, validation.ValidationResult("passed", "2021", "none"))
         self.assertNotIn("GITHUB_TOKEN", captured)
         self.assertNotIn("CODEX_TOKEN", captured)
+        for name in ("GH_TOKEN", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "OPENAI_API_KEY",
+                     "CODEX_AUTH_TOKEN", "AUTOMATION_APP_TOKEN", "API_TOKEN", "SSH_AUTH_SOCK"):
+            self.assertNotIn(name, captured)
+        self.assertEqual(captured["DSLS_LICENSE_FILE"], "27000@license")
         self.assertEqual(captured["A6_TIMEOUT_SECONDS"], "120")
 
     def test_evidence_is_exact_bounded_and_safe(self):

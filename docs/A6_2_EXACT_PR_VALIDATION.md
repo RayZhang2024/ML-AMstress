@@ -12,14 +12,20 @@ number, exact 40-character head SHA, and the fixed profile identifier
 `refs/heads/main`, with read-only `contents`, `pull-requests`, and `issues`
 permissions and `persist-credentials: false`.
 
-Before—and again immediately before—self-hosted validation, the controller
-requires an open same-repository PR targeting `main`, the supplied exact head,
+Before any self-hosted runner is scheduled, a GitHub-hosted trusted-main
+metadata-gate job resolves and validates the complete live PR/issue/file set.
+It emits only a bounded authorization record. The dependent self-hosted job
+then re-resolves the same metadata immediately before it creates any target
+workspace. Both gates require an open same-repository PR targeting `main`, the supplied exact head,
 an open linked issue with exactly one valid status/risk label, `status:review`,
 and non-RED risk. The deterministic linkage is exactly one standalone PR body
 line: `Refs #<target issue number>`. Any fork, stale head, label ambiguity,
 closed resource, linkage mismatch, or protected path fails closed.
 
-Target changes cannot include `.github/**`, `scripts/a6_*`, or existing A4/A5
+The GitHub PR-file API is paginated at 100 entries. The controller fetches
+every page up to a fixed 1,000-file bound and requires the unique fetched set
+to equal GitHub's authoritative `changed_files` count; incomplete, duplicate,
+or over-bound enumeration fails closed. Target changes cannot include `.github/**`, `scripts/a6_*`, or existing A4/A5
 protected control-plane paths. This reuses the A4/A5 protection contract; both
 ordinary GREEN implementation and A5 repair already reject the `scripts/a6_`
 prefix.
@@ -38,8 +44,9 @@ Abaqus-validation Windows execution identity/runner with no Codex/OpenAI,
 GitHub-write, personal SSH, or unrelated-user credential access is separately
 established and validated.
 
-Child environments remove GitHub, App, OpenAI, Codex/API-token, and SSH-agent
-credentials while preserving only required Abaqus runtime/license context.
+Child environments remove token/key/secret/auth credential variables in the
+GitHub, GH, Actions, OpenAI, Codex, automation, repository, and API families,
+plus `SSH_AUTH_SOCK`, while preserving required Abaqus runtime/license context.
 The profile is bounded by its controller-defined timeout. No profile command,
 arguments, paths, executable content, or evidence configuration comes from a
 PR, issue, label, artifact, commit, or workflow input.
