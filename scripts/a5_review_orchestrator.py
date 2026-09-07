@@ -190,6 +190,13 @@ def _label_names(item: Mapping[str, Any]) -> tuple[str, ...]:
     return names
 
 
+def _repository_identity(value: Any, name: str) -> str:
+    """Return the only repository identity A5 permits in a PR authorization."""
+    if not isinstance(value, Mapping) or value.get("full_name") != REPOSITORY:
+        raise OrchestrationError(name + " must be the trusted repository")
+    return REPOSITORY
+
+
 def _one_label(names: Sequence[str], prefix: str, optional: bool = False) -> str | None:
     selected = [name for name in names if name.startswith(prefix)]
     if len(selected) != 1:
@@ -204,9 +211,7 @@ def _pr_branch(pr: Mapping[str, Any]) -> str:
     if not isinstance(head, Mapping):
         raise OrchestrationError("PR head is malformed")
     branch = head.get("ref")
-    repository = head.get("repo")
-    if not isinstance(repository, Mapping) or repository.get("full_name") != REPOSITORY:
-        raise OrchestrationError("PR head must be an in-repository branch")
+    _repository_identity(head.get("repo"), "PR head repository")
     if not isinstance(branch, str) or not (BRANCH_RE.fullmatch(branch) or PROTECTED_BRANCH_RE.fullmatch(branch)):
         raise OrchestrationError("PR branch is not a deterministic Codex worker branch")
     return branch
@@ -308,26 +313,51 @@ def validate_dependencies(client: Any, contract: green_worker.Contract) -> None:
 
 def authorization_fingerprint(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any], run: WorkflowRun,
                               authorization_comments: Sequence[Mapping[str, Any]] = ()) -> str:
-    """Bind a reviewer result to the complete trusted authorization evidence."""
+    """Bind a reviewer result to canonical, security-relevant authorization evidence."""
     pr_number, branch = validate_pr_identity(pr, run)
     lane = review_lane(branch)
     issue_number = canonical_linked_issue(pr, require_refs=lane == "protected-yellow")
-    base_sha = _sha(pr.get("base", {}).get("sha"), "PR base")
+    base, head = pr.get("base"), pr.get("head")
+    if not isinstance(base, Mapping) or not isinstance(head, Mapping):
+        raise OrchestrationError("PR base or head is malformed")
+    base_sha = _sha(base.get("sha"), "PR base")
+    base_ref = _bounded_text(base.get("ref"), "PR base ref", 300)
+    if base_ref != BASE_BRANCH:
+        raise OrchestrationError("PR must target main with a valid head")
+    base_repository = _repository_identity(base.get("repo"), "PR base repository")
+    head_repository = _repository_identity(head.get("repo"), "PR head repository")
     contract = validate_issue_identity(issue, branch, issue_number, authorization_comments, base_sha)
     dependency_states = []
     for dependency in contract.dependencies:
         evidence = client.dependency_issue(dependency)
         if not isinstance(evidence, Mapping) or str(evidence.get("state", "")).lower() != "closed":
             raise OrchestrationError("issue dependency is not satisfied")
-        dependency_states.append((dependency.repository, dependency.number, "closed"))
-    identity = {"pr_number": pr_number, "pr_title": pr.get("title"), "pr_body": pr.get("body"),
-                "base": pr.get("base"), "head": pr.get("head"), "pr_labels": _label_names(pr),
-                "issue_number": issue_number, "issue_title": issue.get("title"), "issue_body": issue.get("body"),
-                "issue_labels": _label_names(issue), "dependencies": dependency_states}
+        dependency_states.append({"repository": dependency.repository, "number": dependency.number, "state": "closed"})
+    identity = {
+        "repository": REPOSITORY,
+        "pr": {
+            "number": pr_number,
+            "title": _bounded_text(pr.get("title"), "PR title", 300),
+            "body": _bounded_text(pr.get("body"), "PR body"),
+            "labels": _label_names(pr),
+        },
+        "base": {"repository": base_repository, "ref": base_ref, "sha": base_sha},
+        "head": {"repository": head_repository, "branch": branch, "sha": _sha(head.get("sha"), "PR head")},
+        "issue": {
+            "number": issue_number,
+            "title": _bounded_text(issue.get("title"), "issue title", 300),
+            "body": _bounded_text(issue.get("body"), "issue body"),
+            "labels": _label_names(issue),
+        },
+        "dependencies": dependency_states,
+    }
     if lane == "protected-yellow":
-        identity["protected_implementation_authorization"] = _protected_implementation_authorization(
+        marker = _protected_implementation_authorization(
             authorization_comments, issue_number, branch, base_sha
         )
+        identity["protected_implementation_authorization"] = {
+            key: marker[key] for key in ("base_sha", "branch", "issue_number", "schema_version", "scope")
+        }
     return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
