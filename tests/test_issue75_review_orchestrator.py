@@ -59,7 +59,8 @@ def issue(**changes):
 
 def pull_request(**changes):
     value = {"number": 175, "state": "open", "title": "Issue #75", "body": "Refs #75",
-             "labels": labels(), "base": {"ref": "main", "sha": "c" * 40},
+             "labels": labels(), "base": {"ref": "main", "sha": "c" * 40,
+                                              "repo": {"full_name": orchestrator.REPOSITORY}},
              "head": {"sha": HEAD, "ref": BRANCH, "repo": {"full_name": orchestrator.REPOSITORY}}}
     value.update(changes)
     return value
@@ -77,7 +78,7 @@ def protected_issue(**changes):
 
 def protected_pull_request(**changes):
     value = pull_request(
-        base={"ref": "main", "sha": PROTECTED_BASE},
+        base={"ref": "main", "sha": PROTECTED_BASE, "repo": {"full_name": orchestrator.REPOSITORY}},
         head={"sha": HEAD, "ref": PROTECTED_BRANCH, "repo": {"full_name": orchestrator.REPOSITORY}},
     )
     value.update(changes)
@@ -435,6 +436,109 @@ class TrustedRestBoundaryTests(unittest.TestCase):
         with self.assertRaises(orchestrator.OrchestrationError):
             orchestrator.build_snapshot(client.pr_data, client.issue_data, orchestrator.parse_workflow_run(event()),
                                         [{"filename": "create_input.py", "patch": "+physics"}])
+
+
+class AuthorizationFingerprintTests(unittest.TestCase):
+    def _fingerprint(self, pr=None, issue_data=None, comments=(), client=None, run=None):
+        client = client or FakeClient(pr=pr, linked_issue=issue_data, issue_comments=comments)
+        pr = pr or client.pr_data
+        issue_data = issue_data or client.issue_data
+        return orchestrator.authorization_fingerprint(
+            client, pr, issue_data, run or orchestrator.parse_workflow_run(event()), comments
+        )
+
+    def test_irrelevant_nested_rest_metadata_does_not_change_green_or_protected_fingerprint(self):
+        cases = (
+            (pull_request(), issue(), (), "green"),
+            (protected_pull_request(), protected_issue(), (protected_authorization(),), "protected-yellow"),
+        )
+        for pr, issue_data, comments, lane in cases:
+            with self.subTest(lane=lane):
+                changed = copy.deepcopy(pr)
+                changed["base"]["repo"].update({
+                    "url": "https://example.invalid/base", "watchers_count": 999,
+                    "updated_at": "2099-01-01T00:00:00Z",
+                })
+                changed["head"]["repo"].update({
+                    "url": "https://example.invalid/head", "forks_count": 999,
+                    "permissions": {"admin": True},
+                })
+                self.assertEqual(
+                    self._fingerprint(pr, issue_data, comments),
+                    self._fingerprint(changed, issue_data, comments),
+                )
+
+    def test_relevant_green_authorization_fields_are_binding(self):
+        original_pr, original_issue = pull_request(), issue()
+        baseline = self._fingerprint(original_pr, original_issue)
+        changes = (
+            ("head SHA", lambda pr, issue_data, run: (pr["head"].__setitem__("sha", NEW_HEAD),
+                                                        dataclasses.replace(run, head_sha=NEW_HEAD))[1], True),
+            ("head branch", lambda pr, issue_data, run: pr["head"].__setitem__("ref", "codex/issue-75-other"), False),
+            ("head repository", lambda pr, issue_data, run: pr["head"].__setitem__("repo", {"full_name": "fork/repo"}), False),
+            ("base SHA", lambda pr, issue_data, run: pr["base"].__setitem__("sha", "d" * 40), True),
+            ("base ref", lambda pr, issue_data, run: pr["base"].__setitem__("ref", "release"), False),
+            ("base repository", lambda pr, issue_data, run: pr["base"].__setitem__("repo", {"full_name": "fork/repo"}), False),
+            ("PR title", lambda pr, issue_data, run: pr.__setitem__("title", "Changed title"), True),
+            ("PR body", lambda pr, issue_data, run: pr.__setitem__("body", "Refs #75\nChanged"), True),
+            ("PR labels", lambda pr, issue_data, run: pr.__setitem__("labels", labels("changed")), True),
+            ("issue title", lambda pr, issue_data, run: issue_data.__setitem__("title", "Changed issue"), False),
+            ("issue body", lambda pr, issue_data, run: issue_data.__setitem__("body", ISSUE_BODY.replace("Test.", "Changed.", 1)), True),
+            ("issue labels", lambda pr, issue_data, run: issue_data.__setitem__("labels", labels("status:review", "risk:green", "agent:codex", "changed")), True),
+        )
+        for name, change, changes_fingerprint in changes:
+            with self.subTest(name=name):
+                pr, issue_data, run = copy.deepcopy(original_pr), copy.deepcopy(original_issue), orchestrator.parse_workflow_run(event())
+                run = change(pr, issue_data, run) or run
+                try:
+                    observed = self._fingerprint(pr, issue_data, run=run)
+                except orchestrator.OrchestrationError:
+                    self.assertFalse(changes_fingerprint)
+                else:
+                    self.assertTrue(changes_fingerprint)
+                    self.assertNotEqual(observed, baseline)
+
+    def test_dependency_state_and_protected_authorization_changes_fail_closed(self):
+        dependent = issue(body=ISSUE_BODY.replace("- none", "- blocked-by: #1"))
+        client = FakeClient(linked_issue=dependent)
+        client.dependency_issue = lambda _: {"state": "open"}
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "dependency"):
+            self._fingerprint(issue_data=dependent, client=client)
+
+        protected_pr, protected_issue_data = protected_pull_request(), protected_issue()
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "unsupported scope"):
+            self._fingerprint(protected_pr, protected_issue_data, (protected_authorization(scope="runtime"),))
+
+    def test_malformed_repository_ref_sha_and_protected_authorization_fail_closed(self):
+        malformed = (
+            (pull_request(base={"ref": "main", "sha": "c" * 40}), issue(), ()),
+            (pull_request(head={"sha": HEAD, "ref": BRANCH}), issue(), ()),
+            (pull_request(base={"ref": None, "sha": "c" * 40, "repo": {"full_name": orchestrator.REPOSITORY}}), issue(), ()),
+            (pull_request(base={"ref": "main", "sha": "BAD", "repo": {"full_name": orchestrator.REPOSITORY}}), issue(), ()),
+            (protected_pull_request(), protected_issue(), ()),
+        )
+        for pr, issue_data, comments in malformed:
+            with self.subTest(pr=pr):
+                with self.assertRaises(orchestrator.OrchestrationError):
+                    self._fingerprint(pr, issue_data, comments)
+
+    def test_post_review_refetch_rejects_changed_exact_review_state(self):
+        client = FakeClient()
+        current = orchestrator.CurrentReviewState("status:review", "review:pending", HEAD)
+        accepted = orchestrator._state_input(175, 75, HEAD, current, "verdict", clean_verdict())
+        plan = state_contract.transition(accepted)
+        client.pr_data["labels"] = labels("review:clean")
+        client.comment_data.append({
+            "body": orchestrator._audit_body(accepted, plan),
+            "user": {"login": orchestrator.TRUSTED_AUDIT_AUTHOR},
+        })
+        baseline_client = FakeClient()
+        authorization = self._fingerprint(client=baseline_client)
+        with mock.patch.object(orchestrator, "authorization_fingerprint", return_value=authorization):
+            with self.assertRaisesRegex(orchestrator.OrchestrationError, "review state changed"):
+                orchestrator._refetch_unchanged(
+                    client, 175, 75, HEAD, orchestrator.parse_workflow_run(event()), current, authorization
+                )
 
 
 class StateAndRepairTests(unittest.TestCase):
