@@ -24,6 +24,7 @@ from scripts import a5_repair_worker as repair
 from scripts import a5_review_state as state_contract
 from scripts import a5_reviewer as reviewer
 from scripts import codex_issue_worker as green_worker
+from scripts import yellow_lane_policy as yellow_policy
 
 
 REPOSITORY = "RayZhang2024/ML-AMstress"
@@ -56,6 +57,8 @@ PROTECTED_BLOCKER_EVIDENCE_RE = re.compile(r"^<!-- a5\.4b-protected-blocker:(\{.
 PROTECTED_IMPLEMENTATION_AUTHORIZATION_RE = re.compile(
     r"^<!-- protected-implementation-authorization:(\{.*\}) -->$"
 )
+AUTOMATED_YELLOW_PRESTART_RE = re.compile(r"^<!-- a5\.yellow-prestart:(\{.*\}) -->$")
+AUTOMATED_YELLOW_CLAIM_RE = re.compile(r"^<!-- a5\.yellow-claim:(\{.*\}) -->$")
 A5_GITHUB_USER_AGENT = "ml-amstress-a5-review-loop"
 REST_OPERATIONS = frozenset((
     "list-open-prs", "get-pr", "get-issue", "get-dependency-issue",
@@ -212,7 +215,14 @@ def _pr_branch(pr: Mapping[str, Any]) -> str:
         raise OrchestrationError("PR head is malformed")
     branch = head.get("ref")
     _repository_identity(head.get("repo"), "PR head repository")
-    if not isinstance(branch, str) or not (BRANCH_RE.fullmatch(branch) or PROTECTED_BRANCH_RE.fullmatch(branch)):
+    automated_yellow = False
+    try:
+        yellow_policy.validate_yellow_branch(branch)
+        automated_yellow = True
+    except yellow_policy.PolicyError:
+        pass
+    if not isinstance(branch, str) or not (
+            BRANCH_RE.fullmatch(branch) or PROTECTED_BRANCH_RE.fullmatch(branch) or automated_yellow):
         raise OrchestrationError("PR branch is not a deterministic Codex worker branch")
     return branch
 
@@ -222,6 +232,12 @@ def review_lane(branch: str) -> str:
         return "green"
     if PROTECTED_BRANCH_RE.fullmatch(branch):
         return "protected-yellow"
+    try:
+        yellow_policy.validate_yellow_branch(branch)
+    except yellow_policy.PolicyError:
+        pass
+    else:
+        return yellow_policy.AUTOMATED_YELLOW_LANE
     raise OrchestrationError("PR branch is not a deterministic Codex worker branch")
 
 
@@ -272,6 +288,78 @@ def _protected_implementation_authorization(comments: Sequence[Mapping[str, Any]
     return marker
 
 
+def _automated_yellow_authorization(comments: Sequence[Mapping[str, Any]], issue_number: int,
+                                    branch: str, expected_base_sha: str) -> dict[str, str]:
+    """Return one canonical trusted #147 pre-start/claim evidence pair."""
+    if len(comments) > MAX_COMMENTS:
+        raise OrchestrationError("too many issue comments to inspect safely")
+    serialized: dict[str, list[str]] = {"prestart": [], "claim": []}
+    patterns = (
+        ("prestart", AUTOMATED_YELLOW_PRESTART_RE),
+        ("claim", AUTOMATED_YELLOW_CLAIM_RE),
+    )
+    for comment in comments:
+        body = comment.get("body") if isinstance(comment, Mapping) else None
+        if not isinstance(body, str):
+            continue
+        stripped = body.strip()
+        for name, pattern in patterns:
+            prefix = "<!-- a5.yellow-%s:" % name
+            if not stripped.startswith(prefix):
+                continue
+            if len(body) > MAX_AUDIT or body != stripped:
+                raise OrchestrationError("automated YELLOW authorization is invalid")
+            match = pattern.fullmatch(stripped)
+            if match is None:
+                raise OrchestrationError("automated YELLOW authorization is invalid")
+            author = comment.get("user") if isinstance(comment, Mapping) else None
+            if not isinstance(author, Mapping) or author.get("login") != TRUSTED_AUDIT_AUTHOR:
+                raise OrchestrationError("automated YELLOW authorization has an untrusted author")
+            serialized[name].append(match.group(1))
+    if len(serialized["prestart"]) != 1 or len(serialized["claim"]) != 1:
+        raise OrchestrationError("automated YELLOW authorization is missing or ambiguous")
+    try:
+        prestart = yellow_policy.parse_prestart(
+            serialized["prestart"][0], expected_repository=REPOSITORY,
+            expected_issue=issue_number, expected_base=expected_base_sha,
+        )
+        claim = yellow_policy.parse_claim(
+            serialized["claim"][0], expected_repository=REPOSITORY,
+            expected_issue=issue_number, expected_base=expected_base_sha,
+            expected_branch=branch,
+        )
+        canonical_prestart = yellow_policy.serialize_prestart(
+            prestart, expected_repository=REPOSITORY,
+            expected_issue=issue_number, expected_base=expected_base_sha,
+        )
+        canonical_claim = yellow_policy.serialize_claim(
+            claim, expected_repository=REPOSITORY,
+            expected_issue=issue_number, expected_base=expected_base_sha,
+            expected_branch=branch,
+        )
+    except yellow_policy.PolicyError:
+        raise OrchestrationError("automated YELLOW authorization is invalid") from None
+    if (serialized["prestart"][0] != canonical_prestart
+            or serialized["claim"][0] != canonical_claim):
+        raise OrchestrationError("automated YELLOW authorization is not canonical")
+    return {"prestart": canonical_prestart, "claim": canonical_claim}
+
+
+def _automated_yellow_authorized_paths(comments: Sequence[Mapping[str, Any]], issue_number: int,
+                                       branch: str, expected_base_sha: str) -> tuple[str, ...]:
+    authorization = _automated_yellow_authorization(
+        comments, issue_number, branch, expected_base_sha
+    )
+    try:
+        prestart = yellow_policy.parse_prestart(
+            authorization["prestart"], expected_repository=REPOSITORY,
+            expected_issue=issue_number, expected_base=expected_base_sha,
+        )
+    except yellow_policy.PolicyError:
+        raise OrchestrationError("automated YELLOW authorization is invalid") from None
+    return prestart.authorized_paths
+
+
 def validate_issue_identity(issue: Mapping[str, Any], branch: str, issue_number: int,
                             authorization_comments: Sequence[Mapping[str, Any]] = (),
                             authorization_base_sha: str | None = None) -> green_worker.Contract:
@@ -284,7 +372,8 @@ def validate_issue_identity(issue: Mapping[str, Any], branch: str, issue_number:
     if status not in state_contract.ISSUE_STATUSES:
         raise OrchestrationError("linked issue has an unsupported implementation status")
     contract = green_worker.parse_contract(_bounded_text(issue.get("body", ""), "issue body"), REPOSITORY)
-    if review_lane(branch) == "green":
+    lane = review_lane(branch)
+    if lane == "green":
         if "risk:green" not in labels or "agent:codex" not in labels:
             raise OrchestrationError("linked issue is not eligible GREEN Codex work")
         if contract.risk != "risk:green":
@@ -292,6 +381,24 @@ def validate_issue_identity(issue: Mapping[str, Any], branch: str, issue_number:
         expected = green_worker.deterministic_branch_name(issue_number, _bounded_text(issue.get("title", ""), "issue title", 300))
         if branch != expected:
             raise OrchestrationError("PR branch does not match the deterministic issue branch")
+        return contract
+    if lane == yellow_policy.AUTOMATED_YELLOW_LANE:
+        try:
+            yellow_policy.validate_yellow_branch(branch, issue_number)
+            expected = yellow_policy.yellow_branch(
+                issue_number, _bounded_text(issue.get("title", ""), "issue title", 300)
+            )
+        except yellow_policy.PolicyError:
+            raise OrchestrationError("automated YELLOW PR branch does not match the linked issue") from None
+        if branch != expected:
+            raise OrchestrationError("automated YELLOW PR branch does not match the deterministic issue branch")
+        if "risk:yellow" not in labels or contract.risk != "risk:yellow":
+            raise OrchestrationError("linked issue is not eligible automated YELLOW work")
+        if authorization_base_sha is None:
+            raise OrchestrationError("automated YELLOW authorization base SHA is unavailable")
+        _automated_yellow_authorization(
+            authorization_comments, issue_number, branch, authorization_base_sha
+        )
         return contract
     protected_match = PROTECTED_BRANCH_RE.fullmatch(branch)
     if protected_match is None or int(protected_match.group(1)) != issue_number:
@@ -316,7 +423,7 @@ def authorization_fingerprint(client: Any, pr: Mapping[str, Any], issue: Mapping
     """Bind a reviewer result to canonical, security-relevant authorization evidence."""
     pr_number, branch = validate_pr_identity(pr, run)
     lane = review_lane(branch)
-    issue_number = canonical_linked_issue(pr, require_refs=lane == "protected-yellow")
+    issue_number = canonical_linked_issue(pr, require_refs=lane != "green")
     base, head = pr.get("base"), pr.get("head")
     if not isinstance(base, Mapping) or not isinstance(head, Mapping):
         raise OrchestrationError("PR base or head is malformed")
@@ -358,6 +465,10 @@ def authorization_fingerprint(client: Any, pr: Mapping[str, Any], issue: Mapping
         identity["protected_implementation_authorization"] = {
             key: marker[key] for key in ("base_sha", "branch", "issue_number", "schema_version", "scope")
         }
+    elif lane == yellow_policy.AUTOMATED_YELLOW_LANE:
+        identity["automated_yellow_authorization"] = _automated_yellow_authorization(
+            authorization_comments, issue_number, branch, base_sha
+        )
     return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
@@ -498,7 +609,8 @@ def _trusted_green_paths(files: Sequence[reviewer.ChangedFile]) -> tuple[str, ..
 
 
 def build_snapshot(pr: Mapping[str, Any], issue: Mapping[str, Any], run: WorkflowRun,
-                   files: Sequence[Mapping[str, Any]], lane: str = "green") -> tuple[dict[str, Any], tuple[str, ...]]:
+                   files: Sequence[Mapping[str, Any]], lane: str = "green",
+                   authorized_paths: Sequence[str] = ()) -> tuple[dict[str, Any], tuple[str, ...]]:
     if len(files) == 0 or len(files) > MAX_CHANGED_FILES:
         raise OrchestrationError("changed-file evidence is missing or exceeds the safe bound")
     changed = []
@@ -510,6 +622,14 @@ def build_snapshot(pr: Mapping[str, Any], issue: Mapping[str, Any], run: Workflo
         paths = _trusted_green_paths(changed)
     elif lane == "protected-yellow":
         paths = tuple(item.path for item in changed)
+    elif lane == yellow_policy.AUTOMATED_YELLOW_LANE:
+        paths = tuple(item.path for item in changed)
+        allowed = tuple(authorized_paths)
+        allowed_set = set(allowed)
+        if (not paths or len(paths) != len(set(paths)) or not allowed
+                or len(allowed) != len(allowed_set)
+                or any(path not in allowed_set for path in paths)):
+            raise OrchestrationError("automated YELLOW changed paths exceed the authorized scope")
     else:
         raise OrchestrationError("review lane is unsupported")
     head = _sha(pr["head"].get("sha"), "PR head")
@@ -519,8 +639,8 @@ def build_snapshot(pr: Mapping[str, Any], issue: Mapping[str, Any], run: Workflo
                 "pr_body": _bounded_text(pr.get("body", ""), "PR body"),
                 "issue_title": _bounded_text(issue.get("title", ""), "issue title"),
                 "issue_body": _bounded_text(issue.get("body", ""), "issue body"),
-                "issue_labels": list(_label_names(issue)), "declared_risk": "yellow" if lane == "protected-yellow" else "green",
-                "trusted_risk_floor": "yellow" if lane == "protected-yellow" else "green",
+                "issue_labels": list(_label_names(issue)), "declared_risk": "yellow" if lane != "green" else "green",
+                "trusted_risk_floor": "yellow" if lane != "green" else "green",
                 "changed_files": [{"path": item.path, "patch": item.patch} for item in changed],
                 "ci_checks": [{"name": CI_WORKFLOW_NAME, "status": "success"}],
                 "worker_metadata": {"worker_run_id": str(run.run_id), "branch": _pr_branch(pr)}}
@@ -743,10 +863,10 @@ def _refetch_unchanged(client: Any, pr_number: int, issue_number: int, head: str
     pr, issue, comments = client.pr(pr_number), client.issue(issue_number), client.comments(pr_number)
     observed_pr_number, branch = validate_pr_identity(pr, run)
     lane = review_lane(branch)
-    authorization_comments = client.comments(issue_number) if lane == "protected-yellow" else ()
+    authorization_comments = client.comments(issue_number) if lane != "green" else ()
     if observed_pr_number != pr_number or _sha(pr.get("head", {}).get("sha"), "re-fetched PR head") != head:
         raise OrchestrationError("PR head changed after reviewer evidence")
-    if canonical_linked_issue(pr, require_refs=lane == "protected-yellow") != issue_number:
+    if canonical_linked_issue(pr, require_refs=lane != "green") != issue_number:
         raise OrchestrationError("PR issue link changed after reviewer evidence")
     contract = validate_issue_identity(
         issue, branch, issue_number, authorization_comments, _sha(pr.get("base", {}).get("sha"), "re-fetched PR base")
@@ -754,6 +874,14 @@ def _refetch_unchanged(client: Any, pr_number: int, issue_number: int, head: str
     validate_dependencies(client, contract)
     if authorization_fingerprint(client, pr, issue, run, authorization_comments) != authorization:
         raise OrchestrationError("authorization evidence changed after reviewer execution")
+    if lane == yellow_policy.AUTOMATED_YELLOW_LANE:
+        authorized_paths = _automated_yellow_authorized_paths(
+            authorization_comments, issue_number, branch,
+            _sha(pr.get("base", {}).get("sha"), "re-fetched PR base"),
+        )
+        build_snapshot(
+            pr, issue, run, client.changed_files(pr_number), lane, authorized_paths
+        )
     if current_review_state(pr, issue, comments) != prior:
         raise OrchestrationError("review state changed after reviewer evidence")
     return pr, issue, comments
@@ -830,9 +958,9 @@ def orchestrate(client: Any, event: Mapping[str, Any], cwd: str,
     pr = client.pr(matches[0]["number"])
     pr_number, branch = validate_pr_identity(pr, run)
     lane = review_lane(branch)
-    issue_number = canonical_linked_issue(pr, require_refs=lane == "protected-yellow")
+    issue_number = canonical_linked_issue(pr, require_refs=lane != "green")
     issue, comments = client.issue(issue_number), client.comments(pr_number)
-    authorization_comments = client.comments(issue_number) if lane == "protected-yellow" else ()
+    authorization_comments = client.comments(issue_number) if lane != "green" else ()
     contract = validate_issue_identity(
         issue, branch, issue_number, authorization_comments, _sha(pr.get("base", {}).get("sha"), "PR base")
     )
@@ -860,7 +988,15 @@ def orchestrate(client: Any, event: Mapping[str, Any], cwd: str,
     if current.review_label == "review:clean" and current.review_head_sha == run.head_sha:
         return "review-clean"
 
-    snapshot, paths = build_snapshot(pr, issue, run, client.changed_files(pr_number), lane)
+    authorized_paths: Sequence[str] = ()
+    if lane == yellow_policy.AUTOMATED_YELLOW_LANE:
+        authorized_paths = _automated_yellow_authorized_paths(
+            authorization_comments, issue_number, branch,
+            _sha(pr.get("base", {}).get("sha"), "PR base"),
+        )
+    snapshot, paths = build_snapshot(
+        pr, issue, run, client.changed_files(pr_number), lane, authorized_paths
+    )
     trusted_snapshot = reviewer.validate_snapshot(snapshot)
     reviewer.validate_external_requirements(trusted_snapshot)
     authorization = authorization_fingerprint(client, pr, issue, run, authorization_comments)
@@ -881,7 +1017,8 @@ def orchestrate(client: Any, event: Mapping[str, Any], cwd: str,
             client, pr_number, issue_number, run.head_sha, run, current, authorization
         )
         persist_protected_blocker_evidence(client, comments, pr, issue, run.head_sha, verdict)
-        raise OrchestrationError("protected YELLOW review cannot authorize automatic repair")
+        lane_name = "automated YELLOW" if lane == yellow_policy.AUTOMATED_YELLOW_LANE else "protected YELLOW"
+        raise OrchestrationError(lane_name + " review cannot authorize automatic repair")
     pr, issue, comments = _refetch_unchanged(client, pr_number, issue_number, run.head_sha, run, current, authorization)
     transition_input = _state_input(pr_number, issue_number, run.head_sha, current, "verdict", verdict)
     plan = state_contract.transition(transition_input)
