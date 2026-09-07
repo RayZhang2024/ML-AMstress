@@ -732,6 +732,28 @@ class ProtectedBlockerEvidenceTests(unittest.TestCase):
                         )
         self.assertEqual(client.comment_data, [])
 
+    def test_reviewer_prompt_markers_never_reach_blocker_evidence(self):
+        fields = ("message", "required_action", "required_evidence")
+        for field in fields:
+            with self.subTest(field=field):
+                client = self._client()
+                finding = {
+                    "message": "A bounded finding message.",
+                    "required_action": "Make the bounded repair.",
+                    "required_evidence": "Run the bounded regression.",
+                }
+                finding[field] = reviewer.REVIEWER_PROMPT_MARKERS[0]
+                verdict = protected_blocker_verdict((reviewer.Finding(
+                    "F-1", "policy", finding["message"], finding["required_action"],
+                    finding["required_evidence"],
+                ),))
+                with self.assertRaisesRegex(orchestrator.OrchestrationError, "unsafe finding field"):
+                    orchestrator.persist_protected_blocker_evidence(
+                        client, client.comment_data, client.pr_data, client.issue_data, HEAD, verdict
+                    )
+                self.assertFalse(any("a5.4b-protected-blocker" in comment.get("body", "")
+                                     for comment in client.comment_data))
+
     def test_oversized_valid_fields_fail_closed_without_writing_evidence(self):
         client = self._client()
         text = "x" * 1000

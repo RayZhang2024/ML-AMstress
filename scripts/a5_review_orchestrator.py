@@ -521,7 +521,8 @@ def _audit_safe_finding_text(value: Any, name: str) -> str:
         green_worker.OAUTH_TOKEN_ASSIGNMENT_RE, green_worker.JWT_LIKE_TOKEN_RE,
         green_worker.COOKIE_VALUE_RE, green_worker.COMMON_API_KEY_RE,
     )
-    if any(pattern.search(text) for pattern in unsafe_patterns):
+    if (any(marker in text for marker in reviewer.REVIEWER_PROMPT_MARKERS)
+            or any(pattern.search(text) for pattern in unsafe_patterns)):
         raise OrchestrationError("protected blocker evidence has an unsafe finding field")
     if any(os.environ.get(name) and os.environ[name] in text for name in (
         "GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY", "AUTOMATION_APP_TOKEN",
