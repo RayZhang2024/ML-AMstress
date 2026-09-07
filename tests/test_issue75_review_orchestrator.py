@@ -113,6 +113,14 @@ def blocker_verdict():
     return reviewer.ReviewVerdict(1, "blocker", HEAD, "green", "blocker", (finding,), "")
 
 
+def protected_blocker_verdict(findings=None, summary="validated protected blocker"):
+    if findings is None:
+        findings = (reviewer.Finding(
+            "F-1", "policy", "validated finding", "make the protected repair", "[AC-1] validate the policy"
+        ),)
+    return reviewer.ReviewVerdict(1, "blocker", HEAD, "yellow", summary, tuple(findings), "")
+
+
 class FakeClient:
     def __init__(self, pr=None, linked_issue=None, files=None, issue_comments=None):
         self.pr_data = copy.deepcopy(pr or pull_request())
@@ -637,6 +645,127 @@ class StateAndRepairTests(unittest.TestCase):
         with mock.patch.object(orchestrator.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, NEW_HEAD + "\n", "")):
             with self.assertRaises(orchestrator.OrchestrationError):
                 orchestrator.checkout_exact_pr_branch(BRANCH, HEAD, ".")
+
+
+class ProtectedBlockerEvidenceTests(unittest.TestCase):
+    def _client(self):
+        return FakeClient(
+            pr=protected_pull_request(),
+            linked_issue=protected_issue(),
+            files=[{"filename": "docs/AUTONOMOUS_DEVELOPMENT.md", "patch": "+policy"}],
+            issue_comments=[protected_authorization()],
+        )
+
+    def test_validated_protected_blocker_is_persisted_before_fail_closed_stop(self):
+        client = self._client()
+        verdict = protected_blocker_verdict(summary="RAW REVIEWER OUTPUT MUST NOT PERSIST")
+        with mock.patch.object(orchestrator, "_repair") as repair_call:
+            with self.assertRaisesRegex(orchestrator.OrchestrationError, "protected YELLOW review"):
+                orchestrator.orchestrate(client, event(), ".", lambda *_: verdict)
+        repair_call.assert_not_called()
+        markers = orchestrator._protected_blocker_markers(client.comment_data)
+        self.assertEqual(len(markers), 1)
+        marker = markers[0]
+        self.assertEqual(
+            {"schema_version", "repository", "issue_number", "pr_number", "reviewed_head_sha", "effective_risk", "verdict", "findings"},
+            set(marker),
+        )
+        self.assertEqual(
+            (marker["repository"], marker["issue_number"], marker["pr_number"], marker["reviewed_head_sha"], marker["effective_risk"], marker["verdict"]),
+            (orchestrator.REPOSITORY, 75, 175, HEAD, "yellow", "blocker"),
+        )
+        self.assertEqual(marker["findings"], [{
+            "id": "F-1", "message": "validated finding", "required_action": "make the protected repair",
+            "required_evidence": "[AC-1] validate the policy",
+        }])
+        self.assertNotIn("RAW REVIEWER OUTPUT", client.comment_data[-1]["body"])
+        comment_count = len(client.comment_data)
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "protected YELLOW review"):
+            orchestrator.orchestrate(client, event(), ".", lambda *_: verdict)
+        self.assertEqual(len(client.comment_data), comment_count)
+
+    def test_blocker_evidence_is_deterministic_idempotent_and_supports_bounded_multiple_findings(self):
+        client = self._client()
+        findings = (
+            reviewer.Finding("F-1", "policy", "first", "first action", "[AC-1] first"),
+            reviewer.Finding("F-2", "tests", "second", "second action", "[AC-2] second"),
+        )
+        verdict = protected_blocker_verdict(findings)
+        orchestrator.persist_protected_blocker_evidence(client, client.comment_data, client.pr_data, client.issue_data, HEAD, verdict)
+        marker = client.comment_data[-1]["body"]
+        self.assertEqual(marker, orchestrator._protected_blocker_marker(orchestrator._protected_blocker_markers(client.comment_data)[0]))
+        orchestrator.persist_protected_blocker_evidence(client, client.comment_data, client.pr_data, client.issue_data, HEAD, verdict)
+        self.assertEqual([item["body"] for item in client.comment_data].count(marker), 1)
+
+    def test_conflicting_malformed_or_stale_protected_evidence_fails_closed(self):
+        client = self._client()
+        verdict = protected_blocker_verdict()
+        orchestrator.persist_protected_blocker_evidence(client, client.comment_data, client.pr_data, client.issue_data, HEAD, verdict)
+        conflicting = protected_blocker_verdict((reviewer.Finding(
+            "F-1", "policy", "different", "make the protected repair", "[AC-1] validate the policy"
+        ),))
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "conflicts"):
+            orchestrator.persist_protected_blocker_evidence(client, client.comment_data, client.pr_data, client.issue_data, HEAD, conflicting)
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "strictly validated"):
+            orchestrator.persist_protected_blocker_evidence(client, client.comment_data, client.pr_data, client.issue_data, NEW_HEAD, verdict)
+        client.comment_data.append({"body": "<!-- a5.4b-protected-blocker:{bad} -->", "user": {"login": orchestrator.TRUSTED_AUDIT_AUTHOR}})
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "audit marker JSON is malformed"):
+            orchestrator.persist_protected_blocker_evidence(client, client.comment_data, client.pr_data, client.issue_data, HEAD, verdict)
+
+    def test_unvalidated_secrets_and_absolute_paths_never_reach_blocker_evidence(self):
+        client = self._client()
+        unsafe = (
+            reviewer.ReviewVerdict(2, "blocker", HEAD, "yellow", "", (), ""),
+            protected_blocker_verdict((reviewer.Finding(
+                "F-1", "policy", "token=ghp_abcdefghijk", "C:/Users/private/action", "[AC-1] /home/private"
+            ),)),
+        )
+        with mock.patch.dict(os.environ, {"AUTOMATION_APP_TOKEN": "app-secret-value"}, clear=False):
+            environment_secret = protected_blocker_verdict((reviewer.Finding(
+                "F-1", "policy", "app-secret-value", "action", "[AC-1] evidence"
+            ),))
+            for verdict in unsafe + (environment_secret,):
+                with self.subTest(verdict=verdict.schema_version):
+                    with self.assertRaises(orchestrator.OrchestrationError):
+                        orchestrator.persist_protected_blocker_evidence(
+                            client, client.comment_data, client.pr_data, client.issue_data, HEAD, verdict
+                        )
+        self.assertEqual(client.comment_data, [])
+
+    def test_reviewer_prompt_markers_never_reach_blocker_evidence(self):
+        fields = ("message", "required_action", "required_evidence")
+        for field in fields:
+            with self.subTest(field=field):
+                client = self._client()
+                finding = {
+                    "message": "A bounded finding message.",
+                    "required_action": "Make the bounded repair.",
+                    "required_evidence": "Run the bounded regression.",
+                }
+                finding[field] = reviewer.REVIEWER_PROMPT_MARKERS[0]
+                verdict = protected_blocker_verdict((reviewer.Finding(
+                    "F-1", "policy", finding["message"], finding["required_action"],
+                    finding["required_evidence"],
+                ),))
+                with self.assertRaisesRegex(orchestrator.OrchestrationError, "unsafe finding field"):
+                    orchestrator.persist_protected_blocker_evidence(
+                        client, client.comment_data, client.pr_data, client.issue_data, HEAD, verdict
+                    )
+                self.assertFalse(any("a5.4b-protected-blocker" in comment.get("body", "")
+                                     for comment in client.comment_data))
+
+    def test_oversized_valid_fields_fail_closed_without_writing_evidence(self):
+        client = self._client()
+        text = "x" * 1000
+        verdict = protected_blocker_verdict((
+            reviewer.Finding("F-1", "policy", text, text, text),
+            reviewer.Finding("F-2", "tests", text, text, text),
+        ))
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "oversized"):
+            orchestrator.persist_protected_blocker_evidence(
+                client, client.comment_data, client.pr_data, client.issue_data, HEAD, verdict
+            )
+        self.assertEqual(client.comment_data, [])
 
 
 class BoundaryTests(unittest.TestCase):
