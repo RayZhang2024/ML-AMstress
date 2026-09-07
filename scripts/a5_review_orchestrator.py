@@ -40,8 +40,10 @@ MAX_COMMENTS = 200
 MAX_CHANGED_FILES = reviewer.MAX_CHANGED_FILES
 MAX_AUDIT = 4096
 TRUSTED_AUDIT_AUTHOR = "github-actions[bot]"
+TRUSTED_MAINTAINER_AUTHOR = "RayZhang2024"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 BRANCH_RE = re.compile(r"^codex/issue-[1-9][0-9]*-[a-z0-9][a-z0-9-]{0,80}$")
+PROTECTED_BRANCH_RE = re.compile(r"^protected/issue-([1-9][0-9]*)-[a-z0-9][a-z0-9-]{0,80}$")
 REFS_RE = re.compile(r"(?m)^Refs #([1-9][0-9]*)\s*$")
 REFS_LINE_RE = re.compile(r"(?im)^\s*refs\b.*$")
 LEGACY_CLOSING_RE = re.compile(r"(?im)^\s*(?:closes?|fix(?:es)?|resolves?)\s+#([1-9][0-9]*)\s*$")
@@ -49,6 +51,9 @@ LEGACY_CLOSING_LINE_RE = re.compile(r"(?im)^\s*(?:closes?|fix(?:es)?|resolves?)\
 STATE_MARKER_RE = re.compile(r"^<!-- a5\.4a-state:(\{.*\}) -->$")
 CI_MARKER_RE = re.compile(r"^<!-- a5\.4a-ci:(\{.*\}) -->$")
 REPAIR_MARKER_RE = re.compile(r"^<!-- a5\.4a-repair:(\{.*\}) -->$")
+PROTECTED_IMPLEMENTATION_AUTHORIZATION_RE = re.compile(
+    r"^<!-- protected-implementation-authorization:(\{.*\}) -->$"
+)
 A5_GITHUB_USER_AGENT = "ml-amstress-a5-review-loop"
 REST_OPERATIONS = frozenset((
     "list-open-prs", "get-pr", "get-issue", "get-dependency-issue",
@@ -157,7 +162,7 @@ def parse_workflow_run(event: Mapping[str, Any]) -> WorkflowRun:
     return WorkflowRun(run_id, _sha(run.get("head_sha"), "workflow run head"), conclusion)
 
 
-def canonical_linked_issue(pr: Mapping[str, Any]) -> int:
+def canonical_linked_issue(pr: Mapping[str, Any], require_refs: bool = False) -> int:
     """Return exactly one canonical ``Refs #N`` link, or one unambiguous legacy link."""
     body = _bounded_text(pr.get("body", ""), "PR body")
     references = REFS_RE.findall(body)
@@ -168,7 +173,7 @@ def canonical_linked_issue(pr: Mapping[str, Any]) -> int:
         if len(references) != 1 or len(ref_lines) != 1 or legacy or legacy_lines:
             raise OrchestrationError("PR must link exactly one canonical issue")
         return int(references[0])
-    if ref_lines or len(legacy) != 1 or len(legacy_lines) != 1:
+    if require_refs or ref_lines or len(legacy) != 1 or len(legacy_lines) != 1:
         raise OrchestrationError("PR must link exactly one canonical issue")
     return int(legacy[0])
 
@@ -200,9 +205,17 @@ def _pr_branch(pr: Mapping[str, Any]) -> str:
     repository = head.get("repo")
     if not isinstance(repository, Mapping) or repository.get("full_name") != REPOSITORY:
         raise OrchestrationError("PR head must be an in-repository branch")
-    if not isinstance(branch, str) or not BRANCH_RE.fullmatch(branch):
+    if not isinstance(branch, str) or not (BRANCH_RE.fullmatch(branch) or PROTECTED_BRANCH_RE.fullmatch(branch)):
         raise OrchestrationError("PR branch is not a deterministic Codex worker branch")
     return branch
+
+
+def review_lane(branch: str) -> str:
+    if BRANCH_RE.fullmatch(branch):
+        return "green"
+    if PROTECTED_BRANCH_RE.fullmatch(branch):
+        return "protected-yellow"
+    raise OrchestrationError("PR branch is not a deterministic Codex worker branch")
 
 
 def validate_pr_identity(pr: Mapping[str, Any], run: WorkflowRun) -> tuple[int, str]:
@@ -220,23 +233,67 @@ def validate_pr_identity(pr: Mapping[str, Any], run: WorkflowRun) -> tuple[int, 
     return number, _pr_branch(pr)
 
 
-def validate_issue_identity(issue: Mapping[str, Any], branch: str, issue_number: int) -> green_worker.Contract:
+def _protected_implementation_authorization(comments: Sequence[Mapping[str, Any]], issue_number: int,
+                                             branch: str, expected_base_sha: str) -> dict[str, Any]:
+    if len(comments) > MAX_COMMENTS:
+        raise OrchestrationError("too many issue comments to inspect safely")
+    markers = []
+    for comment in comments:
+        body = comment.get("body") if isinstance(comment, Mapping) else None
+        if not isinstance(body, str) or len(body) > MAX_AUDIT:
+            continue
+        value = _marker(PROTECTED_IMPLEMENTATION_AUTHORIZATION_RE, body)
+        if value is None:
+            continue
+        author = comment.get("user") if isinstance(comment, Mapping) else None
+        if not isinstance(author, Mapping) or author.get("login") != TRUSTED_MAINTAINER_AUTHOR:
+            raise OrchestrationError("protected implementation authorization has an untrusted author")
+        markers.append(value)
+    if len(markers) != 1:
+        raise OrchestrationError("protected implementation authorization is missing or ambiguous")
+    marker = markers[0]
+    if set(marker) != {"base_sha", "branch", "issue_number", "schema_version", "scope"}:
+        raise OrchestrationError("protected implementation authorization is malformed")
+    if marker.get("schema_version") != 1 or marker.get("scope") != "implementation-only":
+        raise OrchestrationError("protected implementation authorization has an unsupported scope")
+    if _sha(marker.get("base_sha"), "protected authorization base SHA") != expected_base_sha:
+        raise OrchestrationError("protected implementation authorization base SHA does not match")
+    if marker.get("issue_number") != issue_number:
+        raise OrchestrationError("protected implementation authorization issue does not match")
+    if marker.get("branch") != branch:
+        raise OrchestrationError("protected implementation authorization branch does not match")
+    return marker
+
+
+def validate_issue_identity(issue: Mapping[str, Any], branch: str, issue_number: int,
+                            authorization_comments: Sequence[Mapping[str, Any]] = (),
+                            authorization_base_sha: str | None = None) -> green_worker.Contract:
     if issue.get("number") != issue_number or str(issue.get("state", "")).lower() != "open":
         raise OrchestrationError("linked issue is not the exact open issue")
     labels = _label_names(issue)
-    if "risk:green" not in labels or "agent:codex" not in labels:
-        raise OrchestrationError("linked issue is not eligible GREEN Codex work")
     if len([name for name in labels if name.startswith("risk:")]) != 1:
         raise OrchestrationError("linked issue has ambiguous risk labels")
     status = _one_label(labels, "status:")
     if status not in state_contract.ISSUE_STATUSES:
         raise OrchestrationError("linked issue has an unsupported implementation status")
     contract = green_worker.parse_contract(_bounded_text(issue.get("body", ""), "issue body"), REPOSITORY)
-    if contract.risk != "risk:green":
-        raise OrchestrationError("linked issue contract is not GREEN-only")
-    expected = green_worker.deterministic_branch_name(issue_number, _bounded_text(issue.get("title", ""), "issue title", 300))
-    if branch != expected:
-        raise OrchestrationError("PR branch does not match the deterministic issue branch")
+    if review_lane(branch) == "green":
+        if "risk:green" not in labels or "agent:codex" not in labels:
+            raise OrchestrationError("linked issue is not eligible GREEN Codex work")
+        if contract.risk != "risk:green":
+            raise OrchestrationError("linked issue contract is not GREEN-only")
+        expected = green_worker.deterministic_branch_name(issue_number, _bounded_text(issue.get("title", ""), "issue title", 300))
+        if branch != expected:
+            raise OrchestrationError("PR branch does not match the deterministic issue branch")
+        return contract
+    protected_match = PROTECTED_BRANCH_RE.fullmatch(branch)
+    if protected_match is None or int(protected_match.group(1)) != issue_number:
+        raise OrchestrationError("protected PR branch does not match the linked issue")
+    if "risk:yellow" not in labels or contract.risk != "risk:yellow":
+        raise OrchestrationError("linked issue is not eligible protected YELLOW work")
+    if authorization_base_sha is None:
+        raise OrchestrationError("protected implementation authorization base SHA is unavailable")
+    _protected_implementation_authorization(authorization_comments, issue_number, branch, authorization_base_sha)
     return contract
 
 
@@ -247,12 +304,14 @@ def validate_dependencies(client: Any, contract: green_worker.Contract) -> None:
             raise OrchestrationError("issue dependency is not satisfied")
 
 
-def authorization_fingerprint(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any],
-                              run: WorkflowRun) -> str:
+def authorization_fingerprint(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any], run: WorkflowRun,
+                              authorization_comments: Sequence[Mapping[str, Any]] = ()) -> str:
     """Bind a reviewer result to the complete trusted authorization evidence."""
     pr_number, branch = validate_pr_identity(pr, run)
-    issue_number = canonical_linked_issue(pr)
-    contract = validate_issue_identity(issue, branch, issue_number)
+    lane = review_lane(branch)
+    issue_number = canonical_linked_issue(pr, require_refs=lane == "protected-yellow")
+    base_sha = _sha(pr.get("base", {}).get("sha"), "PR base")
+    contract = validate_issue_identity(issue, branch, issue_number, authorization_comments, base_sha)
     dependency_states = []
     for dependency in contract.dependencies:
         evidence = client.dependency_issue(dependency)
@@ -263,6 +322,10 @@ def authorization_fingerprint(client: Any, pr: Mapping[str, Any], issue: Mapping
                 "base": pr.get("base"), "head": pr.get("head"), "pr_labels": _label_names(pr),
                 "issue_number": issue_number, "issue_title": issue.get("title"), "issue_body": issue.get("body"),
                 "issue_labels": _label_names(issue), "dependencies": dependency_states}
+    if lane == "protected-yellow":
+        identity["protected_implementation_authorization"] = _protected_implementation_authorization(
+            authorization_comments, issue_number, branch, base_sha
+        )
     return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
@@ -403,7 +466,7 @@ def _trusted_green_paths(files: Sequence[reviewer.ChangedFile]) -> tuple[str, ..
 
 
 def build_snapshot(pr: Mapping[str, Any], issue: Mapping[str, Any], run: WorkflowRun,
-                   files: Sequence[Mapping[str, Any]]) -> tuple[dict[str, Any], tuple[str, ...]]:
+                   files: Sequence[Mapping[str, Any]], lane: str = "green") -> tuple[dict[str, Any], tuple[str, ...]]:
     if len(files) == 0 or len(files) > MAX_CHANGED_FILES:
         raise OrchestrationError("changed-file evidence is missing or exceeds the safe bound")
     changed = []
@@ -411,7 +474,12 @@ def build_snapshot(pr: Mapping[str, Any], issue: Mapping[str, Any], run: Workflo
         if not isinstance(item, Mapping) or not isinstance(item.get("filename"), str) or not isinstance(item.get("patch"), str):
             raise OrchestrationError("changed-file patch evidence is incomplete")
         changed.append(reviewer.ChangedFile(item["filename"], item["patch"]))
-    paths = _trusted_green_paths(changed)
+    if lane == "green":
+        paths = _trusted_green_paths(changed)
+    elif lane == "protected-yellow":
+        paths = tuple(item.path for item in changed)
+    else:
+        raise OrchestrationError("review lane is unsupported")
     head = _sha(pr["head"].get("sha"), "PR head")
     snapshot = {"schema_version": 1, "repository": REPOSITORY, "pull_request_number": pr["number"],
                 "issue_number": issue["number"], "base_sha": _sha(pr["base"].get("sha"), "PR base"),
@@ -419,7 +487,8 @@ def build_snapshot(pr: Mapping[str, Any], issue: Mapping[str, Any], run: Workflo
                 "pr_body": _bounded_text(pr.get("body", ""), "PR body"),
                 "issue_title": _bounded_text(issue.get("title", ""), "issue title"),
                 "issue_body": _bounded_text(issue.get("body", ""), "issue body"),
-                "issue_labels": list(_label_names(issue)), "declared_risk": "green", "trusted_risk_floor": "green",
+                "issue_labels": list(_label_names(issue)), "declared_risk": "yellow" if lane == "protected-yellow" else "green",
+                "trusted_risk_floor": "yellow" if lane == "protected-yellow" else "green",
                 "changed_files": [{"path": item.path, "patch": item.patch} for item in changed],
                 "ci_checks": [{"name": CI_WORKFLOW_NAME, "status": "success"}],
                 "worker_metadata": {"worker_run_id": str(run.run_id), "branch": _pr_branch(pr)}}
@@ -502,13 +571,17 @@ def _refetch_unchanged(client: Any, pr_number: int, issue_number: int, head: str
                         prior: CurrentReviewState, authorization: str) -> tuple[Mapping[str, Any], Mapping[str, Any], list[Mapping[str, Any]]]:
     pr, issue, comments = client.pr(pr_number), client.issue(issue_number), client.comments(pr_number)
     observed_pr_number, branch = validate_pr_identity(pr, run)
+    lane = review_lane(branch)
+    authorization_comments = client.comments(issue_number) if lane == "protected-yellow" else ()
     if observed_pr_number != pr_number or _sha(pr.get("head", {}).get("sha"), "re-fetched PR head") != head:
         raise OrchestrationError("PR head changed after reviewer evidence")
-    if canonical_linked_issue(pr) != issue_number:
+    if canonical_linked_issue(pr, require_refs=lane == "protected-yellow") != issue_number:
         raise OrchestrationError("PR issue link changed after reviewer evidence")
-    contract = validate_issue_identity(issue, branch, issue_number)
+    contract = validate_issue_identity(
+        issue, branch, issue_number, authorization_comments, _sha(pr.get("base", {}).get("sha"), "re-fetched PR base")
+    )
     validate_dependencies(client, contract)
-    if authorization_fingerprint(client, pr, issue, run) != authorization:
+    if authorization_fingerprint(client, pr, issue, run, authorization_comments) != authorization:
         raise OrchestrationError("authorization evidence changed after reviewer execution")
     if current_review_state(pr, issue, comments) != prior:
         raise OrchestrationError("review state changed after reviewer evidence")
@@ -520,6 +593,8 @@ def _revalidate_repair_authorization(client: Any, pr: Mapping[str, Any], issue: 
                                      issue_number: int) -> CurrentReviewState:
     """Re-check trusted scope after applying blocker state and before A5.3."""
     pr_number, branch = validate_pr_identity(pr, run)
+    if review_lane(branch) != "green":
+        raise OrchestrationError("protected YELLOW review cannot authorize automatic repair")
     if canonical_linked_issue(pr) != issue_number:
         raise OrchestrationError("PR issue link changed before repair")
     contract = validate_issue_identity(issue, branch, issue_number)
@@ -534,6 +609,8 @@ def _revalidate_repair_authorization(client: Any, pr: Mapping[str, Any], issue: 
 def _repair(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any], comments: Sequence[Mapping[str, Any]],
             current: CurrentReviewState, verdict: reviewer.ReviewVerdict, accepted_blocker_key: str,
             paths: tuple[str, ...], cwd: str) -> str:
+    if review_lane(_pr_branch(pr)) != "green":
+        raise OrchestrationError("protected YELLOW review cannot invoke automatic repair")
     attempts = repair_attempt_count(comments, pr["number"])
     if attempts >= MAX_REPAIR_ATTEMPTS:
         exhausted = "<!-- a5.4a-repair-exhausted:{\"schema_version\":1,\"pr_number\":%d} -->" % pr["number"]
@@ -581,9 +658,13 @@ def orchestrate(client: Any, event: Mapping[str, Any], cwd: str,
         raise OrchestrationError("workflow head must resolve to exactly one open PR")
     pr = client.pr(matches[0]["number"])
     pr_number, branch = validate_pr_identity(pr, run)
-    issue_number = canonical_linked_issue(pr)
+    lane = review_lane(branch)
+    issue_number = canonical_linked_issue(pr, require_refs=lane == "protected-yellow")
     issue, comments = client.issue(issue_number), client.comments(pr_number)
-    contract = validate_issue_identity(issue, branch, issue_number)
+    authorization_comments = client.comments(issue_number) if lane == "protected-yellow" else ()
+    contract = validate_issue_identity(
+        issue, branch, issue_number, authorization_comments, _sha(pr.get("base", {}).get("sha"), "PR base")
+    )
     validate_dependencies(client, contract)
     if run.conclusion != "success":
         record_ci_observation(client, comments, run, pr_number)
@@ -608,21 +689,24 @@ def orchestrate(client: Any, event: Mapping[str, Any], cwd: str,
     if current.review_label == "review:clean" and current.review_head_sha == run.head_sha:
         return "review-clean"
 
-    snapshot, paths = build_snapshot(pr, issue, run, client.changed_files(pr_number))
+    snapshot, paths = build_snapshot(pr, issue, run, client.changed_files(pr_number), lane)
     trusted_snapshot = reviewer.validate_snapshot(snapshot)
     reviewer.validate_external_requirements(trusted_snapshot)
-    authorization = authorization_fingerprint(client, pr, issue, run)
+    authorization = authorization_fingerprint(client, pr, issue, run, authorization_comments)
     if current.review_label not in ("review:pending", "review:blocker") or current.review_head_sha != run.head_sha:
         raise OrchestrationError("current review state is not pending for the exact CI head")
     verdict = review_runner(snapshot, cwd)
     if not isinstance(verdict, reviewer.ReviewVerdict):
         raise OrchestrationError("reviewer returned an invalid verdict object")
-    try:
-        reviewer.validate_repairable_findings(trusted_snapshot, verdict)
-    except reviewer.ReviewError as error:
-        raise OrchestrationError("reviewer repair boundary rejected the verdict") from error
-    if verdict.effective_risk != "green" and verdict.verdict != "escalate":
-        raise OrchestrationError("non-GREEN reviewer risk must not advance or repair automatically")
+    if lane == "green":
+        try:
+            reviewer.validate_repairable_findings(trusted_snapshot, verdict)
+        except reviewer.ReviewError as error:
+            raise OrchestrationError("reviewer repair boundary rejected the verdict") from error
+        if verdict.effective_risk != "green" and verdict.verdict != "escalate":
+            raise OrchestrationError("non-GREEN reviewer risk must not advance or repair automatically")
+    elif verdict.verdict == "blocker":
+        raise OrchestrationError("protected YELLOW review cannot authorize automatic repair")
     pr, issue, comments = _refetch_unchanged(client, pr_number, issue_number, run.head_sha, run, current, authorization)
     transition_input = _state_input(pr_number, issue_number, run.head_sha, current, "verdict", verdict)
     plan = state_contract.transition(transition_input)

@@ -1,7 +1,9 @@
 import copy
+import dataclasses
 import errno
 import io
 import inspect
+import json
 import os
 from pathlib import Path
 import socket
@@ -21,6 +23,8 @@ from scripts import codex_issue_worker as green_worker
 HEAD = "a" * 40
 NEW_HEAD = "b" * 40
 BRANCH = "codex/issue-75-a5-green-task"
+PROTECTED_BRANCH = "protected/issue-75-a5-yellow-task"
+PROTECTED_BASE = "d" * 40
 ROOT = Path(__file__).resolve().parents[1]
 
 ISSUE_BODY = """## Goal
@@ -61,6 +65,40 @@ def pull_request(**changes):
     return value
 
 
+def protected_issue(**changes):
+    value = issue(
+        title="A5 protected yellow task",
+        body=ISSUE_BODY.replace("risk:green", "risk:yellow"),
+        labels=labels("status:review", "risk:yellow"),
+    )
+    value.update(changes)
+    return value
+
+
+def protected_pull_request(**changes):
+    value = pull_request(
+        base={"ref": "main", "sha": PROTECTED_BASE},
+        head={"sha": HEAD, "ref": PROTECTED_BRANCH, "repo": {"full_name": orchestrator.REPOSITORY}},
+    )
+    value.update(changes)
+    return value
+
+
+def protected_authorization(**changes):
+    value = {
+        "base_sha": PROTECTED_BASE,
+        "branch": PROTECTED_BRANCH,
+        "issue_number": 75,
+        "schema_version": 1,
+        "scope": "implementation-only",
+    }
+    value.update(changes)
+    return {
+        "body": "<!-- protected-implementation-authorization:" + json.dumps(value, sort_keys=True, separators=(",", ":")) + " -->",
+        "user": {"login": orchestrator.TRUSTED_MAINTAINER_AUTHOR},
+    }
+
+
 def event(conclusion="success", sha=HEAD):
     return {"workflow_run": {"id": 100, "name": "Normal Python CI", "status": "completed",
                               "conclusion": conclusion, "head_sha": sha}}
@@ -76,11 +114,12 @@ def blocker_verdict():
 
 
 class FakeClient:
-    def __init__(self, pr=None, linked_issue=None, files=None):
+    def __init__(self, pr=None, linked_issue=None, files=None, issue_comments=None):
         self.pr_data = copy.deepcopy(pr or pull_request())
         self.issue_data = copy.deepcopy(linked_issue or issue())
         self.files_data = copy.deepcopy(files or [{"filename": "docs/change.md", "patch": "+safe"}])
         self.comment_data = []
+        self.issue_comment_data = copy.deepcopy(issue_comments or [])
         self.label_updates = []
         self.repository_label_data = labels(*sorted(orchestrator.REVIEW_LABELS))
         self.created_labels = []
@@ -102,8 +141,10 @@ class FakeClient:
             raise AssertionError("wrong GitHub object requested")
 
     def comments(self, number):
-        self.assert_number(number, self.pr_data["number"])
-        return self.comment_data
+        if number == self.pr_data["number"]:
+            return self.comment_data
+        self.assert_number(number, self.issue_data["number"])
+        return self.issue_comment_data
 
     def changed_files(self, number):
         self.assert_number(number, self.pr_data["number"])
@@ -289,6 +330,73 @@ class TrustedRestBoundaryTests(unittest.TestCase):
         with self.assertRaises(orchestrator.OrchestrationError):
             orchestrator.validate_issue_identity(issue(labels=labels("status:review", "risk:green")), BRANCH, 75)
 
+    def test_green_identity_path_remains_unchanged(self):
+        contract = orchestrator.validate_issue_identity(issue(), BRANCH, 75)
+        self.assertEqual(contract.risk, "risk:green")
+        self.assertEqual(orchestrator.review_lane(BRANCH), "green")
+        self.assertEqual(orchestrator.canonical_linked_issue(pull_request(body="Closes #75")), 75)
+
+    def test_protected_yellow_identity_accepts_one_exact_maintainer_authorization(self):
+        pr = protected_pull_request()
+        issue_data = protected_issue()
+        comments = [protected_authorization()]
+        run = orchestrator.parse_workflow_run(event())
+        self.assertEqual(orchestrator.validate_pr_identity(pr, run), (175, PROTECTED_BRANCH))
+        self.assertEqual(orchestrator.canonical_linked_issue(pr, require_refs=True), 75)
+        contract = orchestrator.validate_issue_identity(issue_data, PROTECTED_BRANCH, 75, comments, PROTECTED_BASE)
+        self.assertEqual(contract.risk, "risk:yellow")
+        self.assertEqual(orchestrator.review_lane(PROTECTED_BRANCH), "protected-yellow")
+        snapshot, paths = orchestrator.build_snapshot(
+            pr, issue_data, run, [{"filename": "docs/AUTONOMOUS_DEVELOPMENT.md", "patch": "+policy"}], "protected-yellow"
+        )
+        self.assertEqual((snapshot["declared_risk"], snapshot["trusted_risk_floor"], paths),
+                         ("yellow", "yellow", ("docs/AUTONOMOUS_DEVELOPMENT.md",)))
+
+    def test_protected_yellow_identity_rejects_invalid_authorization_and_identity(self):
+        valid_issue = protected_issue()
+        valid_pr = protected_pull_request()
+        valid_comments = [protected_authorization()]
+        invalid_cases = (
+            (valid_issue, PROTECTED_BRANCH, (), "authorization is missing or ambiguous"),
+            (valid_issue, PROTECTED_BRANCH, valid_comments * 2, "authorization is missing or ambiguous"),
+            (valid_issue, PROTECTED_BRANCH, [{**protected_authorization(), "user": {"login": "untrusted"}}], "untrusted author"),
+            (valid_issue, PROTECTED_BRANCH, [{"body": "<!-- protected-implementation-authorization:{bad} -->", "user": {"login": orchestrator.TRUSTED_MAINTAINER_AUTHOR}}], "marker JSON is malformed"),
+            (valid_issue, PROTECTED_BRANCH, [protected_authorization(schema_version=2)], "unsupported scope"),
+            (valid_issue, PROTECTED_BRANCH, [protected_authorization(scope="runtime")], "unsupported scope"),
+            (valid_issue, PROTECTED_BRANCH, [protected_authorization(issue_number=76)], "issue does not match"),
+            (valid_issue, PROTECTED_BRANCH, [protected_authorization(branch="protected/issue-75-other")], "branch does not match"),
+            (valid_issue, PROTECTED_BRANCH, [protected_authorization(base_sha="e" * 40)], "base SHA does not match"),
+            (valid_issue, PROTECTED_BRANCH, [protected_authorization(base_sha="A" * 40)], "base SHA"),
+            (protected_issue(labels=labels("status:review", "risk:green")), PROTECTED_BRANCH, valid_comments, "protected YELLOW"),
+            (protected_issue(labels=labels("status:unknown", "risk:yellow")), PROTECTED_BRANCH, valid_comments, "unsupported implementation status"),
+            (valid_issue, "protected/issue-76-a5-yellow-task", valid_comments, "branch does not match"),
+        )
+        for issue_data, branch, comments, reason in invalid_cases:
+            with self.subTest(reason=reason):
+                with self.assertRaisesRegex(orchestrator.OrchestrationError, reason):
+                    orchestrator.validate_issue_identity(issue_data, branch, 75, comments, PROTECTED_BASE)
+        for body in ("Closes #75", "Refs #75\nRefs #75", "Refs #75\nCloses #75"):
+            with self.subTest(body=body):
+                with self.assertRaises(orchestrator.OrchestrationError):
+                    orchestrator.canonical_linked_issue(protected_pull_request(body=body), require_refs=True)
+        with self.assertRaises(orchestrator.OrchestrationError):
+            orchestrator.validate_pr_identity(
+                protected_pull_request(head={"sha": HEAD, "ref": PROTECTED_BRANCH, "repo": {"full_name": "fork/repo"}}),
+                orchestrator.parse_workflow_run(event()),
+            )
+        with self.assertRaises(orchestrator.OrchestrationError):
+            orchestrator.validate_pr_identity(valid_pr, orchestrator.parse_workflow_run(event(sha=NEW_HEAD)))
+
+    def test_protected_yellow_dependency_failure_fails_closed(self):
+        contract = orchestrator.validate_issue_identity(
+            protected_issue(), PROTECTED_BRANCH, 75, [protected_authorization()], PROTECTED_BASE
+        )
+        client = FakeClient(pr=protected_pull_request(), linked_issue=protected_issue(), issue_comments=[protected_authorization()])
+        client.dependency_issue = lambda _: {"state": "open"}
+        contract = dataclasses.replace(contract, dependencies=(green_worker.Dependency(orchestrator.REPOSITORY, 1, "#1"),))
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "dependency"):
+            orchestrator.validate_dependencies(client, contract)
+
     def test_open_dependency_fails_closed(self):
         dependent = issue(body=ISSUE_BODY.replace("- none", "- blocked-by: #1"))
         contract = orchestrator.validate_issue_identity(dependent, BRANCH, 75)
@@ -330,6 +438,21 @@ class StateAndRepairTests(unittest.TestCase):
         self.assertEqual(len(client.comment_data), 2)
         self.assertIn("a5.4a-state", client.comment_data[-1]["body"])
 
+    def test_protected_yellow_valid_authorization_can_complete_review_without_repair(self):
+        client = FakeClient(
+            pr=protected_pull_request(),
+            linked_issue=protected_issue(),
+            files=[{"filename": "docs/AUTONOMOUS_DEVELOPMENT.md", "patch": "+policy"}],
+            issue_comments=[protected_authorization()],
+        )
+        verdict = reviewer.ReviewVerdict(1, "clean", HEAD, "yellow", "clean", (), "")
+        self.assertEqual(orchestrator.orchestrate(client, event(), ".", lambda *_: verdict), "review-clean")
+        self.assertEqual([item["name"] for item in client.pr_data["labels"]], ["review:clean"])
+        self.assertEqual(
+            [item["name"] for item in client.issue_data["labels"] if item["name"].startswith("status:")],
+            ["status:review"],
+        )
+
     def test_escalation_persists_on_later_head(self):
         client = FakeClient()
         verdict = reviewer.ReviewVerdict(1, "escalate", HEAD, "red", "unsafe", (), "scientific ambiguity")
@@ -344,6 +467,40 @@ class StateAndRepairTests(unittest.TestCase):
         with self.assertRaises(orchestrator.OrchestrationError):
             orchestrator.orchestrate(client, event(), ".", lambda *_: verdict)
         self.assertEqual([item["name"] for item in client.pr_data["labels"]], ["review:pending"])
+
+    def test_protected_yellow_authorization_never_invokes_green_repair_or_runtime(self):
+        client = FakeClient(
+            pr=protected_pull_request(),
+            linked_issue=protected_issue(),
+            files=[{"filename": "docs/AUTONOMOUS_DEVELOPMENT.md", "patch": "+policy"}],
+            issue_comments=[protected_authorization()],
+        )
+        verdict = reviewer.ReviewVerdict(1, "blocker", HEAD, "yellow", "blocked", (reviewer.Finding(
+            "F-1", "tests", "blocked", "update", "[AC-1] test passes"),), "")
+        with mock.patch.object(orchestrator, "_repair") as repair_call:
+            with self.assertRaisesRegex(orchestrator.OrchestrationError, "protected YELLOW review"):
+                orchestrator.orchestrate(client, event(), ".", lambda *_: verdict)
+        repair_call.assert_not_called()
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "protected YELLOW review"):
+            orchestrator._repair(
+                client, client.pr_data, client.issue_data, (),
+                orchestrator.CurrentReviewState("status:in-progress", "review:blocker", HEAD), verdict,
+                "a5.2:" + "a" * 64, ("docs/AUTONOMOUS_DEVELOPMENT.md",), ".",
+            )
+
+    def test_protected_authorization_race_blocks_verdict_transition(self):
+        client = FakeClient(
+            pr=protected_pull_request(),
+            linked_issue=protected_issue(),
+            files=[{"filename": "docs/AUTONOMOUS_DEVELOPMENT.md", "patch": "+policy"}],
+            issue_comments=[protected_authorization()],
+        )
+        def changed_authorization(*_):
+            client.issue_comment_data = [protected_authorization(base_sha="e" * 40)]
+            return reviewer.ReviewVerdict(1, "clean", HEAD, "yellow", "clean", (), "")
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "base SHA does not match"):
+            orchestrator.orchestrate(client, event(), ".", changed_authorization)
+        self.assertNotIn("review:clean", [item["name"] for item in client.pr_data["labels"]])
 
     def test_external_only_finding_is_rejected_before_a53(self):
         external_body = ISSUE_BODY.replace(
