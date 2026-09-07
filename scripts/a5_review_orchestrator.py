@@ -345,6 +345,21 @@ def _automated_yellow_authorization(comments: Sequence[Mapping[str, Any]], issue
     return {"prestart": canonical_prestart, "claim": canonical_claim}
 
 
+def _automated_yellow_authorized_paths(comments: Sequence[Mapping[str, Any]], issue_number: int,
+                                       branch: str, expected_base_sha: str) -> tuple[str, ...]:
+    authorization = _automated_yellow_authorization(
+        comments, issue_number, branch, expected_base_sha
+    )
+    try:
+        prestart = yellow_policy.parse_prestart(
+            authorization["prestart"], expected_repository=REPOSITORY,
+            expected_issue=issue_number, expected_base=expected_base_sha,
+        )
+    except yellow_policy.PolicyError:
+        raise OrchestrationError("automated YELLOW authorization is invalid") from None
+    return prestart.authorized_paths
+
+
 def validate_issue_identity(issue: Mapping[str, Any], branch: str, issue_number: int,
                             authorization_comments: Sequence[Mapping[str, Any]] = (),
                             authorization_base_sha: str | None = None) -> green_worker.Contract:
@@ -594,7 +609,8 @@ def _trusted_green_paths(files: Sequence[reviewer.ChangedFile]) -> tuple[str, ..
 
 
 def build_snapshot(pr: Mapping[str, Any], issue: Mapping[str, Any], run: WorkflowRun,
-                   files: Sequence[Mapping[str, Any]], lane: str = "green") -> tuple[dict[str, Any], tuple[str, ...]]:
+                   files: Sequence[Mapping[str, Any]], lane: str = "green",
+                   authorized_paths: Sequence[str] = ()) -> tuple[dict[str, Any], tuple[str, ...]]:
     if len(files) == 0 or len(files) > MAX_CHANGED_FILES:
         raise OrchestrationError("changed-file evidence is missing or exceeds the safe bound")
     changed = []
@@ -604,8 +620,16 @@ def build_snapshot(pr: Mapping[str, Any], issue: Mapping[str, Any], run: Workflo
         changed.append(reviewer.ChangedFile(item["filename"], item["patch"]))
     if lane == "green":
         paths = _trusted_green_paths(changed)
-    elif lane in ("protected-yellow", yellow_policy.AUTOMATED_YELLOW_LANE):
+    elif lane == "protected-yellow":
         paths = tuple(item.path for item in changed)
+    elif lane == yellow_policy.AUTOMATED_YELLOW_LANE:
+        paths = tuple(item.path for item in changed)
+        allowed = tuple(authorized_paths)
+        allowed_set = set(allowed)
+        if (not paths or len(paths) != len(set(paths)) or not allowed
+                or len(allowed) != len(allowed_set)
+                or any(path not in allowed_set for path in paths)):
+            raise OrchestrationError("automated YELLOW changed paths exceed the authorized scope")
     else:
         raise OrchestrationError("review lane is unsupported")
     head = _sha(pr["head"].get("sha"), "PR head")
@@ -850,6 +874,14 @@ def _refetch_unchanged(client: Any, pr_number: int, issue_number: int, head: str
     validate_dependencies(client, contract)
     if authorization_fingerprint(client, pr, issue, run, authorization_comments) != authorization:
         raise OrchestrationError("authorization evidence changed after reviewer execution")
+    if lane == yellow_policy.AUTOMATED_YELLOW_LANE:
+        authorized_paths = _automated_yellow_authorized_paths(
+            authorization_comments, issue_number, branch,
+            _sha(pr.get("base", {}).get("sha"), "re-fetched PR base"),
+        )
+        build_snapshot(
+            pr, issue, run, client.changed_files(pr_number), lane, authorized_paths
+        )
     if current_review_state(pr, issue, comments) != prior:
         raise OrchestrationError("review state changed after reviewer evidence")
     return pr, issue, comments
@@ -956,7 +988,15 @@ def orchestrate(client: Any, event: Mapping[str, Any], cwd: str,
     if current.review_label == "review:clean" and current.review_head_sha == run.head_sha:
         return "review-clean"
 
-    snapshot, paths = build_snapshot(pr, issue, run, client.changed_files(pr_number), lane)
+    authorized_paths: Sequence[str] = ()
+    if lane == yellow_policy.AUTOMATED_YELLOW_LANE:
+        authorized_paths = _automated_yellow_authorized_paths(
+            authorization_comments, issue_number, branch,
+            _sha(pr.get("base", {}).get("sha"), "PR base"),
+        )
+    snapshot, paths = build_snapshot(
+        pr, issue, run, client.changed_files(pr_number), lane, authorized_paths
+    )
     trusted_snapshot = reviewer.validate_snapshot(snapshot)
     reviewer.validate_external_requirements(trusted_snapshot)
     authorization = authorization_fingerprint(client, pr, issue, run, authorization_comments)

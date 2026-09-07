@@ -474,7 +474,8 @@ class TrustedRestBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(contract.risk, "risk:yellow")
         snapshot, paths = orchestrator.build_snapshot(
-            pr, issue_data, run, [{"filename": "docs/change.md", "patch": "+safe"}], "automated-yellow"
+            pr, issue_data, run, [{"filename": "docs/change.md", "patch": "+safe"}],
+            "automated-yellow", ("docs/change.md",),
         )
         self.assertEqual((snapshot["declared_risk"], snapshot["trusted_risk_floor"], paths),
                          ("yellow", "yellow", ("docs/change.md",)))
@@ -829,6 +830,89 @@ class StateAndRepairTests(unittest.TestCase):
             ["status:review"],
         )
 
+    def test_automated_yellow_exact_or_subset_authorized_paths_reach_review(self):
+        cases = (
+            (["docs/change.md"], [{"filename": "docs/change.md", "patch": "+safe"}]),
+            (["docs/change.md", "tests/test_safe.py"], [{"filename": "docs/change.md", "patch": "+safe"}]),
+        )
+        for authorized, files in cases:
+            with self.subTest(authorized=authorized, files=files):
+                prestart = json.dumps(
+                    automated_prestart_value(authorized_paths=authorized),
+                    sort_keys=True, separators=(",", ":"),
+                )
+                client = FakeClient(
+                    pr=automated_yellow_pull_request(), linked_issue=automated_yellow_issue(),
+                    files=files, issue_comments=automated_evidence(prestart=prestart),
+                )
+                review_call = mock.Mock(return_value=reviewer.ReviewVerdict(
+                    1, "clean", HEAD, "yellow", "clean", (), ""
+                ))
+                self.assertEqual(orchestrator.orchestrate(client, event(), ".", review_call), "review-clean")
+                review_call.assert_called_once()
+
+    def test_automated_yellow_unauthorized_or_duplicate_paths_fail_before_review_and_repair(self):
+        cases = (
+            [{"filename": "tests/unauthorized.py", "patch": "+unsafe"}],
+            [
+                {"filename": "docs/change.md", "patch": "+safe"},
+                {"filename": "tests/unauthorized.py", "patch": "+unsafe"},
+            ],
+            [
+                {"filename": "docs/change.md", "patch": "+safe"},
+                {"filename": "docs/change.md", "patch": "+duplicate"},
+            ],
+        )
+        for files in cases:
+            with self.subTest(files=files):
+                client = FakeClient(
+                    pr=automated_yellow_pull_request(), linked_issue=automated_yellow_issue(),
+                    files=files, issue_comments=automated_evidence(),
+                )
+                review_call = mock.Mock()
+                with mock.patch.object(orchestrator, "_repair") as repair_call:
+                    with self.assertRaisesRegex(orchestrator.OrchestrationError, "authorized scope"):
+                        orchestrator.orchestrate(client, event(), ".", review_call)
+                review_call.assert_not_called()
+                repair_call.assert_not_called()
+                self.assertEqual(orchestrator.repair_attempt_count(client.comment_data, 175), 0)
+
+    def test_automated_yellow_new_head_cannot_gain_review_with_added_unauthorized_path(self):
+        client = FakeClient(
+            pr=automated_yellow_pull_request(
+                head={"sha": NEW_HEAD, "ref": AUTOMATED_YELLOW_BRANCH,
+                      "repo": {"full_name": orchestrator.REPOSITORY}},
+            ),
+            linked_issue=automated_yellow_issue(),
+            files=[
+                {"filename": "docs/change.md", "patch": "+safe"},
+                {"filename": "tests/unauthorized.py", "patch": "+unsafe"},
+            ],
+            issue_comments=automated_evidence(),
+        )
+        review_call = mock.Mock()
+        with mock.patch.object(orchestrator, "_repair") as repair_call:
+            with self.assertRaisesRegex(orchestrator.OrchestrationError, "authorized scope"):
+                orchestrator.orchestrate(client, event(sha=NEW_HEAD), ".", review_call)
+        review_call.assert_not_called()
+        repair_call.assert_not_called()
+
+    def test_automated_yellow_changed_paths_after_review_fail_before_verdict_or_repair(self):
+        client = FakeClient(
+            pr=automated_yellow_pull_request(), linked_issue=automated_yellow_issue(),
+            issue_comments=automated_evidence(),
+        )
+
+        def add_unauthorized_path(*_):
+            client.files_data.append({"filename": "tests/unauthorized.py", "patch": "+unsafe"})
+            return reviewer.ReviewVerdict(1, "clean", HEAD, "yellow", "clean", (), "")
+
+        with mock.patch.object(orchestrator, "_repair") as repair_call:
+            with self.assertRaisesRegex(orchestrator.OrchestrationError, "authorized scope"):
+                orchestrator.orchestrate(client, event(), ".", add_unauthorized_path)
+        repair_call.assert_not_called()
+        self.assertNotIn("review:clean", [item["name"] for item in client.pr_data["labels"]])
+
     def test_escalation_persists_on_later_head(self):
         client = FakeClient()
         verdict = reviewer.ReviewVerdict(1, "escalate", HEAD, "red", "unsafe", (), "scientific ambiguity")
@@ -915,7 +999,7 @@ class StateAndRepairTests(unittest.TestCase):
                         client.pr_data["head"]["sha"] = NEW_HEAD
                     else:
                         changed = json.dumps(
-                            automated_prestart_value(trusted_base_sha="f" * 40),
+                            automated_prestart_value(authorized_paths=["docs/other.md"]),
                             sort_keys=True, separators=(",", ":"),
                         )
                         client.issue_comment_data = automated_evidence(prestart=changed)
