@@ -1,8 +1,11 @@
 import copy
+import errno
 import io
 import inspect
 import os
 from pathlib import Path
+import socket
+import ssl
 import subprocess
 import unittest
 import urllib.error
@@ -191,14 +194,45 @@ class TrustedRestBoundaryTests(unittest.TestCase):
         for forbidden in (secret, "https://", "private/repo", "GitHub error", "payload", "C:/Users"):
             self.assertNotIn(forbidden, str(raised.exception))
 
-    def test_transport_failure_exposes_only_fixed_category(self):
+    def test_transport_failure_exposes_only_allowlisted_category(self):
         secret = "sentinel-token-transport-C:/Users/private"
         with mock.patch.object(orchestrator.urllib.request, "urlopen", side_effect=urllib.error.URLError(secret)):
             with self.assertRaises(orchestrator.OrchestrationError) as raised:
                 orchestrator.GitHubClient(secret).issue(75)
-        self.assertEqual(str(raised.exception), "GitHub get-issue: transport failure")
+        self.assertEqual(str(raised.exception), "GitHub get-issue: transport other-transport")
         self.assertNotIn(secret, str(raised.exception))
         self.assertNotIn("C:/Users", str(raised.exception))
+
+    def test_transport_categories_are_deterministic_bounded_and_secret_safe(self):
+        secret = "sentinel-token-C:/Users/private?proxy=secret"
+        cases = (
+            (TimeoutError(secret), "timeout"),
+            (socket.gaierror(socket.EAI_NONAME, secret), "dns"),
+            (ssl.SSLCertVerificationError(secret), "tls"),
+            (OSError("Tunnel connection failed: 407 Proxy " + secret), "proxy"),
+            (OSError(errno.ECONNREFUSED, secret), "connection-refused"),
+            (OSError(errno.ECONNRESET, secret), "connection-reset"),
+            (OSError(errno.ENETUNREACH, secret), "connection-unreachable"),
+            (ValueError(secret), "other-transport"),
+        )
+        for reason, expected in cases:
+            failure = urllib.error.URLError(reason)
+            self.assertEqual(orchestrator.classify_transport_failure(failure), expected)
+            with mock.patch.object(orchestrator.urllib.request, "urlopen", side_effect=failure):
+                with self.assertRaises(orchestrator.OrchestrationError) as raised:
+                    orchestrator.GitHubClient(secret).issue(75)
+            diagnostic = str(raised.exception)
+            self.assertEqual(diagnostic, "GitHub get-issue: transport " + expected)
+            self.assertIn(expected, orchestrator.TRANSPORT_CATEGORIES)
+            for forbidden in (secret, "C:/Users", "Proxy", "Tunnel", "407"):
+                self.assertNotIn(forbidden, diagnostic)
+
+    def test_http_failure_remains_distinct_from_transport_classification(self):
+        failure = urllib.error.HTTPError("https://example.invalid", 503, "unused", {}, None)
+        with mock.patch.object(orchestrator.urllib.request, "urlopen", side_effect=failure):
+            with self.assertRaises(orchestrator.OrchestrationError) as raised:
+                orchestrator.GitHubClient("sentinel-token").issue(75)
+        self.assertEqual(str(raised.exception), "GitHub get-issue: HTTP 503")
 
     def test_invalid_response_exposes_only_fixed_category(self):
         secret = "sentinel-token-invalid-json-prompt-C:/Users/private"

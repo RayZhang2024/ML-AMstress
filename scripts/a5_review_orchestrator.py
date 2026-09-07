@@ -7,10 +7,13 @@ out; their Codex child processes remain credential-isolated.
 from __future__ import annotations
 
 import dataclasses
+import errno
 import hashlib
 import json
 import os
 import re
+import socket
+import ssl
 import subprocess
 import sys
 import urllib.error
@@ -52,10 +55,57 @@ REST_OPERATIONS = frozenset((
     "list-comments", "list-labels", "create-label", "list-changed-files",
     "set-labels", "create-audit-comment",
 ))
+TRANSPORT_CATEGORIES = frozenset((
+    "timeout", "dns", "tls", "proxy", "connection-refused",
+    "connection-reset", "connection-unreachable", "other-transport",
+))
+_CONNECTION_REFUSED_ERRNOS = frozenset((errno.ECONNREFUSED, 10061))
+_CONNECTION_RESET_ERRNOS = frozenset((errno.ECONNRESET, errno.ECONNABORTED, 10053, 10054))
+_CONNECTION_UNREACHABLE_ERRNOS = frozenset((
+    errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ENETDOWN, 10050, 10051, 10064, 10065,
+))
 
 
 class OrchestrationError(Exception):
     """A fail-closed trusted orchestration failure."""
+
+
+def _proxy_reason(reason: object) -> bool:
+    """Identify only urllib's stable proxy/tunnel wording without reporting it."""
+    if not isinstance(reason, OSError) or not isinstance(reason.args, tuple):
+        return False
+    return any(
+        isinstance(value, str)
+        and any(marker in value.lower() for marker in (
+            "tunnel connection failed", "proxy error", "proxy authentication required",
+        ))
+        for value in reason.args
+    )
+
+
+def classify_transport_failure(error: urllib.error.URLError) -> str:
+    """Return an allowlisted category; never return transport exception text."""
+    reason = error.reason
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return "timeout"
+    if isinstance(reason, socket.gaierror):
+        return "dns"
+    if isinstance(reason, ssl.SSLError):
+        return "tls"
+    if _proxy_reason(reason):
+        return "proxy"
+    if isinstance(reason, ConnectionRefusedError):
+        return "connection-refused"
+    if isinstance(reason, (ConnectionResetError, ConnectionAbortedError)):
+        return "connection-reset"
+    code = getattr(reason, "errno", None)
+    if code in _CONNECTION_REFUSED_ERRNOS:
+        return "connection-refused"
+    if code in _CONNECTION_RESET_ERRNOS:
+        return "connection-reset"
+    if code in _CONNECTION_UNREACHABLE_ERRNOS:
+        return "connection-unreachable"
+    return "other-transport"
 
 
 def require_automation_app_token() -> str:
@@ -612,8 +662,9 @@ class GitHubClient:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as error:
             raise OrchestrationError("GitHub %s: HTTP %d" % (operation, error.code)) from None
-        except urllib.error.URLError:
-            raise OrchestrationError("GitHub %s: transport failure" % operation) from None
+        except urllib.error.URLError as error:
+            category = classify_transport_failure(error)
+            raise OrchestrationError("GitHub %s: transport %s" % (operation, category)) from None
         except (UnicodeError, ValueError):
             raise OrchestrationError("GitHub %s: invalid response" % operation) from None
 
