@@ -31,7 +31,8 @@ Never place runner registration tokens, GitHub tokens, ChatGPT session material,
 The trusted worker owns all GitHub/control-plane actions: eligibility and dependency checks, deterministic branch claim, labels/status, authoritative normal-Python validation, commit, trusted push, PR creation, and merge/no-merge policy. Sandboxed Codex treats its immutable claimed snapshot as authoritative and owns only the local Necessity Gate, scoped implementation, optional focused checks, and truthful reporting. It does not query GitHub or receive GitHub/API credentials.
 
 ```text
-risk:green + status:ready + fresh agent:codex label
+completed pre-start GREEN risk assessment + risk:green + status:ready
+  + fresh agent:codex label
   -> trusted preflight, eligibility, deterministic claim -> status:in-progress
   -> sandboxed Codex implementation / optional focused checks
   -> trusted normal-Python validation, commit, push, PR -> status:review
@@ -40,6 +41,16 @@ risk:green + status:ready + fresh agent:codex label
 ```
 
 Failure preserves the deterministic claim branch and blocks the work; do not launch a concurrent worker. Authorized recovery must deliberately delete or reset a failed claim before a new trigger can claim it.
+
+The `agent:codex` event is an ordinary GREEN trigger only. Before adding it,
+the orchestration owner must assess expected paths, affected behavior/control-
+plane surface, generated artifacts, and required evidence. Protected paths,
+YELLOW/RED behavior or evidence, and uncertain scope must use the separately
+authorized protected path and fail closed rather than being inferred GREEN.
+An existing label is not a retry mechanism. `status:review` records a
+reviewable implementation, not issue completion: controlled runtime/scientific
+acceptance and human merge remain separately authorized, and merge is bound to
+the reviewed current head where the platform supports it.
 
 ## Rebuild and preflight checklist
 
