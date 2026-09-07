@@ -18,6 +18,7 @@ from scripts import a5_repair_worker as repair
 from scripts import a5_review_state as state_contract
 from scripts import a5_reviewer as reviewer
 from scripts import codex_issue_worker as green_worker
+from scripts import yellow_lane_policy as yellow_policy
 
 
 HEAD = "a" * 40
@@ -25,6 +26,9 @@ NEW_HEAD = "b" * 40
 BRANCH = "codex/issue-75-a5-green-task"
 PROTECTED_BRANCH = "protected/issue-75-a5-yellow-task"
 PROTECTED_BASE = "d" * 40
+AUTOMATED_YELLOW_TITLE = "A5 automated yellow task"
+AUTOMATED_YELLOW_BRANCH = yellow_policy.yellow_branch(75, AUTOMATED_YELLOW_TITLE)
+AUTOMATED_YELLOW_BASE = "e" * 40
 ROOT = Path(__file__).resolve().parents[1]
 
 ISSUE_BODY = """## Goal
@@ -98,6 +102,67 @@ def protected_authorization(**changes):
         "body": "<!-- protected-implementation-authorization:" + json.dumps(value, sort_keys=True, separators=(",", ":")) + " -->",
         "user": {"login": orchestrator.TRUSTED_MAINTAINER_AUTHOR},
     }
+
+
+def automated_yellow_issue(**changes):
+    value = issue(
+        title=AUTOMATED_YELLOW_TITLE,
+        body=ISSUE_BODY.replace("risk:green", "risk:yellow"),
+        labels=labels("status:review", "risk:yellow"),
+    )
+    value.update(changes)
+    return value
+
+
+def automated_yellow_pull_request(**changes):
+    value = pull_request(
+        base={"ref": "main", "sha": AUTOMATED_YELLOW_BASE,
+              "repo": {"full_name": orchestrator.REPOSITORY}},
+        head={"sha": HEAD, "ref": AUTOMATED_YELLOW_BRANCH,
+              "repo": {"full_name": orchestrator.REPOSITORY}},
+    )
+    value.update(changes)
+    return value
+
+
+def automated_prestart_value(**changes):
+    value = {
+        "schema_version": 1,
+        "repository": orchestrator.REPOSITORY,
+        "issue_number": 75,
+        "trusted_base_sha": AUTOMATED_YELLOW_BASE,
+        "declared_risk": "yellow",
+        "effective_risk": "yellow",
+        "authorized_paths": ["docs/change.md"],
+        "scientific_runtime_prohibited": True,
+    }
+    value.update(changes)
+    return value
+
+
+def automated_claim_value(**changes):
+    value = {
+        "schema_version": 1,
+        "repository": orchestrator.REPOSITORY,
+        "issue_number": 75,
+        "trusted_base_sha": AUTOMATED_YELLOW_BASE,
+        "branch": AUTOMATED_YELLOW_BRANCH,
+        "lane": yellow_policy.AUTOMATED_YELLOW_LANE,
+    }
+    value.update(changes)
+    return value
+
+
+def automated_evidence(prestart=None, claim=None, author=None):
+    prestart_json = (yellow_policy.serialize_prestart(automated_prestart_value())
+                     if prestart is None else prestart)
+    claim_json = (yellow_policy.serialize_claim(automated_claim_value())
+                  if claim is None else claim)
+    login = author or orchestrator.TRUSTED_AUDIT_AUTHOR
+    return [
+        {"body": "<!-- a5.yellow-prestart:" + prestart_json + " -->", "user": {"login": login}},
+        {"body": "<!-- a5.yellow-claim:" + claim_json + " -->", "user": {"login": login}},
+    ]
 
 
 def event(conclusion="success", sha=HEAD):
@@ -396,6 +461,169 @@ class TrustedRestBoundaryTests(unittest.TestCase):
         with self.assertRaises(orchestrator.OrchestrationError):
             orchestrator.validate_pr_identity(valid_pr, orchestrator.parse_workflow_run(event(sha=NEW_HEAD)))
 
+    def test_automated_yellow_identity_accepts_exact_trusted_policy_evidence(self):
+        pr = automated_yellow_pull_request()
+        issue_data = automated_yellow_issue()
+        evidence = automated_evidence()
+        run = orchestrator.parse_workflow_run(event())
+        self.assertEqual(orchestrator.validate_pr_identity(pr, run), (175, AUTOMATED_YELLOW_BRANCH))
+        self.assertEqual(orchestrator.review_lane(AUTOMATED_YELLOW_BRANCH), "automated-yellow")
+        self.assertEqual(orchestrator.canonical_linked_issue(pr, require_refs=True), 75)
+        contract = orchestrator.validate_issue_identity(
+            issue_data, AUTOMATED_YELLOW_BRANCH, 75, evidence, AUTOMATED_YELLOW_BASE
+        )
+        self.assertEqual(contract.risk, "risk:yellow")
+        snapshot, paths = orchestrator.build_snapshot(
+            pr, issue_data, run, [{"filename": "docs/change.md", "patch": "+safe"}], "automated-yellow"
+        )
+        self.assertEqual((snapshot["declared_risk"], snapshot["trusted_risk_floor"], paths),
+                         ("yellow", "yellow", ("docs/change.md",)))
+
+    def test_automated_yellow_requires_one_canonical_trusted_evidence_pair(self):
+        valid = automated_evidence()
+        noncanonical_prestart = json.dumps(automated_prestart_value(), sort_keys=False)
+        malformed_extra = {
+            "body": "<!-- a5.yellow-claim:not-json -->",
+            "user": {"login": orchestrator.TRUSTED_AUDIT_AUTHOR},
+        }
+        oversized_extra = {
+            "body": "<!-- a5.yellow-prestart:" + ("x" * orchestrator.MAX_AUDIT) + " -->",
+            "user": {"login": orchestrator.TRUSTED_AUDIT_AUTHOR},
+        }
+        cases = (
+            ((), "missing or ambiguous"),
+            ((valid[0],), "missing or ambiguous"),
+            ((valid[1],), "missing or ambiguous"),
+            (tuple(valid + [valid[0]]), "missing or ambiguous"),
+            (tuple(valid + [valid[1]]), "missing or ambiguous"),
+            (tuple([valid[0], automated_evidence(prestart=json.dumps(
+                automated_prestart_value(authorized_paths=["docs/other.md"]),
+                sort_keys=True, separators=(",", ":"),
+            ))[0], valid[1]]), "missing or ambiguous"),
+            (tuple(automated_evidence(author="untrusted")), "untrusted author"),
+            (tuple(automated_evidence(prestart="{bad}")), "invalid"),
+            (tuple(automated_evidence(claim="{bad}")), "invalid"),
+            (tuple(valid + [malformed_extra]), "invalid"),
+            (tuple(valid + [oversized_extra]), "invalid"),
+            (tuple([{"body": " " + valid[0]["body"], "user": valid[0]["user"]}, valid[1]]), "invalid"),
+            (tuple(automated_evidence(prestart=noncanonical_prestart)), "not canonical"),
+        )
+        for evidence, reason in cases:
+            with self.subTest(reason=reason):
+                with self.assertRaisesRegex(orchestrator.OrchestrationError, reason):
+                    orchestrator.validate_issue_identity(
+                        automated_yellow_issue(), AUTOMATED_YELLOW_BRANCH, 75,
+                        evidence, AUTOMATED_YELLOW_BASE,
+                    )
+
+    def test_automated_yellow_policy_bindings_fail_closed(self):
+        def raw(value):
+            return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+        invalid_pairs = (
+            (raw(automated_prestart_value(repository="other/repo")), raw(automated_claim_value())),
+            (raw(automated_prestart_value(issue_number=76)), raw(automated_claim_value())),
+            (raw(automated_prestart_value(trusted_base_sha="f" * 40)), raw(automated_claim_value())),
+            (raw(automated_prestart_value(declared_risk="green")), raw(automated_claim_value())),
+            (raw(automated_prestart_value(effective_risk="red")), raw(automated_claim_value())),
+            (raw(automated_prestart_value(scientific_runtime_prohibited=False)), raw(automated_claim_value())),
+            (raw(automated_prestart_value(extra="unknown")), raw(automated_claim_value())),
+            (raw(automated_prestart_value()), raw(automated_claim_value(repository="other/repo"))),
+            (raw(automated_prestart_value()), raw(automated_claim_value(issue_number=76))),
+            (raw(automated_prestart_value()), raw(automated_claim_value(trusted_base_sha="f" * 40))),
+            (raw(automated_prestart_value()), raw(automated_claim_value(branch="codex-yellow/issue-75-other"))),
+            (raw(automated_prestart_value()), raw(automated_claim_value(lane="green"))),
+            (raw(automated_prestart_value()), raw(automated_claim_value(extra="unknown"))),
+        )
+        for prestart, claim in invalid_pairs:
+            with self.subTest(prestart=prestart, claim=claim):
+                with self.assertRaisesRegex(orchestrator.OrchestrationError, "invalid"):
+                    orchestrator.validate_issue_identity(
+                        automated_yellow_issue(), AUTOMATED_YELLOW_BRANCH, 75,
+                        automated_evidence(prestart, claim), AUTOMATED_YELLOW_BASE,
+                    )
+
+    def test_automated_yellow_identity_rejects_wrong_issue_link_state_risk_and_dependency(self):
+        evidence = automated_evidence()
+        for body in ("Closes #75", "Refs #75\nRefs #75", "Refs #75\nCloses #75"):
+            with self.subTest(body=body):
+                with self.assertRaises(orchestrator.OrchestrationError):
+                    issue_number = orchestrator.canonical_linked_issue(
+                        automated_yellow_pull_request(body=body), require_refs=True
+                    )
+                    self.assertEqual(issue_number, 75)
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "branch does not match"):
+            orchestrator.validate_issue_identity(
+                automated_yellow_issue(number=76), AUTOMATED_YELLOW_BRANCH, 76,
+                evidence, AUTOMATED_YELLOW_BASE,
+            )
+        invalid_issues = (
+            automated_yellow_issue(state="closed"),
+            automated_yellow_issue(labels=labels("status:review")),
+            automated_yellow_issue(labels=labels("status:ready", "status:review", "risk:yellow")),
+            automated_yellow_issue(labels=labels("status:unknown", "risk:yellow")),
+            automated_yellow_issue(labels=labels("status:review", "risk:green")),
+            automated_yellow_issue(labels=labels("status:review", "risk:yellow", "risk:red")),
+            automated_yellow_issue(body=ISSUE_BODY),
+        )
+        for issue_data in invalid_issues:
+            with self.subTest(issue=issue_data):
+                with self.assertRaises(orchestrator.OrchestrationError):
+                    orchestrator.validate_issue_identity(
+                        issue_data, AUTOMATED_YELLOW_BRANCH, 75, evidence, AUTOMATED_YELLOW_BASE
+                    )
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "branch does not match"):
+            orchestrator.validate_issue_identity(
+                automated_yellow_issue(), "codex-yellow/issue-76-other", 75, evidence, AUTOMATED_YELLOW_BASE
+            )
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "deterministic issue branch"):
+            orchestrator.validate_issue_identity(
+                automated_yellow_issue(), "codex-yellow/issue-75-other", 75,
+                evidence, AUTOMATED_YELLOW_BASE,
+            )
+        for pr, run in (
+            (automated_yellow_pull_request(head={"sha": HEAD, "ref": AUTOMATED_YELLOW_BRANCH,
+                                                "repo": {"full_name": "fork/repo"}}),
+             orchestrator.parse_workflow_run(event())),
+            (automated_yellow_pull_request(), orchestrator.parse_workflow_run(event(sha=NEW_HEAD))),
+        ):
+            with self.assertRaises(orchestrator.OrchestrationError):
+                orchestrator.validate_pr_identity(pr, run)
+        wrong_base_client = FakeClient(
+            pr=automated_yellow_pull_request(base={
+                "ref": "main", "sha": "f" * 40,
+                "repo": {"full_name": orchestrator.REPOSITORY},
+            }),
+            linked_issue=automated_yellow_issue(), issue_comments=evidence,
+        )
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "authorization is invalid"):
+            orchestrator.orchestrate(wrong_base_client, event(), ".", mock.Mock())
+        dependent = automated_yellow_issue(body=automated_yellow_issue()["body"].replace("- none", "- blocked-by: #1"))
+        contract = orchestrator.validate_issue_identity(
+            dependent, AUTOMATED_YELLOW_BRANCH, 75, evidence, AUTOMATED_YELLOW_BASE
+        )
+        client = FakeClient(pr=automated_yellow_pull_request(), linked_issue=dependent, issue_comments=evidence)
+        client.dependency_issue = lambda _: {"state": "open"}
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "dependency"):
+            orchestrator.validate_dependencies(client, contract)
+
+    def test_manual_and_automated_yellow_authorizations_are_not_interchangeable(self):
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "protected implementation authorization"):
+            orchestrator.validate_issue_identity(
+                protected_issue(), PROTECTED_BRANCH, 75, automated_evidence(), PROTECTED_BASE
+            )
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "automated YELLOW authorization"):
+            orchestrator.validate_issue_identity(
+                automated_yellow_issue(), AUTOMATED_YELLOW_BRANCH, 75,
+                [protected_authorization()], AUTOMATED_YELLOW_BASE,
+            )
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "eligible GREEN"):
+            orchestrator.validate_issue_identity(
+                automated_yellow_issue(), BRANCH, 75, automated_evidence(), AUTOMATED_YELLOW_BASE
+            )
+        with self.assertRaises(orchestrator.OrchestrationError):
+            orchestrator.review_lane("codex-yellow/issue-75-Bad")
+
     def test_protected_yellow_dependency_failure_fails_closed(self):
         contract = orchestrator.validate_issue_identity(
             protected_issue(), PROTECTED_BRANCH, 75, [protected_authorization()], PROTECTED_BASE
@@ -451,6 +679,7 @@ class AuthorizationFingerprintTests(unittest.TestCase):
         cases = (
             (pull_request(), issue(), (), "green"),
             (protected_pull_request(), protected_issue(), (protected_authorization(),), "protected-yellow"),
+            (automated_yellow_pull_request(), automated_yellow_issue(), tuple(automated_evidence()), "automated-yellow"),
         )
         for pr, issue_data, comments, lane in cases:
             with self.subTest(lane=lane):
@@ -467,6 +696,27 @@ class AuthorizationFingerprintTests(unittest.TestCase):
                     self._fingerprint(pr, issue_data, comments),
                     self._fingerprint(changed, issue_data, comments),
                 )
+
+    def test_automated_yellow_fingerprint_is_deterministic_and_binds_both_evidence_records(self):
+        pr, issue_data, evidence = (
+            automated_yellow_pull_request(), automated_yellow_issue(), tuple(automated_evidence())
+        )
+        baseline = self._fingerprint(pr, issue_data, evidence)
+        self.assertEqual(baseline, self._fingerprint(copy.deepcopy(pr), copy.deepcopy(issue_data), evidence))
+        changed_prestart = json.dumps(
+            automated_prestart_value(authorized_paths=["docs/other.md"]),
+            sort_keys=True, separators=(",", ":"),
+        )
+        changed_evidence = tuple(automated_evidence(prestart=changed_prestart))
+        self.assertNotEqual(baseline, self._fingerprint(pr, issue_data, changed_evidence))
+        for invalid in (
+            tuple(automated_evidence(claim=json.dumps(
+                automated_claim_value(trusted_base_sha="f" * 40), sort_keys=True, separators=(",", ":")
+            ))),
+            tuple(automated_evidence(author="untrusted")),
+        ):
+            with self.assertRaises(orchestrator.OrchestrationError):
+                self._fingerprint(pr, issue_data, invalid)
 
     def test_relevant_green_authorization_fields_are_binding(self):
         original_pr, original_issue = pull_request(), issue()
@@ -565,6 +815,20 @@ class StateAndRepairTests(unittest.TestCase):
             ["status:review"],
         )
 
+    def test_automated_yellow_valid_authorization_can_complete_clean_review(self):
+        client = FakeClient(
+            pr=automated_yellow_pull_request(),
+            linked_issue=automated_yellow_issue(),
+            issue_comments=automated_evidence(),
+        )
+        verdict = reviewer.ReviewVerdict(1, "clean", HEAD, "yellow", "clean", (), "")
+        self.assertEqual(orchestrator.orchestrate(client, event(), ".", lambda *_: verdict), "review-clean")
+        self.assertEqual([item["name"] for item in client.pr_data["labels"]], ["review:clean"])
+        self.assertEqual(
+            [item["name"] for item in client.issue_data["labels"] if item["name"].startswith("status:")],
+            ["status:review"],
+        )
+
     def test_escalation_persists_on_later_head(self):
         client = FakeClient()
         verdict = reviewer.ReviewVerdict(1, "escalate", HEAD, "red", "unsafe", (), "scientific ambiguity")
@@ -599,6 +863,98 @@ class StateAndRepairTests(unittest.TestCase):
                 orchestrator.CurrentReviewState("status:in-progress", "review:blocker", HEAD), verdict,
                 "a5.2:" + "a" * 64, ("docs/AUTONOMOUS_DEVELOPMENT.md",), ".",
             )
+
+    def test_automated_yellow_blocker_persists_audit_but_never_invokes_repair(self):
+        client = FakeClient(
+            pr=automated_yellow_pull_request(),
+            linked_issue=automated_yellow_issue(),
+            issue_comments=automated_evidence(),
+        )
+        verdict = protected_blocker_verdict()
+        with mock.patch.object(orchestrator, "_repair") as repair_call:
+            with self.assertRaisesRegex(orchestrator.OrchestrationError, "automated YELLOW review"):
+                orchestrator.orchestrate(client, event(), ".", lambda *_: verdict)
+        repair_call.assert_not_called()
+        self.assertEqual(orchestrator.repair_attempt_count(client.comment_data, 175), 0)
+        blocker_markers = [
+            item["body"] for item in client.comment_data if "a5.4b-protected-blocker" in item["body"]
+        ]
+        self.assertEqual(len(blocker_markers), 1)
+
+    def test_automated_yellow_authorization_race_blocks_transition_and_repair(self):
+        client = FakeClient(
+            pr=automated_yellow_pull_request(),
+            linked_issue=automated_yellow_issue(),
+            issue_comments=automated_evidence(),
+        )
+
+        def changed_authorization(*_):
+            changed_claim = json.dumps(
+                automated_claim_value(trusted_base_sha="f" * 40), sort_keys=True, separators=(",", ":")
+            )
+            client.issue_comment_data = automated_evidence(claim=changed_claim)
+            return reviewer.ReviewVerdict(1, "clean", HEAD, "yellow", "clean", (), "")
+
+        with mock.patch.object(orchestrator, "_repair") as repair_call:
+            with self.assertRaisesRegex(orchestrator.OrchestrationError, "authorization is invalid"):
+                orchestrator.orchestrate(client, event(), ".", changed_authorization)
+        repair_call.assert_not_called()
+        self.assertNotIn("review:clean", [item["name"] for item in client.pr_data["labels"]])
+
+    def test_automated_yellow_prestart_and_head_races_fail_closed_after_review(self):
+        for race in ("prestart", "head"):
+            with self.subTest(race=race):
+                client = FakeClient(
+                    pr=automated_yellow_pull_request(),
+                    linked_issue=automated_yellow_issue(),
+                    issue_comments=automated_evidence(),
+                )
+
+                def changed_authorization(*_):
+                    if race == "head":
+                        client.pr_data["head"]["sha"] = NEW_HEAD
+                    else:
+                        changed = json.dumps(
+                            automated_prestart_value(trusted_base_sha="f" * 40),
+                            sort_keys=True, separators=(",", ":"),
+                        )
+                        client.issue_comment_data = automated_evidence(prestart=changed)
+                    return reviewer.ReviewVerdict(1, "clean", HEAD, "yellow", "clean", (), "")
+
+                with mock.patch.object(orchestrator, "_repair") as repair_call:
+                    with self.assertRaises(orchestrator.OrchestrationError):
+                        orchestrator.orchestrate(client, event(), ".", changed_authorization)
+                repair_call.assert_not_called()
+                self.assertNotIn("review:clean", [item["name"] for item in client.pr_data["labels"]])
+
+    def test_automated_yellow_escalation_and_invalid_blocker_risk_fail_closed(self):
+        def client():
+            return FakeClient(
+                pr=automated_yellow_pull_request(), linked_issue=automated_yellow_issue(),
+                issue_comments=automated_evidence(),
+            )
+
+        escalated = reviewer.ReviewVerdict(
+            1, "escalate", HEAD, "red", "scientific ambiguity", (), "controlled validation required"
+        )
+        escalation_client = client()
+        self.assertEqual(
+            orchestrator.orchestrate(escalation_client, event(), ".", lambda *_: escalated),
+            "review-escalated",
+        )
+        self.assertIn("review:escalated", [item["name"] for item in escalation_client.pr_data["labels"]])
+
+        wrong_risk = reviewer.ReviewVerdict(
+            1, "blocker", HEAD, "green", "wrong floor", (reviewer.Finding(
+                "F-1", "scope", "risk floor lost", "stop", "retain YELLOW risk"
+            ),), ""
+        )
+        blocked_client = client()
+        with mock.patch.object(orchestrator, "_repair") as repair_call:
+            with self.assertRaises(orchestrator.OrchestrationError):
+                orchestrator.orchestrate(blocked_client, event(), ".", lambda *_: wrong_risk)
+        repair_call.assert_not_called()
+        self.assertFalse(any("a5.4b-protected-blocker" in item["body"] for item in blocked_client.comment_data))
 
     def test_protected_authorization_race_blocks_verdict_transition(self):
         client = FakeClient(
