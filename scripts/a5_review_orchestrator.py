@@ -39,6 +39,7 @@ MAX_REPAIR_ATTEMPTS = repair.MAX_REPAIR_ATTEMPTS
 MAX_COMMENTS = 200
 MAX_CHANGED_FILES = reviewer.MAX_CHANGED_FILES
 MAX_AUDIT = 4096
+MAX_PROTECTED_BLOCKER_FINDINGS = 50
 TRUSTED_AUDIT_AUTHOR = "github-actions[bot]"
 TRUSTED_MAINTAINER_AUTHOR = "RayZhang2024"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -51,6 +52,7 @@ LEGACY_CLOSING_LINE_RE = re.compile(r"(?im)^\s*(?:closes?|fix(?:es)?|resolves?)\
 STATE_MARKER_RE = re.compile(r"^<!-- a5\.4a-state:(\{.*\}) -->$")
 CI_MARKER_RE = re.compile(r"^<!-- a5\.4a-ci:(\{.*\}) -->$")
 REPAIR_MARKER_RE = re.compile(r"^<!-- a5\.4a-repair:(\{.*\}) -->$")
+PROTECTED_BLOCKER_EVIDENCE_RE = re.compile(r"^<!-- a5\.4b-protected-blocker:(\{.*\}) -->$")
 PROTECTED_IMPLEMENTATION_AUTHORIZATION_RE = re.compile(
     r"^<!-- protected-implementation-authorization:(\{.*\}) -->$"
 )
@@ -506,6 +508,144 @@ def _repair_marker(pr_number: int, issue_number: int, head: str, decision_key: s
     return result
 
 
+def _audit_safe_finding_text(value: Any, name: str) -> str:
+    """Accept only parser-valid text that is safe to place in a trusted audit."""
+    try:
+        text = reviewer._text(value, name, 1000)
+    except reviewer.ReviewError:
+        raise OrchestrationError("protected blocker evidence has an unsafe finding field") from None
+    unsafe_patterns = (
+        reviewer.LOCAL_ABSOLUTE_PATH_RE, reviewer.APP_TOKEN_ASSIGNMENT_RE,
+        reviewer.GITHUB_PAT_RE, reviewer.QUOTED_AUTHORIZATION_VALUE_RE,
+        green_worker.AUTHORIZATION_VALUE_RE, green_worker.TOKEN_ASSIGNMENT_RE,
+        green_worker.OAUTH_TOKEN_ASSIGNMENT_RE, green_worker.JWT_LIKE_TOKEN_RE,
+        green_worker.COOKIE_VALUE_RE, green_worker.COMMON_API_KEY_RE,
+    )
+    if any(pattern.search(text) for pattern in unsafe_patterns):
+        raise OrchestrationError("protected blocker evidence has an unsafe finding field")
+    if any(os.environ.get(name) and os.environ[name] in text for name in (
+        "GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY", "AUTOMATION_APP_TOKEN",
+    )):
+        raise OrchestrationError("protected blocker evidence has an unsafe finding field")
+    return text
+
+
+def _protected_blocker_payload(pr: Mapping[str, Any], issue: Mapping[str, Any], head: str,
+                               verdict: reviewer.ReviewVerdict) -> dict[str, Any]:
+    """Freeze only strict reviewer fields for protected-lane maintainer evidence."""
+    if (not isinstance(verdict, reviewer.ReviewVerdict)
+            or verdict.schema_version != reviewer.VERDICT_SCHEMA_VERSION
+            or verdict.verdict != "blocker" or verdict.effective_risk != "yellow"
+            or verdict.reviewed_head_sha != head or _sha(pr.get("head", {}).get("sha"), "PR head") != head):
+        raise OrchestrationError("protected blocker evidence is not a strictly validated YELLOW blocker")
+    pr_number, issue_number = pr.get("number"), issue.get("number")
+    if (isinstance(pr_number, bool) or not isinstance(pr_number, int) or pr_number < 1
+            or isinstance(issue_number, bool) or not isinstance(issue_number, int) or issue_number < 1):
+        raise OrchestrationError("protected blocker evidence has invalid identity")
+    if not isinstance(verdict.findings, tuple) or not 1 <= len(verdict.findings) <= MAX_PROTECTED_BLOCKER_FINDINGS:
+        raise OrchestrationError("protected blocker evidence findings are unbounded")
+    findings, identifiers = [], set()
+    for finding in verdict.findings:
+        if (not isinstance(finding, reviewer.Finding) or not isinstance(finding.id, str)
+                or not reviewer.FINDING_ID_RE.fullmatch(finding.id) or finding.id in identifiers
+                or finding.category not in reviewer.FINDING_CATEGORIES):
+            raise OrchestrationError("protected blocker evidence has an invalid finding")
+        identifiers.add(finding.id)
+        findings.append({
+            "id": finding.id,
+            "message": _audit_safe_finding_text(finding.message, "finding message"),
+            "required_action": _audit_safe_finding_text(finding.required_action, "finding required_action"),
+            "required_evidence": _audit_safe_finding_text(finding.required_evidence, "finding required_evidence"),
+        })
+    return {
+        "schema_version": 1,
+        "repository": REPOSITORY,
+        "issue_number": issue_number,
+        "pr_number": pr_number,
+        "reviewed_head_sha": head,
+        "effective_risk": "yellow",
+        "verdict": "blocker",
+        "findings": findings,
+    }
+
+
+def _protected_blocker_marker(payload: Mapping[str, Any]) -> str:
+    expected = {
+        "schema_version", "repository", "issue_number", "pr_number", "reviewed_head_sha",
+        "effective_risk", "verdict", "findings",
+    }
+    if not isinstance(payload, Mapping) or set(payload) != expected:
+        raise OrchestrationError("protected blocker evidence is malformed")
+    if (payload.get("schema_version") != 1 or payload.get("repository") != REPOSITORY
+            or payload.get("effective_risk") != "yellow" or payload.get("verdict") != "blocker"):
+        raise OrchestrationError("protected blocker evidence is malformed")
+    _sha(payload.get("reviewed_head_sha"), "protected blocker evidence head")
+    if (isinstance(payload.get("issue_number"), bool) or not isinstance(payload.get("issue_number"), int)
+            or payload["issue_number"] < 1 or isinstance(payload.get("pr_number"), bool)
+            or not isinstance(payload.get("pr_number"), int) or payload["pr_number"] < 1):
+        raise OrchestrationError("protected blocker evidence is malformed")
+    findings = payload.get("findings")
+    if not isinstance(findings, list) or not 1 <= len(findings) <= MAX_PROTECTED_BLOCKER_FINDINGS:
+        raise OrchestrationError("protected blocker evidence findings are unbounded")
+    normalized, identifiers = [], set()
+    for finding in findings:
+        if not isinstance(finding, Mapping) or set(finding) != {"id", "message", "required_action", "required_evidence"}:
+            raise OrchestrationError("protected blocker evidence has an invalid finding")
+        identifier = finding.get("id")
+        if not isinstance(identifier, str) or not reviewer.FINDING_ID_RE.fullmatch(identifier) or identifier in identifiers:
+            raise OrchestrationError("protected blocker evidence has an invalid finding")
+        identifiers.add(identifier)
+        normalized.append({
+            "id": identifier,
+            "message": _audit_safe_finding_text(finding.get("message"), "finding message"),
+            "required_action": _audit_safe_finding_text(finding.get("required_action"), "finding required_action"),
+            "required_evidence": _audit_safe_finding_text(finding.get("required_evidence"), "finding required_evidence"),
+        })
+    canonical = dict(payload)
+    canonical["findings"] = normalized
+    result = "<!-- a5.4b-protected-blocker:" + json.dumps(canonical, sort_keys=True, separators=(",", ":")) + " -->"
+    if len(result) > MAX_AUDIT:
+        raise OrchestrationError("protected blocker evidence is oversized")
+    return result
+
+
+def _protected_blocker_markers(comments: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    if len(comments) > MAX_COMMENTS:
+        raise OrchestrationError("too many comments to inspect safely")
+    markers = []
+    for comment in comments:
+        body = comment.get("body") if isinstance(comment, Mapping) else None
+        if not isinstance(body, str) or len(body) > MAX_AUDIT or not _trusted_comment(comment):
+            continue
+        payload = _marker(PROTECTED_BLOCKER_EVIDENCE_RE, body)
+        if payload is None:
+            continue
+        if _protected_blocker_marker(payload) != body.strip():
+            raise OrchestrationError("protected blocker evidence is not deterministic")
+        markers.append(payload)
+    return markers
+
+
+def persist_protected_blocker_evidence(client: Any, comments: Sequence[Mapping[str, Any]],
+                                       pr: Mapping[str, Any], issue: Mapping[str, Any], head: str,
+                                       verdict: reviewer.ReviewVerdict) -> None:
+    """Persist one exact-head protected blocker audit, never an authorization."""
+    payload = _protected_blocker_payload(pr, issue, head, verdict)
+    marker = _protected_blocker_marker(payload)
+    same_identity = []
+    for existing in _protected_blocker_markers(comments):
+        if (existing["repository"] == REPOSITORY and existing["issue_number"] == issue["number"]
+                and existing["pr_number"] == pr["number"] and existing["reviewed_head_sha"] == head):
+            same_identity.append(existing)
+    if len(same_identity) > 1:
+        raise OrchestrationError("protected blocker evidence is ambiguous")
+    if same_identity:
+        if _protected_blocker_marker(same_identity[0]) != marker:
+            raise OrchestrationError("protected blocker evidence conflicts with the validated verdict")
+        return
+    client.comment(pr["number"], marker)
+
+
 def _repair_failure_marker(attempt: int, error: Exception | None = None) -> str:
     payload: dict[str, Any] = {"schema_version": 1, "attempt": attempt, "category": "trusted-repair-failed"}
     detail = repair.audit_safe_error_detail(error) if error is not None else None
@@ -706,6 +846,10 @@ def orchestrate(client: Any, event: Mapping[str, Any], cwd: str,
         if verdict.effective_risk != "green" and verdict.verdict != "escalate":
             raise OrchestrationError("non-GREEN reviewer risk must not advance or repair automatically")
     elif verdict.verdict == "blocker":
+        pr, issue, comments = _refetch_unchanged(
+            client, pr_number, issue_number, run.head_sha, run, current, authorization
+        )
+        persist_protected_blocker_evidence(client, comments, pr, issue, run.head_sha, verdict)
         raise OrchestrationError("protected YELLOW review cannot authorize automatic repair")
     pr, issue, comments = _refetch_unchanged(client, pr_number, issue_number, run.head_sha, run, current, authorization)
     transition_input = _state_input(pr_number, issue_number, run.head_sha, current, "verdict", verdict)
