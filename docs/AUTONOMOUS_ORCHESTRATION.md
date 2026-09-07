@@ -18,7 +18,9 @@ each mutually exclusive family.
 - `status:in-progress` — one authorized implementation has claimed the issue
   and has a branch or PR. A second implementation must not start.
 - `status:review` — the implementation is complete enough for review; the PR,
-  checks, limitations, and any required runtime evidence are recorded.
+  checks, limitations, and currently available runtime evidence are recorded.
+  Controlled runtime or scientific acceptance may still be pending. This state
+  is not issue completion and is not merge authorization.
 - `status:blocked` — work cannot safely start or continue because a dependency,
   conflict, missing evidence, ambiguity, scope issue, or duplicate work must
   be resolved. A blocked issue is never eligible to start.
@@ -44,15 +46,21 @@ replace GitHub's open/closed state.
 Exactly one `risk:*` label is required for eligibility. The label is a
 declaration, not permission to bypass the effective-risk escalation rules.
 
-### Optional routing labels
+### Routing labels
 
-- `agent:codex` — optional routing/request metadata for a future Codex worker.
+- `agent:codex` — a fresh addition of this label is the explicit trigger for
+  the ordinary GREEN worker. The label alone does not authorize work: the
+  worker revalidates all eligibility, effective-risk, dependency, duplicate,
+  and claim conditions. Re-adding or leaving an existing label is not a retry
+  or permission to bypass a failed claim.
 - `agent:gpt-review` — optional routing/request metadata for a future GPT
   review pass.
 
-Routing labels do not authorize work, change risk, satisfy dependencies, or
-enable a worker. They may coexist with one status and one risk label, or be
-omitted.
+Routing labels do not change risk or satisfy dependencies. `agent:codex` has
+the fresh-event meaning above only for the ordinary GREEN worker; protected
+YELLOW/RED work requires its own explicit authorization and must not be
+triggered by that worker. They may coexist with one status and one risk label,
+or be omitted where no routing is requested.
 
 ## Standard autonomous issue contract
 
@@ -102,9 +110,33 @@ put explanations on the following indented or ordinary paragraph lines. Use
 unknown keys, malformed references, duplicate references, and unresolved issue
 numbers rather than guessing.
 
-A dependency is satisfied only when its referenced issue is closed or an
-explicit maintainer record says the dependency is otherwise released. An open,
-missing, ambiguous, or inaccessible dependency is unsatisfied and blocks work.
+A dependency is satisfied when its referenced issue is closed. The only
+exception is a maintainer-authored, machine-readable release record on the
+dependent issue using exactly one standalone marker per released dependency:
+
+```text
+<!-- dependency-release:RayZhang2024/ML-AMstress#123 -->
+```
+
+The reference uses the same issue-reference grammar as `blocked-by` (with
+`#123` permitted for the current repository). Free-form prose cannot release a
+dependency. An open, missing, ambiguous, inaccessible, or unrecorded
+dependency is unsatisfied and blocks work.
+
+## Canonical pull-request linkage
+
+Every newly created implementation PR must contain exactly one standalone
+issue-linkage line in its body:
+
+```text
+Refs #123
+```
+
+`Refs #123` names the issue without closing it and is the canonical active
+linkage for trusted validation and review. Missing, duplicate, malformed,
+conflicting, or ambiguous active linkage fails closed. Legacy closing-keyword
+linkage may be retained only for historical audit/replay compatibility; it
+must never make an active linkage ambiguous.
 
 ## Eligibility and duplicate-work prevention
 
@@ -120,8 +152,12 @@ observation time:
 5. No active implementation already exists: there is no open PR linked to the
    issue, and no branch/PR claim or `status:in-progress` record for the same
    issue owned by another implementation.
-6. The requested agent, if any, is authorized for the declared risk and the
-   required runtime evidence is available or explicitly planned.
+6. A mandatory pre-start effective-risk assessment identifies expected changed
+   paths, affected behavior/control-plane surface, generated artifacts, and
+   required evidence. Protected paths, YELLOW/RED behavior or evidence, or an
+   uncertain expected scope make ordinary GREEN triggering ineligible.
+7. The requested agent, if any, is authorized for the assessed effective risk
+   and the required runtime evidence is available or explicitly planned.
 
 Before creating a branch, an implementation must re-check the issue labels,
 dependencies, and open PRs. It should claim the issue by recording the branch
@@ -173,23 +209,39 @@ status:review -> status:in-progress (only when review requests implementation ch
   eligibility and duplicate-work checks pass, and must record branch/PR
   identity.
 - A worker may request `status:review` only after the implementation diff,
-  required checks, limitations, and runtime/scientific evidence are recorded.
-- A maintainer or explicitly approved future automation may mark the issue
-  closed after the PR is merged. No `status:completed` label is required.
+  required checks, limitations, and currently available runtime/scientific
+  evidence are recorded. This review state may still await separately
+  authorized controlled runtime or scientific acceptance.
+- A maintainer may close the issue only after its acceptance contract is
+  satisfied. PR merge is a separate authorization and does not itself close an
+  issue; when supported, a merge authorization is bound to the reviewed
+  current PR head SHA and expires on a new head. No `status:completed` label
+  is required.
 - Any actor discovering a blocker may report it, but only an authorized
   maintainer or future policy-enforcing automation should resolve a blocked
   state or reclassify risk.
 
 ## Effective-risk and review routing
 
-The effective risk is the highest risk implied by changed files, behavior,
-generated artifacts, or required evidence, following the parent policy. If it
-exceeds the issue's `risk:*` declaration, the PR is blocked: do not silently
-edit labels to make it eligible, merge, or continue implementation. Record the
-mismatch, move/report the issue as blocked, and request maintainer
-reclassification or scope correction. `agent:gpt-review` may route review but
-cannot approve a RED change; RED still needs explicit human/domain-owner
-approval.
+The effective risk is assessed before executable work and again from the PR.
+It is the highest risk implied by changed files, behavior/control-plane
+surface, generated artifacts, or required evidence, following the parent
+policy. If it exceeds the issue's `risk:*` declaration, the PR is blocked: do
+not silently edit labels to make it eligible, merge, or continue
+implementation. Record the mismatch, move/report the issue as blocked, and
+request maintainer reclassification or scope correction. `agent:gpt-review`
+may route review but cannot approve a RED change; RED still needs explicit
+human/domain-owner approval.
+
+## Protected YELLOW path
+
+Protected governance/control-plane work and all YELLOW work require explicit
+protected-path implementation authorization. It is separate from any
+controlled-runtime authorization and from merge authorization. The ordinary
+GREEN worker must reject it, even if the issue has `agent:codex`; uncertain
+scope fails closed rather than being inferred GREEN. The protected path must
+preserve the same contract, dependency, duplicate-work, effective-risk, and
+no-merge safeguards.
 
 ## Current activation boundary
 

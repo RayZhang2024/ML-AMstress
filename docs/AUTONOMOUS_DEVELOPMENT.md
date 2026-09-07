@@ -15,6 +15,17 @@ transitions are defined in [AUTONOMOUS_ORCHESTRATION.md](AUTONOMOUS_ORCHESTRATIO
 - Only issues explicitly marked ready by the repository maintainers may be
   started. Draft, blocked, superseded, or otherwise unready work requires
   maintainer direction first.
+- Before an issue is made executable, the actor that owns orchestration must
+  record a **pre-start effective-risk assessment**. It must consider the
+  expected changed paths, the behavior and control-plane surface affected,
+  generated artifacts, and the evidence needed to validate the change. A
+  declared `risk:green` label is not enough by itself.
+- If the expected paths include protected control-plane or governance files,
+  or the expected behavior or evidence is YELLOW or RED, ordinary GREEN
+  triggering is forbidden. The issue requires the separately authorized
+  protected path at its effective risk. If the expected scope cannot be
+  determined confidently, fail closed to `status:blocked`; do not guess that
+  the work is GREEN.
 - Perform the Necessity Gate before any production change: identify the
   observed problem or evidence, the files that must change, why those files
   are necessary, and the intended behavior. Documentation-only work must not
@@ -60,8 +71,10 @@ sandboxed process must continue without `GITHUB_TOKEN`, `GH_TOKEN`, or
 ## Repository risk model
 
 Classify a work unit by the highest-risk behavior it changes, not by the
-amount of code or the issue label. A documentation-only change such as this
-one is GREEN.
+amount of code or the issue label. Documentation is GREEN only when its
+expected paths and the behavior/evidence it governs are not protected or
+higher risk; a change to protected governance or trusted control-plane
+documentation follows the protected path at its effective risk.
 
 ### GREEN — bounded, reversible, behavior-preserving work
 
@@ -107,9 +120,10 @@ automated merge.
 
 ## Effective-risk escalation
 
-The effective risk of a pull request is the highest class implied by any
-changed file, code path, generated artifact, or resulting behavior. A PR is
-blocked when its effective risk is higher than the issue's declared class.
+The effective risk is assessed both before an issue becomes executable and
+again from the actual PR. It is the highest class implied by any changed file,
+code path, generated artifact, resulting behavior, or required evidence. A PR
+is blocked when its effective risk is higher than the issue's declared class.
 The agent must stop, explain the mismatch in the PR, and request issue
 reclassification, scope correction, or explicit human direction before
 continuing. Tests or a low-risk wrapper do not make a higher-risk behavior
@@ -117,10 +131,28 @@ GREEN. Future automation may enforce this rule by comparing issue metadata,
 changed paths, and reviewed behavior; this document does not activate that
 automation.
 
+## Protected YELLOW governance and authorization boundaries
+
+Protected governance and trusted control-plane work may be implemented only
+through an explicitly authorized protected/YELLOW path; it must not be routed
+through the ordinary GREEN worker merely because it is documentation or tests.
+That path records the pre-start assessment, maintains the declared effective
+risk, and preserves the same fail-closed scope and evidence rules.
+
+Implementation authorization, controlled-runtime authorization, and merge
+authorization are separate decisions. Permission to implement a protected or
+YELLOW change does not authorize a live runtime/scientific exercise, and a
+successful controlled runtime exercise does not authorize merge. Where the
+platform supports it, merge authorization must identify the reviewed current
+PR head SHA; a new head requires renewed review/authorization. Opening a PR or
+moving an issue to `status:review` is not issue completion, and merging a PR
+does not by itself prove that all required controlled acceptance evidence has
+been satisfied.
+
 ## Merge authority
 
-- GREEN changes are eventually eligible for automated merge only after all
-  required CI checks pass and review is clean.
+- GREEN changes are eligible for human merge only after all required CI checks
+  pass and review is clean.
 - YELLOW changes are eventually eligible only after the stronger required
   runtime validation for their workflow has passed and review is clean.
 - RED changes are never auto-merged. An explicit human/domain-owner approval
