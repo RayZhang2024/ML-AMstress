@@ -7,7 +7,8 @@ and second pre-check remain mandatory.
 
 ## Dedicated identity prerequisite
 
-Only `isolated-target-cae-smoke` may schedule the dedicated role
+The fixed `isolated-target-cae-smoke` and A7.2
+`partition-layer-sets-regression` profiles may schedule the dedicated role
 `windows-x64-abaqus-validation` with labels `self-hosted`, `windows`, `x64`,
 and `ml-amstress-abaqus-validation`. The generic `ml-amstress-abaqus` label is
 not sufficient. The job requires repository variables:
