@@ -38,6 +38,11 @@ TARGET_FIXTURE_PATH = "tests/fixtures/a7_1_target_cae_smoke.py"
 TARGET_SENTINEL_ENVIRONMENT = "A7_TARGET_SENTINEL_FILE"
 TARGET_SENTINEL_FILENAME = "a7-target-smoke.marker"
 TARGET_SENTINEL = "A7.1_ISOLATED_TARGET_CAE_SMOKE_PASSED"
+PARTITION_REGRESSION_PROFILE = "partition-layer-sets-regression"
+PARTITION_FIXTURE_PATH = "tests/fixtures/a7_2_partition_layer_sets_regression.py"
+PARTITION_SENTINEL_FILENAME = "a7-partition-layer-sets.marker"
+PARTITION_SENTINEL = "A7.2_PARTITION_LAYER_SETS_REGRESSION_PASSED"
+PARTITION_PRODUCTION_PATH = "import_and_partition.py"
 MAX_IDENTIFIER = 2_000_000_000
 MAX_CHANGED_FILES = 1_000
 FILES_PER_PAGE = 100
@@ -74,6 +79,22 @@ class ValidationProfile:
     identifier: str
     timeout_seconds: int
     executes_target_code: bool
+    target_contract: str | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class TargetCodeContract:
+    fixture_path: str
+    required_target_paths: tuple[str, ...]
+    sentinel_filename: str
+    sentinel: str
+    build_extent: float = 0.0
+    layer_thickness: float = 0.0
+    expected_layer_count: int = 0
+    expected_part_sets: tuple[str, ...] = ()
+    expected_assembly_sets: tuple[str, ...] = ()
+    expected_partial_layer_set: str = ""
+    expected_whole_build_set: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -88,7 +109,18 @@ class ValidationResult:
 # A6.1 code and never imports, executes, or configures target-branch content.
 PROFILES = {
     "inert-cae-runtime-probe": ValidationProfile("inert-cae-runtime-probe", 120, False),
-    "isolated-target-cae-smoke": ValidationProfile("isolated-target-cae-smoke", 120, True),
+    "isolated-target-cae-smoke": ValidationProfile("isolated-target-cae-smoke", 120, True, "a7.1-smoke"),
+    PARTITION_REGRESSION_PROFILE: ValidationProfile(PARTITION_REGRESSION_PROFILE, 120, True, "a7.2-partition"),
+}
+TARGET_CODE_CONTRACTS = {
+    "a7.1-smoke": TargetCodeContract(TARGET_FIXTURE_PATH, (TARGET_FIXTURE_PATH,),
+                                      TARGET_SENTINEL_FILENAME, TARGET_SENTINEL),
+    "a7.2-partition": TargetCodeContract(
+        PARTITION_FIXTURE_PATH, (PARTITION_FIXTURE_PATH, PARTITION_PRODUCTION_PATH),
+        PARTITION_SENTINEL_FILENAME, PARTITION_SENTINEL,
+        10.3, 0.5, 21, ("BASE", "BUILD_ALL"),
+        tuple("set-%d" % index for index in range(23)), "set-21", "set-22",
+    ),
 }
 FAILURE_CATEGORIES = frozenset((
     "none", "controller-contract", "metadata-rejected", "metadata-race",
@@ -300,13 +332,13 @@ def validate_isolated_target_identity(environment: Mapping[str, str], user: str 
             raise ValidationError("target-identity")
 
 
-def _exact_target_sentinel(path: str) -> bool:
+def _exact_target_sentinel(path: str, expected: str = TARGET_SENTINEL) -> bool:
     try:
         with open(path, "rb") as stream:
-            value = stream.read(len(TARGET_SENTINEL.encode("ascii")) + 1)
+            value = stream.read(len(expected.encode("ascii")) + 1)
     except OSError:
         return False
-    return value == TARGET_SENTINEL.encode("ascii")
+    return value == expected.encode("ascii")
 
 
 def target_child_environment(parent: Mapping[str, str], sentinel_path: str | None = None) -> dict[str, str]:
@@ -329,13 +361,16 @@ def _target_process(command: list[str], workspace: str, environment: Mapping[str
                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
 
 
-def run_isolated_target_smoke(workspace: str, environment: Mapping[str, str],
-                              runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-                              exists: Callable[[str], bool] = os.path.isfile,
-                              marker_exists: Callable[[str], bool] = os.path.lexists) -> ValidationResult:
-    """Run only the fixed future inert fixture from the exact target workspace."""
-    fixture = os.path.join(workspace, *TARGET_FIXTURE_PATH.split("/"))
-    if not exists(fixture):
+def run_isolated_target_profile(profile: ValidationProfile, workspace: str, environment: Mapping[str, str],
+                                runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+                                exists: Callable[[str], bool] = os.path.isfile,
+                                marker_exists: Callable[[str], bool] = os.path.lexists) -> ValidationResult:
+    """Run one fixed target-code contract from the exact detached workspace."""
+    contract = TARGET_CODE_CONTRACTS.get(profile.target_contract)
+    if contract is None:
+        raise ValidationError("target-code-isolation")
+    required_paths = tuple(os.path.join(workspace, *path.split("/")) for path in contract.required_target_paths)
+    if not all(exists(path) for path in required_paths):
         return ValidationResult("failed", "unavailable", "target-fixture-missing", "passed")
     try:
         launcher = preflight.resolve_approved_launcher(environment.get("A6_APPROVED_LAUNCHER"), exists)
@@ -347,14 +382,15 @@ def run_isolated_target_smoke(workspace: str, environment: Mapping[str, str],
             return ValidationResult("unavailable", "unavailable", "runtime-unavailable", "passed")
         if release != preflight.EXPECTED_ABAQUS_RELEASE:
             return ValidationResult("failed", release, "probe-failed", "passed")
-        marker = os.path.join(workspace, TARGET_SENTINEL_FILENAME)
+        marker = os.path.join(workspace, contract.sentinel_filename)
         if marker_exists(marker):
             return ValidationResult("failed", release, "target-sentinel-stale", "passed")
         child = target_child_environment(environment, marker)
+        fixture = required_paths[0]
         result = _target_process([launcher, "cae", "noGUI=" + fixture], workspace, child, timeout, runner)
         if result.returncode != 0:
             return ValidationResult("failed", release, "target-execution-failed", "passed")
-        if not _exact_target_sentinel(marker):
+        if not _exact_target_sentinel(marker, contract.sentinel):
             return ValidationResult("failed", release, "target-sentinel-missing", "passed")
         return ValidationResult("passed", release, "none", "passed")
     except subprocess.TimeoutExpired:
@@ -363,13 +399,22 @@ def run_isolated_target_smoke(workspace: str, environment: Mapping[str, str],
         return ValidationResult("unavailable", "unavailable", "runtime-unavailable", "passed")
 
 
+def run_isolated_target_smoke(workspace: str, environment: Mapping[str, str],
+                              runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+                              exists: Callable[[str], bool] = os.path.isfile,
+                              marker_exists: Callable[[str], bool] = os.path.lexists) -> ValidationResult:
+    """Preserve the A7.1 wrapper around its fixed target-code contract."""
+    return run_isolated_target_profile(PROFILES["isolated-target-cae-smoke"], workspace, environment,
+                                       runner, exists, marker_exists)
+
+
 def run_profile(profile: ValidationProfile, target_workspace: str, environment: Mapping[str, str]) -> ValidationResult:
     """Run an allowlisted controller-owned profile; the initial profile ignores target files."""
-    if profile.identifier == "isolated-target-cae-smoke" and profile.executes_target_code:
-        validate_isolated_target_identity(environment)
-        return run_isolated_target_smoke(target_workspace, environment)
     if profile.executes_target_code:
-        raise ValidationError("target-code-isolation")
+        if profile.target_contract not in TARGET_CODE_CONTRACTS:
+            raise ValidationError("target-code-isolation")
+        validate_isolated_target_identity(environment)
+        return run_isolated_target_profile(profile, target_workspace, environment)
     if profile.identifier != "inert-cae-runtime-probe" or not os.path.isdir(target_workspace):
         raise ValidationError("profile-unknown")
     profile_environment = stripped_target_environment(environment)
@@ -394,9 +439,11 @@ def evidence(result: ValidationResult, inputs: ValidationInputs, effective_risk:
         "target_head_sha": inputs.expected_head_sha,
         "effective_risk": effective_risk,
         "validation_profile": inputs.profile,
-        "runner_role": ISOLATED_RUNNER_ROLE if inputs.profile == "isolated-target-cae-smoke" else RUNNER_ROLE,
-        "runner_labels": list(ISOLATED_RUNNER_LABELS if inputs.profile == "isolated-target-cae-smoke" else RUNNER_LABELS),
+        "runner_role": ISOLATED_RUNNER_ROLE if PROFILES[inputs.profile].executes_target_code else RUNNER_ROLE,
+        "runner_labels": list(ISOLATED_RUNNER_LABELS if PROFILES[inputs.profile].executes_target_code else RUNNER_LABELS),
         "isolation_result": result.isolation_result,
+        "regression_result": ("passed" if result.outcome == "passed" else "not-passed")
+        if inputs.profile == PARTITION_REGRESSION_PROFILE else "not-applicable",
         "approved_abaqus_command": preflight.APPROVED_ABAQUS_COMMAND_ID,
         "abaqus_release": result.release,
         "outcome": result.outcome,
