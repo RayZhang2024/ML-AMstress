@@ -32,7 +32,27 @@ head, metadata race, or protected target path cannot pass. The profile creates
 no mesh, material, BC, thermal/heat-treatment state, activation/removal state,
 job, solver result, GUI action, or ML action.
 
+## Non-authoritative failure diagnostic
+
+For this profile only, the trusted controller also creates a distinct fresh
+`A7_TARGET_DIAGNOSTIC_FILE` inside the same temporary target workspace. It is
+not inherited from the controller environment and is the only additional value
+made visible to the target fixture. On a failure path the fixture may write one
+exact ASCII token: `fixture-setup`, `production-load`,
+`production-execution`, `model-state-read`, `model-state-invariant`, or
+`fixture-internal`.
+
+The controller accepts no newline, prefix, suffix, path, exception text,
+credential, environment value, or Actions-command syntax. Missing diagnostic
+data is `none`; malformed or oversized data is `invalid` and fails closed.
+The diagnostic is strictly non-authoritative: it cannot alter metadata/SHA
+authorization, risk, identity, release, isolation, success-sentinel semantics,
+or a passed/failed outcome. A valid success marker with any diagnostic is
+conflicting evidence and fails closed. Raw target stdout/stderr is never
+published.
+
 The existing `A6_PR_VALIDATION_EVIDENCE=` record adds only the bounded
-`regression_result` field for this profile. It still excludes model output,
-usernames, paths, environment data, license details, and credentials. No live
-A7.2 acceptance or merge is enabled by this document.
+`regression_result` and non-authoritative `target_diagnostic_stage` fields for
+this profile. It still excludes model output, usernames, paths, environment
+data, license details, and credentials. No live A7.2 acceptance or merge is
+enabled by this document.

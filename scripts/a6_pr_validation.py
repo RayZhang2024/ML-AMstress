@@ -38,6 +38,14 @@ TARGET_FIXTURE_PATH = "tests/fixtures/a7_1_target_cae_smoke.py"
 TARGET_SENTINEL_ENVIRONMENT = "A7_TARGET_SENTINEL_FILE"
 TARGET_SENTINEL_FILENAME = "a7-target-smoke.marker"
 TARGET_SENTINEL = "A7.1_ISOLATED_TARGET_CAE_SMOKE_PASSED"
+TARGET_DIAGNOSTIC_ENVIRONMENT = "A7_TARGET_DIAGNOSTIC_FILE"
+TARGET_DIAGNOSTIC_FILENAME = "a7-target-diagnostic.marker"
+TARGET_DIAGNOSTIC_TOKENS = frozenset((
+    "fixture-setup", "production-load", "production-execution", "model-state-read",
+    "model-state-invariant", "fixture-internal",
+))
+MAX_TARGET_DIAGNOSTIC_BYTES = max(len(token) for token in TARGET_DIAGNOSTIC_TOKENS)
+VALID_TARGET_DIAGNOSTIC_STAGES = TARGET_DIAGNOSTIC_TOKENS | frozenset(("none", "invalid"))
 PARTITION_REGRESSION_PROFILE = "partition-layer-sets-regression"
 PARTITION_FIXTURE_PATH = "tests/fixtures/a7_2_partition_layer_sets_regression.py"
 PARTITION_SENTINEL_FILENAME = "a7-partition-layer-sets.marker"
@@ -88,6 +96,7 @@ class TargetCodeContract:
     required_target_paths: tuple[str, ...]
     sentinel_filename: str
     sentinel: str
+    diagnostic_filename: str = ""
     build_extent: float = 0.0
     layer_thickness: float = 0.0
     expected_layer_count: int = 0
@@ -103,6 +112,7 @@ class ValidationResult:
     release: str
     failure_category: str
     isolation_result: str = "not-applicable"
+    target_diagnostic_stage: str = "none"
 
 
 # This is intentionally the only enabled profile. It invokes controller-owned
@@ -117,7 +127,7 @@ TARGET_CODE_CONTRACTS = {
                                       TARGET_SENTINEL_FILENAME, TARGET_SENTINEL),
     "a7.2-partition": TargetCodeContract(
         PARTITION_FIXTURE_PATH, (PARTITION_FIXTURE_PATH, PARTITION_PRODUCTION_PATH),
-        PARTITION_SENTINEL_FILENAME, PARTITION_SENTINEL,
+        PARTITION_SENTINEL_FILENAME, PARTITION_SENTINEL, TARGET_DIAGNOSTIC_FILENAME,
         10.3, 0.5, 21, ("BASE", "BUILD_ALL"),
         tuple("set-%d" % index for index in range(23)), "set-21", "set-22",
     ),
@@ -127,7 +137,8 @@ FAILURE_CATEGORIES = frozenset((
     "protected-path", "profile-unknown", "target-code-isolation", "target-checkout-failed",
     "target-head-stale", "timeout", "runtime-unavailable", "probe-failed", "internal-error",
     "target-identity", "target-fixture-missing", "target-sentinel-missing", "target-sentinel-stale",
-    "target-execution-failed",
+    "target-execution-failed", "target-diagnostic-stale",
+    "target-diagnostic-conflict",
 ))
 
 
@@ -341,7 +352,24 @@ def _exact_target_sentinel(path: str, expected: str = TARGET_SENTINEL) -> bool:
     return value == expected.encode("ascii")
 
 
-def target_child_environment(parent: Mapping[str, str], sentinel_path: str | None = None) -> dict[str, str]:
+def target_diagnostic_stage(path: str) -> str:
+    """Read one bounded non-authoritative target diagnostic token, never raw text."""
+    try:
+        with open(path, "rb") as stream:
+            value = stream.read(MAX_TARGET_DIAGNOSTIC_BYTES + 1)
+    except FileNotFoundError:
+        return "none"
+    except OSError:
+        return "invalid"
+    try:
+        token = value.decode("ascii")
+    except UnicodeDecodeError:
+        return "invalid"
+    return token if token in TARGET_DIAGNOSTIC_TOKENS else "invalid"
+
+
+def target_child_environment(parent: Mapping[str, str], sentinel_path: str | None = None,
+                             diagnostic_path: str | None = None) -> dict[str, str]:
     """Construct the only environment visible to PR-authored target code."""
     environment = {}
     for name, value in parent.items():
@@ -352,6 +380,8 @@ def target_child_environment(parent: Mapping[str, str], sentinel_path: str | Non
                 environment[name] = value
     if sentinel_path is not None:
         environment[TARGET_SENTINEL_ENVIRONMENT] = sentinel_path
+    if diagnostic_path is not None:
+        environment[TARGET_DIAGNOSTIC_ENVIRONMENT] = diagnostic_path
     return environment
 
 
@@ -385,13 +415,19 @@ def run_isolated_target_profile(profile: ValidationProfile, workspace: str, envi
         marker = os.path.join(workspace, contract.sentinel_filename)
         if marker_exists(marker):
             return ValidationResult("failed", release, "target-sentinel-stale", "passed")
-        child = target_child_environment(environment, marker)
+        diagnostic = os.path.join(workspace, contract.diagnostic_filename) if contract.diagnostic_filename else None
+        if diagnostic is not None and marker_exists(diagnostic):
+            return ValidationResult("failed", release, "target-diagnostic-stale", "passed", "invalid")
+        child = target_child_environment(environment, marker, diagnostic)
         fixture = required_paths[0]
         result = _target_process([launcher, "cae", "noGUI=" + fixture], workspace, child, timeout, runner)
+        stage = target_diagnostic_stage(diagnostic) if diagnostic is not None else "none"
         if result.returncode != 0:
-            return ValidationResult("failed", release, "target-execution-failed", "passed")
+            return ValidationResult("failed", release, "target-execution-failed", "passed", stage)
         if not _exact_target_sentinel(marker, contract.sentinel):
-            return ValidationResult("failed", release, "target-sentinel-missing", "passed")
+            return ValidationResult("failed", release, "target-sentinel-missing", "passed", stage)
+        if stage != "none":
+            return ValidationResult("failed", release, "target-diagnostic-conflict", "passed", stage)
         return ValidationResult("passed", release, "none", "passed")
     except subprocess.TimeoutExpired:
         return ValidationResult("failed", "unavailable", "timeout", "passed")
@@ -430,6 +466,9 @@ def evidence(result: ValidationResult, inputs: ValidationInputs, effective_risk:
              run_id: str, controller_sha: str) -> dict[str, object]:
     """Construct the sole bounded A6.2 evidence record."""
     category = result.failure_category if result.failure_category in FAILURE_CATEGORIES else "internal-error"
+    diagnostic_stage = (result.target_diagnostic_stage
+                        if isinstance(result.target_diagnostic_stage, str)
+                        and result.target_diagnostic_stage in VALID_TARGET_DIAGNOSTIC_STAGES else "invalid")
     return {
         "schema_version": SCHEMA_VERSION,
         "github_run_id": run_id,
@@ -442,6 +481,7 @@ def evidence(result: ValidationResult, inputs: ValidationInputs, effective_risk:
         "runner_role": ISOLATED_RUNNER_ROLE if PROFILES[inputs.profile].executes_target_code else RUNNER_ROLE,
         "runner_labels": list(ISOLATED_RUNNER_LABELS if PROFILES[inputs.profile].executes_target_code else RUNNER_LABELS),
         "isolation_result": result.isolation_result,
+        "target_diagnostic_stage": diagnostic_stage,
         "regression_result": ("passed" if result.outcome == "passed" else "not-passed")
         if inputs.profile == PARTITION_REGRESSION_PROFILE else "not-applicable",
         "approved_abaqus_command": preflight.APPROVED_ABAQUS_COMMAND_ID,
