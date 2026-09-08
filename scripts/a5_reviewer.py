@@ -61,6 +61,25 @@ CONTROL_PLANE_REQUIREMENT_RE = re.compile(
     r"github(?:-side)?\s+(?:evidence|state)\b"
     r")"
 )
+# These are observations made by the trusted worker/reviewer control plane,
+# not deliverables that a PR author can establish by editing repository text.
+# Keep this deliberately tied to an observation/result signal: "reviewer" or
+# "repair" alone also occur in repository-editable implementation contracts.
+POST_RUN_CONTROL_PLANE_REQUIREMENT_RE = re.compile(
+    r"(?ix)\b(?:"
+    r"(?:worker|implementation)\b.*\b(?:branch|completion|validation|model|reasoning\s+effort|fallback)\b.*\b(?:"
+    r"claims?|completes?|passes?|successful|evidence|profile|configured|no\s+evidence)\b|"
+    r"(?:trusted\s+)?a5\b.*\b(?:exact|same|reviewed)[-\s]+head\b.*\b(?:verdict|review|clean|blocker|"
+    r"effective\s+risk|findings?)\b|"
+    r"(?:a5\s+)?repair\b.*\b(?:marker|attempt|authority|exercise|history)\b.*\b(?:absent|present|no|none|"
+    r"exact|observed|exercised|used)\b|"
+    r"(?:live|trusted)\s+(?:a5\s+)?reviewer\b.*\b(?:invocation|cli|profile|model|reasoning\s+effort|fallback|"
+    r"malformed|risk[ -]?floor|conformance|verdict)\b|"
+    r"(?:historical|prior|previous)\s+(?:pr|pull\s+request)\b.*\b(?:open|closed|merged|unmerged|head|sha)\b|"
+    r"(?:pr|pull\s+request)\s*(?:\#\s*)?[1-9][0-9]*\b.*\b(?:remains?|is|are)\s+(?:open|closed|merged|unmerged)\b|"
+    r"(?:canary\s+)?(?:pr|pull\s+request)\b.*\bremains?\s+open\s*/\s*unmerged\b"
+    r")"
+)
 HISTORICAL_EVIDENCE_REQUIREMENT_RE = re.compile(
     r"(?ix)\b(?:"
     r"(?:initial|prior|previous|pre[-\s]?repair|phase[-\s]?1|original)\s+(?:head|sha|file|fixture|state|content)\b|"
@@ -247,6 +266,7 @@ def _acceptance_lines(issue_body: str) -> tuple[str, ...]:
 
 def _is_external_acceptance_requirement(text: str) -> bool:
     historical_or_control = bool(CONTROL_PLANE_REQUIREMENT_RE.search(text) or
+                                 POST_RUN_CONTROL_PLANE_REQUIREMENT_RE.search(text) or
                                  HISTORICAL_EVIDENCE_REQUIREMENT_RE.search(text))
     if historical_or_control:
         return True

@@ -28,3 +28,11 @@ must retain that floor exactly; any effective-risk elevation requires
 `escalate` with an escalation reason. RED risk must also escalate.
 Findings have stable `F-N` IDs plus category, message, required action, and
 required evidence for a later, separately authorized repair flow.
+
+Acceptance criteria whose truth depends on post-run or control-plane
+observations—such as worker completion/profile, hosted CI, exact-head A5
+verdicts, repair history, live reviewer execution, or PR state—are external
+evidence. They remain pending, verified, or contradictory only from the
+trusted snapshot metadata; they cannot become blocker findings or targets for
+repository repair. Current-head changed-file scope, file content, and
+protected-path constraints remain repository requirements.
