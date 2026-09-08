@@ -619,7 +619,11 @@ def build_snapshot(pr: Mapping[str, Any], issue: Mapping[str, Any], run: Workflo
     for item in files:
         if not isinstance(item, Mapping) or not isinstance(item.get("filename"), str) or not isinstance(item.get("patch"), str):
             raise OrchestrationError("changed-file patch evidence is incomplete")
-        changed.append(reviewer.ChangedFile(item["filename"], item["patch"]))
+        try:
+            patch = reviewer.sanitize_patch_for_snapshot(item["patch"])
+        except reviewer.ReviewError:
+            raise OrchestrationError("changed-file patch contains credential material") from None
+        changed.append(reviewer.ChangedFile(item["filename"], patch))
     if lane == "green":
         paths = _trusted_green_paths(changed)
     elif lane == "protected-yellow":
@@ -693,9 +697,8 @@ def _audit_safe_finding_text(value: Any, name: str) -> str:
     if (any(marker in text for marker in reviewer.REVIEWER_PROMPT_MARKERS)
             or any(pattern.search(text) for pattern in unsafe_patterns)):
         raise OrchestrationError("protected blocker evidence has an unsafe finding field")
-    if any(os.environ.get(name) and os.environ[name] in text for name in (
-        "GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY", "AUTOMATION_APP_TOKEN",
-    )):
+    if any(os.environ.get(name) and os.environ[name] in text
+           for name in reviewer.CREDENTIAL_ENVIRONMENT_NAMES):
         raise OrchestrationError("protected blocker evidence has an unsafe finding field")
     return text
 

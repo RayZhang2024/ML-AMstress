@@ -87,6 +87,10 @@ SECRET_RE = re.compile(
     r"(?i)(?:\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|sk-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16})\b|"
     r"\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|secret)\s*[=:]\s*['\"]?[A-Za-z0-9._~+/=-]{8,})"
 )
+CREDENTIAL_ENVIRONMENT_NAMES = (
+    "GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY", "AUTOMATION_APP_TOKEN",
+)
+PATCH_CREDENTIAL_PLACEHOLDER = "<redacted-credential>"
 MAX_TEXT = 20_000
 MAX_PATCH = 120_000
 MAX_CHANGED_FILES = 200
@@ -194,7 +198,7 @@ def _text(value: Any, name: str, maximum: int = MAX_TEXT) -> str:
         raise ReviewError("%s must be a non-empty bounded string" % name)
     if any(ord(character) < 32 and character not in "\n\r\t" for character in value):
         raise ReviewError("%s contains unsafe control characters" % name)
-    if SECRET_RE.search(value) or any(secret and secret in value for secret in _credential_values()):
+    if contains_credential_material(value):
         raise ReviewError("%s contains credential material" % name)
     return value
 
@@ -204,13 +208,43 @@ def _optional_text(value: Any, name: str, maximum: int) -> str:
         raise ReviewError("%s must be a bounded string" % name)
     if any(ord(character) < 32 and character not in "\n\r\t" for character in value):
         raise ReviewError("%s contains unsafe control characters" % name)
-    if SECRET_RE.search(value) or any(secret and secret in value for secret in _credential_values()):
+    if contains_credential_material(value):
         raise ReviewError("%s contains credential material" % name)
     return value
 
 
 def _credential_values() -> tuple[str, ...]:
-    return tuple(os.environ.get(name, "") for name in ("GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY"))
+    """Return the one trusted exact-value source used at A5 input boundaries."""
+    return tuple(os.environ.get(name, "") for name in CREDENTIAL_ENVIRONMENT_NAMES)
+
+
+def contains_credential_material(value: str) -> bool:
+    """Return whether text contains a recognized or exact trusted credential."""
+    return bool(SECRET_RE.search(value) or any(secret and secret in value for secret in _credential_values()))
+
+
+def sanitize_patch_for_snapshot(patch: str) -> str:
+    """Fail closed on added credentials and redact non-repository diff lines.
+
+    Git patches include context, deletions, and headers which can legitimately
+    contain historical credential material.  Added repository lines cannot.
+    """
+    sanitized = []
+    for line in patch.splitlines(keepends=True):
+        added_repository_line = line.startswith("+") and not (
+            line.startswith("+++ ") or line.startswith("+++\t")
+        )
+        if contains_credential_material(line):
+            if added_repository_line:
+                raise ReviewError("changed-file patch contains credential material on an added repository line")
+            line = SECRET_RE.sub(PATCH_CREDENTIAL_PLACEHOLDER, line)
+            for secret in sorted((value for value in _credential_values() if value), key=len, reverse=True):
+                line = line.replace(secret, PATCH_CREDENTIAL_PLACEHOLDER)
+        sanitized.append(line)
+    result = "".join(sanitized)
+    if contains_credential_material(result):
+        raise ReviewError("changed-file patch credential sanitization failed")
+    return result
 
 
 def _positive_int(value: Any, name: str) -> int:
@@ -478,7 +512,7 @@ def reviewer_command(resolved_executable: str, final_output_path: str) -> list[s
 
 def reviewer_environment(parent: Mapping[str, str] | None = None) -> dict[str, str]:
     environment = dict(os.environ if parent is None else parent)
-    for name in ("GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY", "AUTOMATION_APP_TOKEN"):
+    for name in CREDENTIAL_ENVIRONMENT_NAMES:
         environment.pop(name, None)
     environment["GIT_CONFIG_NOSYSTEM"] = "1"
     environment["GIT_CONFIG_GLOBAL"] = os.devnull
@@ -492,7 +526,7 @@ def _reviewer_failure_tail(text: str) -> str | None:
     markers = [text.find(marker) for marker in REVIEWER_PROMPT_MARKERS if text.find(marker) >= 0]
     if markers:
         text = text[:min(markers)]
-    for name in ("GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY", "AUTOMATION_APP_TOKEN"):
+    for name in CREDENTIAL_ENVIRONMENT_NAMES:
         secret = os.environ.get(name)
         if secret:
             text = text.replace(secret, "[REDACTED]")
