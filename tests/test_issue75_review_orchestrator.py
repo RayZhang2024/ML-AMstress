@@ -15,6 +15,7 @@ from unittest import mock
 
 from scripts import a5_review_orchestrator as orchestrator
 from scripts import a5_repair_worker as repair
+from scripts import a5_yellow_repair_worker as yellow_repair
 from scripts import a5_review_state as state_contract
 from scripts import a5_reviewer as reviewer
 from scripts import codex_issue_worker as green_worker
@@ -948,22 +949,116 @@ class StateAndRepairTests(unittest.TestCase):
                 "a5.2:" + "a" * 64, ("docs/AUTONOMOUS_DEVELOPMENT.md",), ".",
             )
 
-    def test_automated_yellow_blocker_persists_audit_but_never_invokes_repair(self):
+    def test_automated_yellow_blocker_persists_audit_before_distinct_repair(self):
         client = FakeClient(
             pr=automated_yellow_pull_request(),
             linked_issue=automated_yellow_issue(),
             issue_comments=automated_evidence(),
         )
         verdict = protected_blocker_verdict()
-        with mock.patch.object(orchestrator, "_repair") as repair_call:
-            with self.assertRaisesRegex(orchestrator.OrchestrationError, "automated YELLOW review"):
-                orchestrator.orchestrate(client, event(), ".", lambda *_: verdict)
-        repair_call.assert_not_called()
-        self.assertEqual(orchestrator.repair_attempt_count(client.comment_data, 175), 0)
+        def yellow_call(_client, _pr, _issue, comments, *_args):
+            self.assertTrue(any("a5.4b-protected-blocker" in item["body"] for item in comments))
+            return "repair-pushed"
+        with mock.patch.object(orchestrator, "_repair") as green_call, \
+                mock.patch.object(orchestrator, "_yellow_repair", side_effect=yellow_call) as yellow_call_mock:
+            self.assertEqual(orchestrator.orchestrate(client, event(), ".", lambda *_: verdict), "repair-pushed")
+        green_call.assert_not_called()
+        yellow_call_mock.assert_called_once()
         blocker_markers = [
             item["body"] for item in client.comment_data if "a5.4b-protected-blocker" in item["body"]
         ]
         self.assertEqual(len(blocker_markers), 1)
+
+    def test_automated_yellow_repair_binds_authority_pushes_same_pr_and_returns_pending(self):
+        client = FakeClient(
+            pr=automated_yellow_pull_request(), linked_issue=automated_yellow_issue(),
+            issue_comments=automated_evidence(),
+        )
+        captured = {}
+        def execute(request, _cwd):
+            captured["request"] = request
+            client.pr_data["head"]["sha"] = NEW_HEAD
+            return yellow_repair.YellowRepairResult(
+                1, request.repository, request.pull_request_number, request.issue_number,
+                request.branch, request.attempt_number, request.expected_head_sha, NEW_HEAD,
+                tuple(item.finding_id for item in request.accepted_findings),
+                ("docs/change.md",), "passed", "a5.yellow-repair:" + "f" * 64,
+            )
+        with mock.patch.object(orchestrator, "checkout_exact_pr_branch"), \
+                mock.patch.object(yellow_repair, "execute_repair", side_effect=execute):
+            result = orchestrator.orchestrate(
+                client, event(), ".", lambda *_: protected_blocker_verdict()
+            )
+        self.assertEqual(result, "repair-pushed")
+        request = captured["request"]
+        self.assertEqual(request.branch, AUTOMATED_YELLOW_BRANCH)
+        self.assertEqual(request.expected_head_sha, HEAD)
+        self.assertEqual(request.authorized_paths, ("docs/change.md",))
+        self.assertRegex(request.authorization_key, yellow_repair.EVIDENCE_KEY_RE)
+        self.assertRegex(request.blocker_evidence_key, yellow_repair.EVIDENCE_KEY_RE)
+        self.assertEqual(orchestrator.repair_attempt_count(client.comment_data, 175), 1)
+        self.assertEqual([item["name"] for item in client.pr_data["labels"]], ["review:pending"])
+        self.assertEqual([item["name"] for item in client.issue_data["labels"] if item["name"].startswith("status:")],
+                         ["status:review"])
+
+    def test_automated_yellow_external_finding_persists_evidence_but_consumes_no_attempt(self):
+        body = automated_yellow_issue()["body"].replace(
+            "## Acceptance criteria\nTest.",
+            "## Acceptance criteria\nHosted Normal Python CI passes on the exact PR head.",
+        )
+        client = FakeClient(
+            pr=automated_yellow_pull_request(),
+            linked_issue=automated_yellow_issue(body=body),
+            issue_comments=automated_evidence(),
+        )
+        verdict = protected_blocker_verdict((reviewer.Finding(
+            "F-1", "ci", "CI evidence absent", "wait for CI", "[AC-1] hosted CI passes"
+        ),))
+        with mock.patch.object(orchestrator, "_yellow_repair") as yellow_call:
+            with self.assertRaisesRegex(orchestrator.OrchestrationError, "repair boundary"):
+                orchestrator.orchestrate(client, event(), ".", lambda *_: verdict)
+        yellow_call.assert_not_called()
+        self.assertEqual(orchestrator.repair_attempt_count(client.comment_data, 175), 0)
+        self.assertEqual(sum("a5.4b-protected-blocker" in item["body"] for item in client.comment_data), 1)
+
+    def test_automated_yellow_tampered_blocker_evidence_fails_before_state_or_attempt(self):
+        class TamperingClient(FakeClient):
+            def comment(self, number, body):
+                if "a5.4b-protected-blocker" in body:
+                    body = body.replace("validated finding", "conflicting finding")
+                super().comment(number, body)
+
+        client = TamperingClient(
+            pr=automated_yellow_pull_request(), linked_issue=automated_yellow_issue(),
+            issue_comments=automated_evidence(),
+        )
+        with mock.patch.object(orchestrator, "_yellow_repair") as yellow_call:
+            with self.assertRaises(orchestrator.OrchestrationError):
+                orchestrator.orchestrate(client, event(), ".", lambda *_: protected_blocker_verdict())
+        yellow_call.assert_not_called()
+        self.assertEqual(orchestrator.repair_attempt_count(client.comment_data, 175), 0)
+        self.assertEqual([item["name"] for item in client.pr_data["labels"]], ["review:pending"])
+
+    def test_automated_yellow_stale_authorization_after_evidence_consumes_no_attempt(self):
+        class RacingClient(FakeClient):
+            def comment(self, number, body):
+                super().comment(number, body)
+                if "a5.4b-protected-blocker" in body:
+                    changed = json.dumps(
+                        automated_prestart_value(authorized_paths=["docs/other.md"]),
+                        sort_keys=True, separators=(",", ":"),
+                    )
+                    self.issue_comment_data = automated_evidence(prestart=changed)
+
+        client = RacingClient(
+            pr=automated_yellow_pull_request(), linked_issue=automated_yellow_issue(),
+            issue_comments=automated_evidence(),
+        )
+        with mock.patch.object(orchestrator, "_yellow_repair") as yellow_call:
+            with self.assertRaises(orchestrator.OrchestrationError):
+                orchestrator.orchestrate(client, event(), ".", lambda *_: protected_blocker_verdict())
+        yellow_call.assert_not_called()
+        self.assertEqual(orchestrator.repair_attempt_count(client.comment_data, 175), 0)
 
     def test_automated_yellow_authorization_race_blocks_transition_and_repair(self):
         client = FakeClient(
@@ -1319,6 +1414,12 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(allowed, ())
         self.assertEqual(denied, ("scripts/a5_reviewer.py", "scripts/a5_review_state.py", "scripts/a5_repair_worker.py",
                                   "scripts/a5_review_orchestrator.py"))
+
+    def test_yellow_repair_control_plane_is_protected_from_green_and_green_repair(self):
+        path = "scripts/a5_yellow_repair_worker.py"
+        allowed, denied = green_worker.green_changed_paths((path,))
+        self.assertEqual((allowed, denied), ((), (path,)))
+        self.assertTrue(repair.is_protected_path(path))
 
     def test_untrusted_comment_cannot_supply_review_state_evidence(self):
         client = FakeClient()

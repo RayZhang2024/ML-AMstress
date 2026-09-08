@@ -21,6 +21,7 @@ import urllib.request
 from typing import Any, Callable, Mapping, Sequence
 
 from scripts import a5_repair_worker as repair
+from scripts import a5_yellow_repair_worker as yellow_repair
 from scripts import a5_review_state as state_contract
 from scripts import a5_reviewer as reviewer
 from scripts import codex_issue_worker as green_worker
@@ -658,6 +659,23 @@ def _repair_marker(pr_number: int, issue_number: int, head: str, decision_key: s
     return result
 
 
+def _yellow_repair_marker(pr_number: int, issue_number: int, head: str, decision_key: str,
+                          authorization_key: str, blocker_evidence_key: str, attempt: int,
+                          finding_ids: Sequence[str]) -> str:
+    """Use the shared attempt stream while binding the YELLOW-only authority."""
+    payload = {
+        "schema_version": 1, "lane": yellow_policy.AUTOMATED_YELLOW_LANE,
+        "pr_number": pr_number, "issue_number": issue_number, "head_sha": head,
+        "decision_key": decision_key, "authorization_key": authorization_key,
+        "blocker_evidence_key": blocker_evidence_key, "attempt": attempt,
+        "finding_ids": list(finding_ids),
+    }
+    result = "<!-- a5.4a-repair:" + json.dumps(payload, sort_keys=True, separators=(",", ":")) + " -->"
+    if len(result) > MAX_AUDIT:
+        raise OrchestrationError("YELLOW repair audit is unexpectedly unbounded")
+    return result
+
+
 def _audit_safe_finding_text(value: Any, name: str) -> str:
     """Accept only parser-valid text that is safe to place in a trusted audit."""
     try:
@@ -797,6 +815,22 @@ def persist_protected_blocker_evidence(client: Any, comments: Sequence[Mapping[s
     client.comment(pr["number"], marker)
 
 
+def accepted_protected_blocker_evidence(comments: Sequence[Mapping[str, Any]],
+                                        pr: Mapping[str, Any], issue: Mapping[str, Any], head: str,
+                                        verdict: reviewer.ReviewVerdict) -> str:
+    """Return the one canonical, refetched #143 marker matching the verdict."""
+    expected = _protected_blocker_marker(_protected_blocker_payload(pr, issue, head, verdict))
+    matches = []
+    for payload in _protected_blocker_markers(comments):
+        if (payload["repository"] == REPOSITORY and payload["pr_number"] == pr["number"]
+                and payload["issue_number"] == issue["number"]
+                and payload["reviewed_head_sha"] == head):
+            matches.append(_protected_blocker_marker(payload))
+    if len(matches) != 1 or matches[0] != expected:
+        raise OrchestrationError("accepted protected blocker evidence is missing, ambiguous, or conflicting")
+    return matches[0]
+
+
 def _repair_failure_marker(attempt: int, error: Exception | None = None) -> str:
     payload: dict[str, Any] = {"schema_version": 1, "attempt": attempt, "category": "trusted-repair-failed"}
     detail = repair.audit_safe_error_detail(error) if error is not None else None
@@ -905,6 +939,45 @@ def _revalidate_repair_authorization(client: Any, pr: Mapping[str, Any], issue: 
     return current
 
 
+def _revalidate_yellow_repair_authorization(
+        client: Any, pr_number: int, issue_number: int, run: WorkflowRun,
+        verdict: reviewer.ReviewVerdict) -> tuple[Mapping[str, Any], Mapping[str, Any],
+                                                  list[Mapping[str, Any]], CurrentReviewState,
+                                                  tuple[str, ...], str, str]:
+    """Re-fetch every automated-YELLOW authority immediately before repair."""
+    pr, issue = client.pr(pr_number), client.issue(issue_number)
+    comments, authorization_comments = client.comments(pr_number), client.comments(issue_number)
+    observed_pr_number, branch = validate_pr_identity(pr, run)
+    if observed_pr_number != pr_number or review_lane(branch) != yellow_policy.AUTOMATED_YELLOW_LANE:
+        raise OrchestrationError("repair lane is not the exact automated YELLOW PR")
+    if canonical_linked_issue(pr, require_refs=True) != issue_number:
+        raise OrchestrationError("PR issue link changed before YELLOW repair")
+    base_sha = _sha(pr.get("base", {}).get("sha"), "PR base")
+    contract = validate_issue_identity(issue, branch, issue_number, authorization_comments, base_sha)
+    validate_dependencies(client, contract)
+    authorization = _automated_yellow_authorization(
+        authorization_comments, issue_number, branch, base_sha
+    )
+    paths = _automated_yellow_authorized_paths(
+        authorization_comments, issue_number, branch, base_sha
+    )
+    snapshot, _ = build_snapshot(
+        pr, issue, run, client.changed_files(pr_number), yellow_policy.AUTOMATED_YELLOW_LANE, paths
+    )
+    trusted_snapshot = reviewer.validate_snapshot(snapshot)
+    reviewer.validate_external_requirements(trusted_snapshot)
+    reviewer.validate_repairable_findings(trusted_snapshot, verdict)
+    current = current_review_state(pr, issue, comments)
+    if (current.issue_status != "status:in-progress" or current.review_label != "review:blocker"
+            or current.review_head_sha != run.head_sha):
+        raise OrchestrationError("YELLOW blocker repair authorization no longer matches the exact head")
+    blocker_marker = accepted_protected_blocker_evidence(comments, pr, issue, run.head_sha, verdict)
+    authorization_text = json.dumps(authorization, sort_keys=True, separators=(",", ":"))
+    return (pr, issue, comments, current, paths,
+            yellow_repair.evidence_key("authorization", authorization_text),
+            yellow_repair.evidence_key("blocker", blocker_marker))
+
+
 def _repair(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any], comments: Sequence[Mapping[str, Any]],
             current: CurrentReviewState, verdict: reviewer.ReviewVerdict, accepted_blocker_key: str,
             paths: tuple[str, ...], cwd: str) -> str:
@@ -945,6 +1018,59 @@ def _repair(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any], commen
     plan_input = _state_input(pr["number"], issue["number"], result.new_head_sha, refreshed_state, "new_head")
     plan = state_contract.transition(plan_input)
     apply_transition(client, refreshed, refreshed_issue, refreshed_comments, plan_input, plan)
+    return "repair-pushed"
+
+
+def _yellow_repair(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any],
+                   comments: Sequence[Mapping[str, Any]], current: CurrentReviewState,
+                   verdict: reviewer.ReviewVerdict, accepted_blocker_key: str,
+                   authorization_key: str, blocker_evidence_key: str,
+                   paths: tuple[str, ...], cwd: str) -> str:
+    """Execute one distinct automated-YELLOW repair using the shared history."""
+    if review_lane(_pr_branch(pr)) != yellow_policy.AUTOMATED_YELLOW_LANE:
+        raise OrchestrationError("only automated YELLOW may invoke YELLOW repair")
+    attempts = repair_attempt_count(comments, pr["number"])
+    if attempts >= MAX_REPAIR_ATTEMPTS:
+        exhausted = "<!-- a5.4a-repair-exhausted:{\"schema_version\":1,\"pr_number\":%d} -->" % pr["number"]
+        if exhausted not in [item.get("body") for item in comments if _trusted_comment(item)]:
+            client.comment(pr["number"], exhausted)
+        return "repair-exhausted"
+    attempt = attempts + 1
+    request = yellow_repair.YellowRepairRequest(
+        1, REPOSITORY, pr["number"], issue["number"], _pr_branch(pr), pr["head"]["sha"],
+        accepted_blocker_key, blocker_evidence_key, authorization_key,
+        current.issue_status, current.review_label, current.review_head_sha, "yellow",
+        tuple(repair.BlockerFinding(item.id, item.category, item.message, item.required_action,
+                                    item.required_evidence) for item in verdict.findings),
+        paths, attempt,
+    )
+    yellow_repair.validate_request(request)
+    client.comment(pr["number"], _yellow_repair_marker(
+        pr["number"], issue["number"], pr["head"]["sha"], accepted_blocker_key,
+        authorization_key, blocker_evidence_key, attempt,
+        tuple(item.id for item in verdict.findings),
+    ))
+    try:
+        checkout_exact_pr_branch(request.branch, request.expected_head_sha, cwd)
+        result = yellow_repair.execute_repair(request, cwd)
+    except repair.RepairError as error:
+        failed = _repair_failure_marker(attempt, error)
+        if failed not in [item.get("body") for item in client.comments(pr["number"]) if _trusted_comment(item)]:
+            client.comment(pr["number"], failed)
+        return "repair-failed"
+    except Exception:
+        failed = _repair_failure_marker(attempt)
+        if failed not in [item.get("body") for item in client.comments(pr["number"]) if _trusted_comment(item)]:
+            client.comment(pr["number"], failed)
+        return "repair-failed"
+    refreshed = client.pr(pr["number"])
+    if _sha(refreshed.get("head", {}).get("sha"), "repaired PR head") != result.new_head_sha:
+        raise OrchestrationError("repair push head could not be verified")
+    refreshed_issue, refreshed_comments = client.issue(issue["number"]), client.comments(pr["number"])
+    refreshed_state = current_review_state(refreshed, refreshed_issue, refreshed_comments)
+    plan_input = _state_input(pr["number"], issue["number"], result.new_head_sha, refreshed_state, "new_head")
+    apply_transition(client, refreshed, refreshed_issue, refreshed_comments,
+                     plan_input, state_contract.transition(plan_input))
     return "repair-pushed"
 
 
@@ -1012,13 +1138,37 @@ def orchestrate(client: Any, event: Mapping[str, Any], cwd: str,
             raise OrchestrationError("reviewer repair boundary rejected the verdict") from error
         if verdict.effective_risk != "green" and verdict.verdict != "escalate":
             raise OrchestrationError("non-GREEN reviewer risk must not advance or repair automatically")
-    elif verdict.verdict == "blocker":
+    elif verdict.verdict == "blocker" and lane == "protected-yellow":
         pr, issue, comments = _refetch_unchanged(
             client, pr_number, issue_number, run.head_sha, run, current, authorization
         )
         persist_protected_blocker_evidence(client, comments, pr, issue, run.head_sha, verdict)
-        lane_name = "automated YELLOW" if lane == yellow_policy.AUTOMATED_YELLOW_LANE else "protected YELLOW"
-        raise OrchestrationError(lane_name + " review cannot authorize automatic repair")
+        raise OrchestrationError("protected YELLOW review cannot authorize automatic repair")
+    elif verdict.verdict == "blocker" and lane == yellow_policy.AUTOMATED_YELLOW_LANE:
+        pr, issue, comments = _refetch_unchanged(
+            client, pr_number, issue_number, run.head_sha, run, current, authorization
+        )
+        persist_protected_blocker_evidence(client, comments, pr, issue, run.head_sha, verdict)
+        pr, issue, comments = client.pr(pr_number), client.issue(issue_number), client.comments(pr_number)
+        accepted_protected_blocker_evidence(comments, pr, issue, run.head_sha, verdict)
+        try:
+            reviewer.validate_repairable_findings(trusted_snapshot, verdict)
+        except reviewer.ReviewError as error:
+            raise OrchestrationError("reviewer repair boundary rejected the YELLOW verdict") from error
+        transition_input = _state_input(pr_number, issue_number, run.head_sha, current, "verdict", verdict)
+        plan = state_contract.transition(transition_input)
+        apply_transition(client, pr, issue, comments, transition_input, plan)
+        (pr, issue, comments, current, paths, authorization_key,
+         blocker_evidence_key) = _revalidate_yellow_repair_authorization(
+            client, pr_number, issue_number, run, verdict
+        )
+        accepted_key = plan.decision_key if not plan.idempotent_no_op else accepted_blocker_decision_key(
+            comments, pr_number, issue_number, run.head_sha
+        )
+        return _yellow_repair(
+            client, pr, issue, comments, current, verdict, accepted_key,
+            authorization_key, blocker_evidence_key, paths, cwd,
+        )
     pr, issue, comments = _refetch_unchanged(client, pr_number, issue_number, run.head_sha, run, current, authorization)
     transition_input = _state_input(pr_number, issue_number, run.head_sha, current, "verdict", verdict)
     plan = state_contract.transition(transition_input)

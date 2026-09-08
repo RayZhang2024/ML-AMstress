@@ -37,14 +37,20 @@ PR comments record exact-head CI observations, state decision keys, and repair
 attempts. Before any successful-head state mutation, the trusted coordinator
 idempotently verifies or creates the four repository review labels and fails
 closed if their evidence or creation is ambiguous. A repair uses the exact
-accepted pending-to-blocker A5.2 decision key, can run only for an accepted
-GREEN blocker, at most twice,
-and only within the PR's already-reviewed GREEN changed-file set. A successful
-A5.3 repair must prove its pushed head before A5.2 returns the PR to pending;
-the next exact-head CI completion performs any further review.
+accepted pending-to-blocker A5.2 decision key. GREEN repair remains limited to
+an accepted GREEN blocker and its already-reviewed changed-file set. The
+distinct automated-YELLOW repair contract additionally binds the canonical
+#147 authorization, refetched exact #143 blocker evidence, effective YELLOW
+risk, exact head, accepted finding IDs, and authorized paths. It rejects
+external/runtime/scientific findings and never applies to manual protected-
+YELLOW PRs. Both lanes share the same persistent maximum of two attempts; there
+is no second resettable counter. A successful repair must prove its pushed head
+before A5.2 returns the PR to pending; the next exact-head CI completion
+performs any further review.
 
-The loop contains no merge or auto-merge behavior. Ordinary GREEN workers are
-also denied all live A5 control-plane scripts and `.github/**` paths.
+The loop contains no merge or auto-merge behavior. Ordinary GREEN workers and
+GREEN A5.3 repair are denied the distinct YELLOW repair module, all other live
+A5 control-plane scripts, and `.github/**` paths.
 
 Before A5.3 is authorized, trusted A5.1 classifies issue acceptance criteria as
 repository-editable or external/post-run. A criterion is external only when it

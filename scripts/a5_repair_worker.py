@@ -37,6 +37,7 @@ WINDOWS_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 REPAIRABLE_FINDING_CATEGORIES = frozenset(("scope", "policy", "security", "tests", "ci", "evidence"))
 PROTECTED_PATHS = frozenset((
     "scripts/codex_issue_worker.py", "AGENTS.md", "docs/AUTONOMOUS_DEVELOPMENT.md",
+    "scripts/a5_yellow_repair_worker.py",
     "docs/AUTONOMOUS_ORCHESTRATION.md", "docs/AUTONOMOUS_WORKER_RUNBOOK.md",
 ))
 PROTECTED_PREFIXES = (".github/", "scripts/a6_")

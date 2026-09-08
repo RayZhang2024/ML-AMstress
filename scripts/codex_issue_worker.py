@@ -98,6 +98,7 @@ PROTECTED_CONTROL_PLANE_FILES = (
     "scripts/a5_reviewer.py",
     "scripts/a5_review_state.py",
     "scripts/a5_repair_worker.py",
+    "scripts/a5_yellow_repair_worker.py",
     "scripts/a5_review_orchestrator.py",
     "AGENTS.md",
     "docs/AUTONOMOUS_DEVELOPMENT.md",

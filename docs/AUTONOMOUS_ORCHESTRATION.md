@@ -248,8 +248,14 @@ controlled-runtime authorization and from merge authorization. The shared
 worker may enter the automated-YELLOW lane only with canonical #147 pre-start
 evidence; `risk:yellow` or `agent:codex` alone is insufficient. It uses the
 canonical `codex-yellow/issue-<N>-<slug>` branch and emits canonical claim and
-A5 identity markers, while automatic YELLOW repair remains disabled. Uncertain
-scope fails closed rather than being inferred GREEN.
+A5 identity markers. After an exact-head blocker review, trusted A5 may run the
+separate automated-YELLOW repair contract only after persisting and refetching
+matching #143 blocker evidence, revalidating all #147 identity and path
+authority, and proving every finding is repository-editable and tied to an
+acceptance criterion. Manual protected-YELLOW remains non-repairable. Automated
+YELLOW and GREEN share one persistent two-attempt history; neither lane can
+reset or extend it. Uncertain scope fails closed rather than being inferred
+GREEN.
 
 The trusted pre-start transport is exactly one maintainer-authored issue
 comment whose entire body is
@@ -265,8 +271,10 @@ evidence fails closed before Codex runs.
 The single `issues:labeled` workflow in `.github/workflows/codex-green-worker.yml`
 activates exactly one lane for a fresh `agent:codex` event: established GREEN,
 or canonical pre-authorized automated YELLOW. Invalid, ambiguous, RED, and
-scientific/runtime scope is rejected. Both lanes remain fail-closed,
-review-first, and unable to repair YELLOW work, merge, or enable auto-merge.
+scientific/runtime scope is rejected. Both lanes remain fail-closed and review-
+first. The router itself cannot repair work; only the later exact-head A5 review
+boundary can invoke the distinct bounded automated-YELLOW repair. Neither lane
+can merge or enable auto-merge.
 After a valid first-attempt event resolves the exact issue, a routing or
 pre-start rejection replaces all issue status labels with exactly
 `status:blocked`. Malformed or untrusted event identity is rejected before any
