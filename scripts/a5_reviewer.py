@@ -57,6 +57,21 @@ CONTROL_PLANE_REQUIREMENT_RE = re.compile(
     r"github(?:-side)?\s+(?:evidence|state)\b"
     r")"
 )
+HISTORICAL_EVIDENCE_REQUIREMENT_RE = re.compile(
+    r"(?ix)\b(?:"
+    r"(?:initial|prior|previous|pre[-\s]?repair|phase[-\s]?1|original)\s+(?:head|sha|file|fixture|state|content)\b|"
+    r"(?:head|sha|file|fixture|state|content)\b.*\b(?:initial|prior|previous|pre[-\s]?repair|phase[-\s]?1|original)\b|"
+    r"(?:persisted|pre[-\s]?repair)\b.*\b(?:a5\s+)?(?:blocker|review)\s+evidence\b|"
+    r"(?:blocker|review)\s+evidence\b.*\b(?:persisted|pre[-\s]?repair|historical)\b|"
+    r"(?:repair[-\s]?lane|automated[-\s]?yellow)\b.*\b(?:execution|history|attempt|repair)\b|"
+    r"(?:repair\s+)?attempt\s+count\b|"
+    r"(?:repair[-\s]?budget|repair\s+budget|no[-\s]?reset|reset)\b.*\b(?:observed|observations?|evidence|history|attempt|"
+    r"max_repair_attempts|max\s+repair\s+attempts)\b|"
+    r"max_repair_attempts\b.*\b(?:observed|unchanged|history|attempt|budget|reset)\b|"
+    r"(?:same[-\s]?)?(?:pr|pull\s+request|branch)\b.*\b(?:lifecycle|repair\s+observations?|repair\s+history)\b|"
+    r"\bhistorical\b.*\b(?:head|sha|file|fixture|state|content|evidence|repair|attempt)\b"
+    r")"
+)
 EXPLICIT_FILE_DELIVERABLE_RE = re.compile(
     r"(?i)\b(?:file|fixture|document(?:ation)?)\b.*\b(?:must|shall|contains?|include|exactly)\b|"
     r"\b(?:must|shall|contains?|include|exactly)\b.*\b(?:file|fixture|document(?:ation)?)\b"
@@ -225,6 +240,18 @@ def _acceptance_lines(issue_body: str) -> tuple[str, ...]:
     return tuple(values)
 
 
+def _is_external_acceptance_requirement(text: str) -> bool:
+    historical_or_control = bool(CONTROL_PLANE_REQUIREMENT_RE.search(text) or
+                                 HISTORICAL_EVIDENCE_REQUIREMENT_RE.search(text))
+    if historical_or_control:
+        return True
+    # Explicit current-head file deliverables remain repository-editable only
+    # when no external signal matched.
+    if EXPLICIT_FILE_DELIVERABLE_RE.search(text):
+        return False
+    return False
+
+
 def classify_acceptance_requirements(issue_body: str, ci_checks: Sequence[CheckEvidence],
                                     worker_metadata: Mapping[str, str]) -> tuple[AcceptanceRequirement, ...]:
     """Classify contract criteria as repository-editable or external evidence."""
@@ -232,7 +259,7 @@ def classify_acceptance_requirements(issue_body: str, ci_checks: Sequence[CheckE
     statuses = {item.name.casefold(): item.status for item in ci_checks}
     worker_run_id = worker_metadata.get("worker_run_id", "")
     for number, text in enumerate(_acceptance_lines(issue_body), 1):
-        external = bool(CONTROL_PLANE_REQUIREMENT_RE.search(text)) and not bool(EXPLICIT_FILE_DELIVERABLE_RE.search(text))
+        external = _is_external_acceptance_requirement(text)
         kind, status = "repository", "repository"
         if external:
             kind, status = "external", "pending/unverified"
