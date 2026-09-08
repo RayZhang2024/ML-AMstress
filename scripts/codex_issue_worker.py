@@ -184,7 +184,8 @@ def _configured_codex_executable():
     return os.environ.get("CODEX_EXECUTABLE", "codex").strip()
 
 
-CODEX_WORKER_MODEL = "gpt-5.5"
+CODEX_WORKER_MODEL = "gpt-5.6-terra"
+CODEX_WORKER_REASONING_EFFORT = "medium"
 
 
 def resolve_codex_executable(executable=None):
@@ -209,6 +210,8 @@ def _codex_command_tokens(executable=None):
         CODEX_WORKER_MODEL,
         "--sandbox",
         "workspace-write",
+        "-c",
+        'model_reasoning_effort="%s"' % CODEX_WORKER_REASONING_EFFORT,
         "-c",
         'approval_policy="never"',
     ]

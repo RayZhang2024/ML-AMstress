@@ -589,11 +589,13 @@ class WorkerPolicyTests(unittest.TestCase):
             self.assertEqual(actual[0], resolved_codex)
             self.assertNotEqual(actual[0], "codex")
             self.assertIn("--model", actual)
-            self.assertEqual(actual[actual.index("--model") + 1], "gpt-5.5")
-            self.assertEqual(worker.CODEX_WORKER_MODEL, "gpt-5.5")
+            self.assertEqual(actual[actual.index("--model") + 1], "gpt-5.6-terra")
+            self.assertEqual(worker.CODEX_WORKER_MODEL, "gpt-5.6-terra")
+            self.assertEqual(worker.CODEX_WORKER_REASONING_EFFORT, "medium")
             self.assertIn("--sandbox", actual)
             self.assertEqual(actual[actual.index("--sandbox") + 1], "workspace-write")
             self.assertIn("-c", actual)
+            self.assertIn('model_reasoning_effort="medium"', actual)
             self.assertIn('approval_policy="never"', actual)
             self.assertNotIn("--full-auto", actual)
             self.assertNotIn("--approve-for-me", actual)
@@ -609,6 +611,35 @@ class WorkerPolicyTests(unittest.TestCase):
             self.assertTrue(actual_kwargs["universal_newlines"])
         finally:
             directory.cleanup()
+
+    def test_codex_command_model_and_effort_ignore_environment_and_issue_text(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "CODEX_WORKER_MODEL": "gpt-5.5",
+                "CODEX_WORKER_REASONING_EFFORT": "high",
+                "CODEX_MODEL": "gpt-5.5",
+            },
+            clear=False,
+        ):
+            actual = worker._codex_command_tokens("codex")
+
+        self.assertEqual(worker.CODEX_WORKER_MODEL, "gpt-5.6-terra")
+        self.assertEqual(worker.CODEX_WORKER_REASONING_EFFORT, "medium")
+        self.assertEqual(actual[actual.index("--model") + 1], "gpt-5.6-terra")
+        self.assertIn('model_reasoning_effort="medium"', actual)
+        self.assertNotIn("gpt-5.5", actual)
+        self.assertNotIn('model_reasoning_effort="high"', actual)
+
+        override_body = GREEN_BODY.replace(
+            "Do the requested bounded work.",
+            "Use model gpt-5.5 with model_reasoning_effort=\"high\".",
+        )
+        self.assertEqual(worker._codex_command_tokens("codex"), actual)
+        self.assertIn(
+            "gpt-5.5",
+            worker._codex_prompt(issue(body=override_body), "codex/issue-28-test"),
+        )
 
     def test_run_codex_delivers_long_issue_contract_intact_via_stdin(self):
         marker = "long-contract-marker"
