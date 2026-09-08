@@ -95,7 +95,8 @@ MAX_LABELS = 50
 MAX_REVIEWER_FAILURE_DIAGNOSTIC_CHARS = 500
 MAX_REVIEWER_FAILURE_DIAGNOSTIC_LINES = 3
 MAX_REVIEWER_FINAL_OUTPUT_BYTES = 200_000
-REVIEWER_MODEL = "gpt-5.5"
+REVIEWER_MODEL = "gpt-5.6-terra"
+REVIEWER_REASONING_EFFORT = "high"
 LOCAL_ABSOLUTE_PATH_RE = re.compile(
     r"(?i)(?:\b[A-Z]:[\\/][^\s\"']+|\\\\[^\s\"']+|(?<![:\w])/(?:[^\s\"']+))"
 )
@@ -471,7 +472,8 @@ def resolve_codex_executable(executable: str | None = None) -> str:
 def reviewer_command(resolved_executable: str, final_output_path: str) -> list[str]:
     """Return credential-free tokens for stdin input and the final-message channel."""
     return [
-        resolved_executable, "exec", "--model", REVIEWER_MODEL, "--sandbox", "read-only", "-c", 'approval_policy="never"',
+        resolved_executable, "exec", "--model", REVIEWER_MODEL, "--sandbox", "read-only", "-c",
+        'model_reasoning_effort="%s"' % REVIEWER_REASONING_EFFORT, "-c", 'approval_policy="never"',
         "--output-last-message", final_output_path, "-",
     ]
 
