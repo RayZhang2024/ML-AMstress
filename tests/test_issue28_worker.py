@@ -739,6 +739,7 @@ class WorkerPolicyTests(unittest.TestCase):
             }), encoding="utf-8")
             with mock.patch.dict(os.environ, {
                 "GITHUB_EVENT_PATH": str(event_path),
+                "GITHUB_RUN_ATTEMPT": "1",
                 "GITHUB_TOKEN": "state-token",
             }, clear=True), mock.patch.object(worker.Worker, "execute") as execute:
                 with self.assertRaisesRegex(worker.WorkerError, "AUTOMATION_APP_TOKEN"):
@@ -1008,9 +1009,14 @@ class WorkerPolicyTests(unittest.TestCase):
     def test_event_gate_requires_agent_codex_label(self):
         with tempfile.TemporaryDirectory() as directory:
             event_path = Path(directory) / "event.json"
-            event_path.write_text(json.dumps({"action": "labeled", "label": {"name": "status:ready"}, "issue": {"number": 28}}))
+            event_path.write_text(json.dumps({
+                "action": "labeled",
+                "label": {"name": "status:ready"},
+                "issue": {"number": 28},
+                "repository": {"full_name": worker.REPOSITORY},
+            }))
             with self.assertRaises(worker.WorkerError):
-                worker._event_issue_number(str(event_path))
+                worker._trigger_context(str(event_path), "1")
 
 
 class WorkflowContractTests(unittest.TestCase):
@@ -1067,7 +1073,7 @@ class WorkflowContractTests(unittest.TestCase):
         diagnostic = self.workflow.index(
             "      - name: Diagnose isolated workspace cleanliness"
         )
-        worker_step = self.workflow.index("      - name: Run fail-closed GREEN worker")
+        worker_step = self.workflow.index("      - name: Run fail-closed GREEN/YELLOW router")
         self.assertLess(checkout, line_endings)
         self.assertLess(line_endings, local_python)
         self.assertLess(line_endings, diagnostic)
@@ -1093,7 +1099,7 @@ class WorkflowContractTests(unittest.TestCase):
         diagnostic = self.workflow.index(
             "      - name: Diagnose isolated workspace cleanliness"
         )
-        worker_step = self.workflow.index("      - name: Run fail-closed GREEN worker")
+        worker_step = self.workflow.index("      - name: Run fail-closed GREEN/YELLOW router")
         self.assertLess(dependencies, diagnostic)
         self.assertLess(diagnostic, worker_step)
         diagnostic_step = self.workflow[diagnostic:worker_step]

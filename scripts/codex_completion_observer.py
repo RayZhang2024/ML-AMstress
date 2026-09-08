@@ -1,4 +1,4 @@
-"""Trusted, GitHub-native terminal observer for the GREEN Codex worker.
+"""Trusted, GitHub-native terminal observer for the Codex issue worker.
 
 This module deliberately has no Codex, repair, merge, or label-mutation path.
 It resolves an issue only through the existing trusted worker claim marker and
@@ -16,10 +16,12 @@ import urllib.error
 import urllib.request
 from typing import Any, Mapping, Sequence
 
+from scripts import yellow_lane_policy as yellow_policy
+
 
 REPOSITORY = "RayZhang2024/ML-AMstress"
 BASE_BRANCH = "main"
-WORKFLOW_NAME = "GREEN Codex issue worker"
+WORKFLOW_NAME = "Codex issue worker"
 WORKFLOW_EVENT = "issues"
 TERMINAL_CONCLUSIONS = frozenset((
     "success", "failure", "cancelled", "skipped", "timed_out",
@@ -31,11 +33,11 @@ MAX_ISSUES = 100
 MAX_COMMENTS = 100
 MAX_AUDIT = 1024
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-BRANCH_RE = re.compile(r"^codex/issue-[1-9][0-9]*-[a-z0-9][a-z0-9-]{0,80}$")
+GREEN_BRANCH_RE = re.compile(r"^codex/issue-[1-9][0-9]*-[a-z0-9][a-z0-9-]{0,80}$")
 TIMESTAMP_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 CLAIM_MARKER_RE = re.compile(
     r"^<!-- codex-worker-claim issue:([1-9][0-9]*) run:([1-9][0-9]*) "
-    r"branch:(codex/issue-[1-9][0-9]*-[a-z0-9][a-z0-9-]{0,80}) -->$"
+    r"branch:([a-z0-9][a-z0-9/-]{0,127}) -->$"
 )
 COMPLETION_MARKER_RE = re.compile(r"^<!-- a4\.18-completion:(\{.*\}) -->$")
 OBSERVER_USER_AGENT = "ml-amstress-codex-completion-observer"
@@ -85,7 +87,11 @@ def _sha(value: Any, name: str) -> str:
 
 
 def _claim_branch(value: Any, name: str) -> str:
-    if not isinstance(value, str) or not BRANCH_RE.fullmatch(value):
+    if isinstance(value, str) and GREEN_BRANCH_RE.fullmatch(value):
+        return value
+    try:
+        yellow_policy.validate_yellow_branch(value)
+    except yellow_policy.PolicyError:
         raise ObserverError(name + " is invalid")
     return value
 
@@ -97,7 +103,7 @@ def _timestamp(value: Any, name: str) -> str:
 
 
 def parse_workflow_run(event: Mapping[str, Any]) -> WorkflowRun:
-    """Accept only the exact terminal GREEN worker event from this repository."""
+    """Accept only the exact terminal shared-worker event from this repository."""
     if not isinstance(event, Mapping):
         raise ObserverError("workflow event is invalid")
     repository = event.get("repository")
@@ -107,7 +113,7 @@ def parse_workflow_run(event: Mapping[str, Any]) -> WorkflowRun:
     if not isinstance(run, Mapping) or run.get("name") != WORKFLOW_NAME:
         raise ObserverError("workflow event name is invalid")
     if run.get("event") != WORKFLOW_EVENT or run.get("status") != "completed":
-        raise ObserverError("workflow event is not a completed GREEN worker run")
+        raise ObserverError("workflow event is not a completed Codex worker run")
     conclusion = run.get("conclusion")
     if conclusion not in TERMINAL_CONCLUSIONS:
         raise ObserverError("workflow event conclusion is not terminal")
@@ -135,7 +141,14 @@ def parse_claim_marker(body: Any) -> Claim | None:
     match = CLAIM_MARKER_RE.fullmatch(first_line)
     if not match:
         return None
-    return Claim(int(match.group(1)), int(match.group(2)), _claim_branch(match.group(3), "claim branch"))
+    issue_number = int(match.group(1))
+    branch = _claim_branch(match.group(3), "claim branch")
+    if branch.startswith("codex-yellow/"):
+        try:
+            yellow_policy.validate_yellow_branch(branch, issue_number)
+        except yellow_policy.PolicyError:
+            raise ObserverError("claim branch is invalid") from None
+    return Claim(issue_number, int(match.group(2)), branch)
 
 
 def _trusted_comment(comment: Mapping[str, Any]) -> bool:

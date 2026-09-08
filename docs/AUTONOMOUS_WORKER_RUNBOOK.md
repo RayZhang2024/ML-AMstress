@@ -1,6 +1,9 @@
-# GREEN Codex worker runbook
+# GREEN/YELLOW Codex worker runbook
 
-This is the authoritative operational guide for the current review-first GREEN worker, proven in the controlled Issue #30 integration. It does not authorize changes to worker behavior, workflow permissions, authentication, claim semantics, validation, or merge policy.
+This is the authoritative operational guide for the current review-first
+trusted router. The GREEN lane was proven in the controlled Issue #30
+integration. The automated-YELLOW lane is separately pre-authorized and does
+not itself authorize controlled runtime, repair, or merge.
 
 Use it with [AUTONOMOUS_DEVELOPMENT.md](AUTONOMOUS_DEVELOPMENT.md) and [AUTONOMOUS_ORCHESTRATION.md](AUTONOMOUS_ORCHESTRATION.md). For recovery, see [AUTONOMOUS_TROUBLESHOOTING.md](AUTONOMOUS_TROUBLESHOOTING.md).
 GitHub-native terminal observations are documented separately in
@@ -31,8 +34,8 @@ Never place runner registration tokens, GitHub tokens, ChatGPT session material,
 The trusted worker owns all GitHub/control-plane actions: eligibility and dependency checks, deterministic branch claim, labels/status, authoritative normal-Python validation, commit, trusted push, PR creation, and merge/no-merge policy. Sandboxed Codex treats its immutable claimed snapshot as authoritative and owns only the local Necessity Gate, scoped implementation, optional focused checks, and truthful reporting. It does not query GitHub or receive GitHub/API credentials.
 
 ```text
-completed pre-start GREEN risk assessment + risk:green + status:ready
-  + fresh agent:codex label
+completed pre-start assessment + status:ready + fresh agent:codex label
+  + risk:green, or risk:yellow plus canonical trusted #147 evidence
   -> trusted preflight, eligibility, deterministic claim -> status:in-progress
   -> sandboxed Codex implementation / optional focused checks
   -> trusted normal-Python validation, commit, push, PR -> status:review
@@ -42,15 +45,33 @@ completed pre-start GREEN risk assessment + risk:green + status:ready
 
 Failure preserves the deterministic claim branch and blocks the work; do not launch a concurrent worker. Authorized recovery must deliberately delete or reset a failed claim before a new trigger can claim it.
 
-The `agent:codex` event is an ordinary GREEN trigger only. Before adding it,
+The `agent:codex` event enters one trusted router. Before adding it,
 the orchestration owner must assess expected paths, affected behavior/control-
 plane surface, generated artifacts, and required evidence. Protected paths,
-YELLOW/RED behavior or evidence, and uncertain scope must use the separately
-authorized protected path and fail closed rather than being inferred GREEN.
+YELLOW behavior require canonical pre-start authorization; RED, scientific/
+runtime behavior, and uncertain scope fail closed rather than being inferred
+GREEN or YELLOW. The YELLOW lane uses `codex-yellow/issue-<N>-<slug>`, emits
+canonical claim/A5 identity evidence, enforces the authorized changed-path
+subset repeatedly, and cannot invoke automatic repair.
 An existing label is not a retry mechanism. `status:review` records a
 reviewable implementation, not issue completion: controlled runtime/scientific
 acceptance and human merge remain separately authorized, and merge is bound to
 the reviewed current head where the platform supports it.
+
+The router accepts only a first-attempt (`GITHUB_RUN_ATTEMPT=1`) label event
+whose repository and positive issue identity are exact. A workflow rerun is
+not a fresh label event. Invalid event identity stops before issue mutation;
+after a valid event resolves its exact issue, any routing/pre-start rejection
+sets exactly one `status:blocked` label. Lane-specific failures remain owned by
+the existing GREEN or YELLOW worker after delegation.
+
+The automated-YELLOW pre-start transport is one exact maintainer-authored
+`<!-- yellow-implementation-prestart:{canonical-#147-json} -->` issue comment.
+The trusted worker binds it to the repository, issue, current base SHA, YELLOW
+risk, scientific/runtime prohibition, and exact authorized paths before claim;
+then it writes canonical `a5.yellow-prestart`, `a5.yellow-claim`, and run-bound
+completion-observer identity markers. Those records authorize neither repair,
+controlled runtime, nor merge.
 
 ## Rebuild and preflight checklist
 

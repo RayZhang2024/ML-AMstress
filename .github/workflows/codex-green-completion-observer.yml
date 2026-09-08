@@ -2,7 +2,7 @@ name: GREEN Codex worker completion observer
 
 on:
   workflow_run:
-    workflows: ["GREEN Codex issue worker"]
+    workflows: ["Codex issue worker"]
     types: [completed]
 
 # This observer only reads completed worker evidence and writes a bounded issue
@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   observe-terminal-worker-run:
-    if: github.event.workflow_run.name == 'GREEN Codex issue worker' && github.event.workflow_run.status == 'completed'
+    if: github.event.workflow_run.name == 'Codex issue worker' && github.event.workflow_run.status == 'completed'
     runs-on: ubuntu-latest
     steps:
       - name: Check out trusted main control plane
