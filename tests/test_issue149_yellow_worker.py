@@ -25,6 +25,15 @@ def labels(*names):
     return [{"name": name} for name in names]
 
 
+def trigger(**changes):
+    value = worker.TriggerContext(
+        "labeled", "agent:codex", worker.REPOSITORY, ISSUE_NUMBER, 1
+    )
+    if changes:
+        value = worker.TriggerContext(**dict(value.__dict__, **changes))
+    return value
+
+
 def yellow_issue(**changes):
     value = {
         "number": ISSUE_NUMBER,
@@ -148,11 +157,118 @@ class RoutingAndAuthorizationTests(unittest.TestCase):
                     return Stub(policy.YELLOW)
 
                 result = worker.IssueRouter(
-                    client, client, ISSUE_NUMBER, "900", green_factory=green_factory,
+                    client, client, trigger(), "900", green_factory=green_factory,
                     yellow_factory=yellow_factory,
                 ).execute()
                 self.assertEqual(result, expected)
                 self.assertEqual(calls, [expected])
+
+    def test_trigger_context_requires_exact_first_attempt_event_identity(self):
+        valid_payload = {
+            "action": "labeled",
+            "label": {"name": "agent:codex"},
+            "issue": {"number": ISSUE_NUMBER},
+            "repository": {"full_name": worker.REPOSITORY},
+        }
+        cases = (
+            ({key: value for key, value in valid_payload.items() if key != "repository"}, "1"),
+            (dict(valid_payload, repository={"full_name": "other/repo"}), "1"),
+            (dict(valid_payload, action="edited"), "1"),
+            (dict(valid_payload, label={"name": "status:ready"}), "1"),
+            (dict(valid_payload, issue={"number": 0}), "1"),
+            (valid_payload, "2"),
+            (valid_payload, None),
+        )
+        for payload, attempt in cases:
+            with self.subTest(payload=payload, attempt=attempt), tempfile.TemporaryDirectory() as directory:
+                event_path = Path(directory) / "event.json"
+                event_path.write_text(json.dumps(payload), encoding="utf-8")
+                with self.assertRaises(worker.WorkerError):
+                    worker._trigger_context(str(event_path), attempt)
+        with tempfile.TemporaryDirectory() as directory:
+            event_path = Path(directory) / "event.json"
+            event_path.write_text(json.dumps(valid_payload), encoding="utf-8")
+            self.assertEqual(
+                worker._trigger_context(str(event_path), "1"), trigger()
+            )
+
+    def test_invalid_event_never_resolves_or_mutates_an_issue(self):
+        contexts = (
+            trigger(run_attempt=2),
+            trigger(repository=""),
+            trigger(repository="other/repo"),
+            trigger(action="edited"),
+            trigger(added_label="status:ready"),
+        )
+        for context in contexts:
+            client = FakeClient(issue=green_issue(), comments=[])
+            green_factory = mock.Mock()
+            with self.subTest(context=context), self.assertRaises(worker.WorkerError):
+                worker.IssueRouter(
+                    client, client, context, "900", green_factory=green_factory
+                ).execute()
+            self.assertEqual(client.events, [])
+            green_factory.assert_not_called()
+
+    def test_router_rejections_set_exactly_one_blocked_status(self):
+        green = FakeClient(issue=green_issue(), comments=[])
+        green.refs[worker.deterministic_branch_name(ISSUE_NUMBER, TITLE)] = BASE_SHA
+        yellow = FakeClient(comments=[])
+        for client in (green, yellow):
+            with self.subTest(risk=worker._label_names(client.issue_data)), self.assertRaises(worker.WorkerError):
+                worker.IssueRouter(
+                    client, client, trigger(), "900",
+                    green_factory=mock.Mock(), yellow_factory=mock.Mock(),
+                ).execute()
+            statuses = [name for name in worker._label_names(client.issue_data)
+                        if name.startswith("status:")]
+            self.assertEqual(statuses, ["status:blocked"])
+
+        ambiguous = FakeClient(
+            issue=green_issue(labels=labels(
+                "status:ready", "status:review", "risk:green", "agent:codex"
+            )),
+            comments=[],
+        )
+        with self.assertRaises(worker.WorkerError):
+            worker.IssueRouter(ambiguous, ambiguous, trigger(), "900").execute()
+        self.assertEqual(
+            [name for name in worker._label_names(ambiguous.issue_data)
+             if name.startswith("status:")],
+            ["status:blocked"],
+        )
+
+    def test_preclaim_failure_then_workflow_rerun_cannot_execute(self):
+        client = FakeClient(comments=[])
+        yellow_factory = mock.Mock()
+        with self.assertRaises(worker.WorkerError):
+            worker.IssueRouter(
+                client, client, trigger(), "900", yellow_factory=yellow_factory
+            ).execute()
+        mutation_count = len(client.events)
+        with self.assertRaisesRegex(worker.WorkerError, "fresh first execution"):
+            worker.IssueRouter(
+                client, client, trigger(run_attempt=2), "900", yellow_factory=yellow_factory
+            ).execute()
+        self.assertEqual(len(client.events), mutation_count)
+        yellow_factory.assert_not_called()
+
+    def test_delegated_green_failure_is_not_handled_again_by_router(self):
+        client = FakeClient(issue=green_issue(), comments=[])
+
+        class DelegatedFailure:
+            def execute(self):
+                raise worker.WorkerError("delegated GREEN failure")
+
+        router = worker.IssueRouter(
+            client, client, trigger(), "900",
+            green_factory=lambda *args, **kwargs: DelegatedFailure(),
+        )
+        with mock.patch.object(router, "_block_resolved_issue") as router_block:
+            with self.assertRaisesRegex(worker.WorkerError, "delegated GREEN failure"):
+                router.execute()
+        router_block.assert_not_called()
+        self.assertEqual(client.events, [])
 
     def test_yellow_requires_exact_maintainer_canonical_prestart(self):
         canonical = policy.serialize_prestart(prestart_value())
@@ -166,7 +282,7 @@ class RoutingAndAuthorizationTests(unittest.TestCase):
         )
         for comments in cases:
             with self.subTest(comments=comments), self.assertRaises(worker.WorkerError):
-                worker.select_issue_lane(FakeClient(comments=comments), ISSUE_NUMBER)
+                worker.select_issue_lane(FakeClient(comments=comments), trigger())
         evidence, serialized = worker.yellow_prestart_authorization(
             [prestart_comment()], ISSUE_NUMBER, BASE_SHA
         )
@@ -190,7 +306,7 @@ class RoutingAndAuthorizationTests(unittest.TestCase):
         cases += (branch_duplicate,)
         for client in cases:
             with self.subTest(issue=client.issue_data), self.assertRaises(worker.WorkerError):
-                worker.select_issue_lane(client, ISSUE_NUMBER)
+                worker.select_issue_lane(client, trigger())
 
     def test_authorized_changed_paths_are_exact_subset_and_reject_unsafe_scope(self):
         evidence = policy.validate_prestart(prestart_value([".github/workflows/codex-green-worker.yml", "docs/example.md"]))
@@ -216,7 +332,7 @@ class RoutingAndAuthorizationTests(unittest.TestCase):
 class YellowExecutionTests(unittest.TestCase):
     def _execute(self, client=None, paths=("docs/example.md",), codex=None):
         client = client or FakeClient()
-        decision = worker.select_issue_lane(client, ISSUE_NUMBER)
+        decision = worker.select_issue_lane(client, trigger())
         codex = codex or mock.Mock(return_value=("implemented", ""))
         validate = mock.Mock()
 
@@ -270,7 +386,7 @@ class YellowExecutionTests(unittest.TestCase):
 
     def test_scope_failure_after_codex_blocks_before_validation_push_pr_or_repair(self):
         client = FakeClient()
-        decision = worker.select_issue_lane(client, ISSUE_NUMBER)
+        decision = worker.select_issue_lane(client, trigger())
         validate, push = mock.Mock(), mock.Mock()
         with mock.patch.object(worker, "checkout_claimed_worker_branch"), mock.patch.object(
             worker, "_all_changed_paths", return_value=("docs/unauthorized.md",)
@@ -286,7 +402,7 @@ class YellowExecutionTests(unittest.TestCase):
 
     def test_scope_is_rechecked_after_validation_and_before_push(self):
         client = FakeClient()
-        decision = worker.select_issue_lane(client, ISSUE_NUMBER)
+        decision = worker.select_issue_lane(client, trigger())
         validate, push = mock.Mock(), mock.Mock()
         with mock.patch.object(worker, "checkout_claimed_worker_branch"), mock.patch.object(
             worker, "_all_changed_paths",
@@ -304,7 +420,7 @@ class YellowExecutionTests(unittest.TestCase):
 
     def test_prestart_evidence_is_rechecked_after_validation(self):
         client = FakeClient()
-        decision = worker.select_issue_lane(client, ISSUE_NUMBER)
+        decision = worker.select_issue_lane(client, trigger())
 
         def mutate_authorization(_cwd):
             client.comment_data[0] = prestart_comment(paths=["docs/other.md"])
@@ -322,7 +438,7 @@ class YellowExecutionTests(unittest.TestCase):
 
     def test_issue_race_after_push_cannot_create_a_pr(self):
         client = FakeClient()
-        decision = worker.select_issue_lane(client, ISSUE_NUMBER)
+        decision = worker.select_issue_lane(client, trigger())
 
         def push_then_mutate(_cwd, branch):
             client.refs[branch] = HEAD_SHA
@@ -350,7 +466,7 @@ class YellowExecutionTests(unittest.TestCase):
 
     def test_preclaim_and_postclaim_races_fail_closed(self):
         client = FakeClient()
-        decision = worker.select_issue_lane(client, ISSUE_NUMBER)
+        decision = worker.select_issue_lane(client, trigger())
         client.issue_data["updated_at"] = "v2"
         with self.assertRaisesRegex(worker.WorkerError, "changed before"):
             worker.YellowWorker(
@@ -360,7 +476,7 @@ class YellowExecutionTests(unittest.TestCase):
         self.assertNotIn(BRANCH, client.refs)
 
         client = FakeClient()
-        decision = worker.select_issue_lane(client, ISSUE_NUMBER)
+        decision = worker.select_issue_lane(client, trigger())
 
         def mutate_claim(branch, sha):
             client.refs[branch] = sha
@@ -382,7 +498,7 @@ class YellowExecutionTests(unittest.TestCase):
         claim_comment = {"body": "<!-- a5.yellow-claim:" + claim + " -->",
                          "user": {"login": worker.TRUSTED_WORKER_AUDIT_AUTHOR}}
         client = FakeClient(comments=[prestart_comment(), claim_comment])
-        decision = worker.select_issue_lane(client, ISSUE_NUMBER)
+        decision = worker.select_issue_lane(client, trigger())
         codex = mock.Mock()
         with self.assertRaisesRegex(worker.WorkerError, "exists before branch claim"):
             worker.YellowWorker(

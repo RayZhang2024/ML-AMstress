@@ -54,7 +54,9 @@ declaration, not permission to bypass the effective-risk escalation rules.
   duplicate, and claim conditions. YELLOW additionally requires one canonical
   trusted pre-start authorization bound to the repository, issue, exact base,
   effective risk, and authorized paths. Re-adding or leaving an existing label
-  is not a retry or permission to bypass a failed claim.
+  is not a retry or permission to bypass a failed claim. The trusted event must
+  identify this repository and issue exactly, and only GitHub run attempt `1`
+  is accepted; rerunning the same label event cannot execute another claim.
 - `agent:gpt-review` — optional routing/request metadata for a future GPT
   review pass.
 
@@ -265,3 +267,7 @@ activates exactly one lane for a fresh `agent:codex` event: established GREEN,
 or canonical pre-authorized automated YELLOW. Invalid, ambiguous, RED, and
 scientific/runtime scope is rejected. Both lanes remain fail-closed,
 review-first, and unable to repair YELLOW work, merge, or enable auto-merge.
+After a valid first-attempt event resolves the exact issue, a routing or
+pre-start rejection replaces all issue status labels with exactly
+`status:blocked`. Malformed or untrusted event identity is rejected before any
+issue mutation.

@@ -58,6 +58,13 @@ reviewable implementation, not issue completion: controlled runtime/scientific
 acceptance and human merge remain separately authorized, and merge is bound to
 the reviewed current head where the platform supports it.
 
+The router accepts only a first-attempt (`GITHUB_RUN_ATTEMPT=1`) label event
+whose repository and positive issue identity are exact. A workflow rerun is
+not a fresh label event. Invalid event identity stops before issue mutation;
+after a valid event resolves its exact issue, any routing/pre-start rejection
+sets exactly one `status:blocked` label. Lane-specific failures remain owned by
+the existing GREEN or YELLOW worker after delegation.
+
 The automated-YELLOW pre-start transport is one exact maintainer-authored
 `<!-- yellow-implementation-prestart:{canonical-#147-json} -->` issue comment.
 The trusted worker binds it to the repository, issue, current base SHA, YELLOW

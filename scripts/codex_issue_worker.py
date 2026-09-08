@@ -148,6 +148,35 @@ class RouteDecision:
     base_sha: str
     prestart: object = None
     serialized_prestart: object = None
+    trigger_context: object = None
+
+
+@dataclasses.dataclass(frozen=True)
+class TriggerContext:
+    action: str
+    added_label: str
+    repository: str
+    issue_number: int
+    run_attempt: int
+
+
+def validate_trigger_context(context):
+    """Accept only the first attempt of one exact trusted label event."""
+    if not isinstance(context, TriggerContext):
+        raise WorkerError("worker trigger context is invalid")
+    if context.action != "labeled":
+        raise WorkerError("worker only accepts issues:labeled events")
+    if context.added_label != "agent:codex":
+        raise WorkerError("event label is not agent:codex")
+    if context.repository != REPOSITORY:
+        raise WorkerError("event repository is missing or untrusted")
+    if (isinstance(context.issue_number, bool) or not isinstance(context.issue_number, int)
+            or context.issue_number < 1):
+        raise WorkerError("event issue number is invalid")
+    if (isinstance(context.run_attempt, bool) or not isinstance(context.run_attempt, int)
+            or context.run_attempt != 1):
+        raise WorkerError("worker event is not a fresh first execution attempt")
+    return context
 
 
 def _configured_codex_executable():
@@ -703,11 +732,17 @@ def _dependencies_satisfied(states):
     return all(str(value).lower() == "closed" for value in states.values())
 
 
-def select_issue_lane(client, issue_number):
+def select_issue_lane(client, context, issue_snapshot=None):
     """Select exactly one #147 lane from one trusted live snapshot."""
     policy = _yellow_policy()
-    issue = copy.deepcopy(client.issue(issue_number))
-    if (issue.get("number") != issue_number
+    context = validate_trigger_context(context)
+    if client.repository != context.repository:
+        raise WorkerError("worker client repository does not match the trusted event")
+    issue_number = context.issue_number
+    issue = copy.deepcopy(
+        client.issue(issue_number) if issue_snapshot is None else issue_snapshot
+    )
+    if (not isinstance(issue, dict) or issue.get("number") != issue_number
             or str(issue.get("state", "")).lower() != "open"):
         raise WorkerError("issue identity or open state is invalid")
     contract = parse_contract(issue.get("body", ""), client.repository)
@@ -734,23 +769,26 @@ def select_issue_lane(client, issue_number):
         if branch and pr_claims_issue(pr, issue_number, branch):
             duplicate = True
     route = policy.route({
-        "event_action": "labeled",
-        "added_label": "agent:codex",
-        "fresh_label_add": True,
+        "event_action": context.action,
+        "added_label": context.added_label,
+        "fresh_label_add": context.run_attempt == 1,
         "labels": list(labels),
         "contract": issue.get("body", ""),
         "dependencies_satisfied": _dependencies_satisfied(states),
         "duplicate_claim": duplicate,
         "effective_risk": effective_risk,
         "scientific_scope": scientific_scope,
-        "repository": client.repository,
-        "issue_number": issue_number,
+        "repository": context.repository,
+        "issue_number": context.issue_number,
         "trusted_base_sha": base_sha,
         "prestart_evidence": serialized_prestart,
     })
     if route == policy.REJECT:
         raise WorkerError("issue routing or pre-start authorization was rejected")
-    return RouteDecision(route, issue, contract, states, branch, base_sha, prestart, serialized_prestart)
+    return RouteDecision(
+        route, issue, contract, states, branch, base_sha, prestart,
+        serialized_prestart, context,
+    )
 
 
 class GitHubClient(object):
@@ -1331,7 +1369,7 @@ class YellowWorker(object):
         try:
             if self.requires_auth:
                 run_preflight(self.cwd)
-            current = select_issue_lane(self.client, self.issue_number)
+            current = select_issue_lane(self.client, self.decision.trigger_context)
             if not self._same_ready_decision(current):
                 raise WorkerError("YELLOW authorization changed before deterministic branch claim")
             policy = _yellow_policy()
@@ -1438,22 +1476,50 @@ class YellowWorker(object):
 class IssueRouter(object):
     """Choose exactly one GREEN or automated-YELLOW implementation lane."""
 
-    def __init__(self, client, event_client, issue_number, run_id, cwd=None,
+    def __init__(self, client, event_client, trigger_context, run_id, cwd=None,
                  green_factory=Worker, yellow_factory=YellowWorker):
         self.client = client
         self.event_client = event_client
-        self.issue_number = int(issue_number)
+        self.trigger_context = trigger_context
         self.run_id = str(run_id)
         self.cwd = cwd or os.getcwd()
         self.green_factory = green_factory
         self.yellow_factory = yellow_factory
 
+    def _block_resolved_issue(self, issue, reason):
+        """Apply one router-level blocked state; delegated workers own theirs."""
+        try:
+            current = self.client.issue(self.trigger_context.issue_number)
+            if (not isinstance(current, dict)
+                    or current.get("number") != self.trigger_context.issue_number):
+                return
+            labels = [name for name in _label_names(current)
+                      if not name.startswith(STATUS_PREFIX)]
+            labels.append("status:blocked")
+            self.client.set_issue_labels(self.trigger_context.issue_number, labels)
+            self.client.comment(
+                self.trigger_context.issue_number,
+                "Codex issue router blocked: %s" % reason,
+            )
+        except Exception:
+            pass
+
     def execute(self):
-        decision = select_issue_lane(self.client, self.issue_number)
+        context = validate_trigger_context(self.trigger_context)
+        if self.client.repository != context.repository:
+            raise WorkerError("worker client repository does not match the trusted event")
+        issue = copy.deepcopy(self.client.issue(context.issue_number))
+        if not isinstance(issue, dict) or issue.get("number") != context.issue_number:
+            raise WorkerError("event issue could not be resolved exactly")
+        try:
+            decision = select_issue_lane(self.client, context, issue_snapshot=issue)
+        except Exception as error:
+            self._block_resolved_issue(issue, str(error))
+            raise
         policy = _yellow_policy()
         if decision.lane == policy.GREEN:
             return self.green_factory(
-                self.client, self.issue_number, self.run_id, cwd=self.cwd,
+                self.client, context.issue_number, self.run_id, cwd=self.cwd,
                 event_client=self.event_client,
             ).execute()
         if decision.lane == policy.YELLOW:
@@ -1462,18 +1528,28 @@ class IssueRouter(object):
             ).execute()
         raise WorkerError("issue routing did not select exactly one supported lane")
 
-def _event_issue_number(event_path):
-    with open(event_path, "r") as stream:
-        event = json.load(stream)
-    if event.get("action") != "labeled":
-        raise WorkerError("worker only accepts issues:labeled events")
-    label = (event.get("label") or {}).get("name")
-    if label != "agent:codex":
-        raise WorkerError("event label is not agent:codex")
-    issue = event.get("issue") or {}
-    if not issue.get("number"):
-        raise WorkerError("event does not identify an issue")
-    return issue["number"], event.get("repository", {}).get("full_name", REPOSITORY)
+
+def _trigger_context(event_path, run_attempt):
+    """Parse bounded trusted trigger identity before constructing API clients."""
+    try:
+        with open(event_path, "r") as stream:
+            event = json.load(stream)
+    except (IOError, OSError, TypeError, ValueError):
+        raise WorkerError("GitHub event payload is unavailable or malformed")
+    if not isinstance(event, dict):
+        raise WorkerError("GitHub event payload is malformed")
+    label = event.get("label")
+    issue = event.get("issue")
+    repository = event.get("repository")
+    if not isinstance(label, dict) or not isinstance(issue, dict) or not isinstance(repository, dict):
+        raise WorkerError("GitHub event identity is missing or malformed")
+    if isinstance(run_attempt, str) and re.fullmatch(r"[1-9][0-9]*", run_attempt):
+        run_attempt = int(run_attempt)
+    context = TriggerContext(
+        event.get("action"), label.get("name"), repository.get("full_name"),
+        issue.get("number"), run_attempt,
+    )
+    return validate_trigger_context(context)
 
 
 def main(arguments=None):
@@ -1489,14 +1565,14 @@ def main(arguments=None):
     event_path = os.environ.get("GITHUB_EVENT_PATH")
     if not event_path:
         raise WorkerError("GITHUB_EVENT_PATH is required")
-    number, repository = _event_issue_number(event_path)
-    client = GitHubClient(os.environ.get("GITHUB_TOKEN"), repository)
+    context = _trigger_context(event_path, os.environ.get("GITHUB_RUN_ATTEMPT"))
+    client = GitHubClient(os.environ.get("GITHUB_TOKEN"), context.repository)
     event_token = os.environ.get("AUTOMATION_APP_TOKEN")
     if not event_token:
         raise WorkerError("AUTOMATION_APP_TOKEN is required for event-generating writes")
-    event_client = GitHubClient(event_token, repository)
+    event_client = GitHubClient(event_token, context.repository)
     run_id = os.environ.get("GITHUB_RUN_ID", "local")
-    IssueRouter(client, event_client, number, run_id).execute()
+    IssueRouter(client, event_client, context, run_id).execute()
 
 
 if __name__ == "__main__":
