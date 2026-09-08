@@ -656,7 +656,25 @@ def green_changed_paths(paths):
 def _yellow_policy():
     # Lazy import avoids the policy module's intentional dependency on the
     # established GREEN contract parser while keeping #147 authoritative.
-    from scripts import yellow_lane_policy
+    try:
+        from scripts import yellow_lane_policy
+    except ModuleNotFoundError as error:
+        # ``python scripts/codex_issue_worker.py`` starts with ``scripts/`` on
+        # sys.path, not the repository root. Repair only that exact package
+        # lookup; do not mask a dependency failure inside the policy module.
+        if error.name != "scripts" or __package__ not in (None, ""):
+            raise
+        repository_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        policy_path = os.path.join(repository_root, "scripts", "yellow_lane_policy.py")
+        if not os.path.isfile(policy_path):
+            raise WorkerError("trusted YELLOW policy module is unavailable")
+        if repository_root not in sys.path:
+            sys.path.insert(0, repository_root)
+        # Avoid loading this worker a second time when the policy imports the
+        # established GREEN parser from ``scripts.codex_issue_worker``.
+        if __name__ == "__main__":
+            sys.modules.setdefault("scripts.codex_issue_worker", sys.modules[__name__])
+        from scripts import yellow_lane_policy
     return yellow_lane_policy
 
 
