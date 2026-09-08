@@ -47,6 +47,17 @@ CONTROL_PLANE_REQUIREMENT_RE = re.compile(
     r"(?:replayed|idempotent)\s+(?:processing|event|workflow)\b.*\bduplicate\s+(?:completion\s+)?marker\b|"
     r"(?:green\s+)?(?:codex\s+)?worker(?:\s+workflow)?\b.*\b(?:completion\s+is\s+observed|"
     r"reaches?\b.*\bterminal\b.*\b(?:success|state)|completed)\b|"
+    # Live worker execution and its observed profile/outcome are control-plane
+    # evidence, even when a proposed repair would copy that evidence into a
+    # repository file.  Keep the signals observational so implementation
+    # requirements about worker code remain repository-editable.
+    r"(?:green\s+|normal\s+|trusted\s+)?(?:codex\s+)?worker\b.*\bclaims?\b.*\bbranch\b.*\b"
+    r"(?:completes?|completed|success(?:fully)?|first\s+(?:execution\s+)?attempt)\b|"
+    r"(?:live\s+)?worker\s+(?:execution|evidence|validation|profile)\b.*\b(?:"
+    r"(?:completes?|completed|pass(?:es|ed)?|success(?:fully)?|model|reasoning[\s-]?effort|"
+    r"no[\s-]?fallback)\b)|"
+    r"(?:normal|trusted)\s+worker\s+validation\b.*\b(?:pass(?:es|ed)?|success(?:fully)?)\b|"
+    r"a5\s+(?:review|verdict)\b.*\b(?:clean|pass(?:es|ed)?|success(?:fully)?)\b|"
     r"(?:a4\.18\s+)?(?:completion\s+)?observer\b.*\b(?:runs?|observed|triggered)\b.*\b(?:completion|event)\b|"
     r"(?:completion\s+)?observer\b.*\bdoes\s+not\s+overwrite\b.*\bissue\s+status\b|"
     r"(?:observer\s+)?workflow\s+run\s*id\b.*\b(?:is\s+)?recorded\b|"
