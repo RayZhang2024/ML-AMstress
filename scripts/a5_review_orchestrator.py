@@ -619,7 +619,7 @@ def build_snapshot(pr: Mapping[str, Any], issue: Mapping[str, Any], run: Workflo
     for item in files:
         if not isinstance(item, Mapping) or not isinstance(item.get("filename"), str) or not isinstance(item.get("patch"), str):
             raise OrchestrationError("changed-file patch evidence is incomplete")
-        changed.append(reviewer.ChangedFile(item["filename"], item["patch"]))
+        changed.append(reviewer.ChangedFile(item["filename"], reviewer.sanitize_patch_for_snapshot(item["patch"])))
     if lane == "green":
         paths = _trusted_green_paths(changed)
     elif lane == "protected-yellow":

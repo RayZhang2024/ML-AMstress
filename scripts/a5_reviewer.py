@@ -87,6 +87,7 @@ SECRET_RE = re.compile(
     r"(?i)(?:\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|sk-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16})\b|"
     r"\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|secret)\s*[=:]\s*['\"]?[A-Za-z0-9._~+/=-]{8,})"
 )
+PATCH_CREDENTIAL_PLACEHOLDER = "[REDACTED_CREDENTIAL]"
 MAX_TEXT = 20_000
 MAX_PATCH = 120_000
 MAX_CHANGED_FILES = 200
@@ -211,6 +212,35 @@ def _optional_text(value: Any, name: str, maximum: int) -> str:
 
 def _credential_values() -> tuple[str, ...]:
     return tuple(os.environ.get(name, "") for name in ("GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY"))
+
+
+def sanitize_patch_for_snapshot(patch: str) -> str:
+    """Redact non-added patch credential material before snapshot validation.
+
+    Added repository lines remain fail-closed.  Git diff headers are not
+    repository additions, so they follow the redaction policy for all other
+    patch lines.
+    """
+    if not isinstance(patch, str):
+        raise ReviewError("changed file patch must be a string")
+    credential_values = tuple(value for value in _credential_values() if value)
+    sanitized = []
+    for line in patch.splitlines(keepends=True):
+        detected = SECRET_RE.search(line) or any(value in line for value in credential_values)
+        if not detected:
+            sanitized.append(line)
+            continue
+        if line.startswith("+") and not (line.startswith("+++ ") or line.startswith("+++\t")):
+            raise ReviewError("changed file patch contains credential material on an added line")
+        values = [match.group(0) for match in SECRET_RE.finditer(line)]
+        values.extend(value for value in credential_values if value in line)
+        for value in sorted(set(values), key=lambda item: (-len(item), item)):
+            line = line.replace(value, PATCH_CREDENTIAL_PLACEHOLDER)
+        sanitized.append(line)
+    result = "".join(sanitized)
+    if SECRET_RE.search(result) or any(value and value in result for value in credential_values):
+        raise ReviewError("sanitized changed file patch contains credential material")
+    return result
 
 
 def _positive_int(value: Any, name: str) -> int:
