@@ -23,6 +23,8 @@ It prefers stderr and uses stdout only when stderr is empty; reviewer prompts,
 snapshots, diffs, credentials, and local paths are excluded.
 
 The parser requires `clean`, `blocker`, or `escalate`, binds the verdict to the
-snapshot head SHA, enforces the trusted risk floor, and makes RED risk escalate.
+snapshot head SHA, and enforces the trusted risk floor. `clean` and `blocker`
+must retain that floor exactly; any effective-risk elevation requires
+`escalate` with an escalation reason. RED risk must also escalate.
 Findings have stable `F-N` IDs plus category, message, required action, and
 required evidence for a later, separately authorized repair flow.

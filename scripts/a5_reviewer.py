@@ -366,7 +366,9 @@ def build_prompt(snapshot: ReviewSnapshot) -> str:
         "Do not query GitHub or require GitHub credentials. Do not edit files, run external side effects, push, create PRs, "
         "change labels/status, merge, or recommend autonomous repairs. Assess the exact issue contract against this exact PR "
         "head and diff: scope and Do-not-change constraints, tests/CI evidence, security boundaries, effective risk, and scientific "
-        "ambiguity. RED risk or scientific ambiguity requires verdict escalate. The trusted acceptance_requirements classify "
+        "ambiguity. clean and blocker must retain the trusted_risk_floor exactly; any justified effective-risk elevation "
+        "must use verdict escalate with an escalation_reason. RED risk or scientific ambiguity requires verdict escalate. "
+        "The trusted acceptance_requirements classify "
         "repository-editable criteria versus external/post-run evidence. External requirements with pending/unverified status "
         "must be summarized as pending/unverified, never emitted as blocker findings. A blocker finding must begin its "
         "required_evidence with [AC-N] for a repository requirement. Output only one strict verdict JSON object, no markdown.\n"
@@ -404,6 +406,10 @@ def parse_verdict(output: str, snapshot: ReviewSnapshot) -> ReviewVerdict:
     risk_order = {"green": 0, "yellow": 1, "red": 2}
     if risk_order[risk] < risk_order[snapshot.trusted_risk_floor]:
         raise ReviewError("reviewer effective risk is below trusted floor")
+    if risk == "red" and raw["verdict"] != "escalate":
+        raise ReviewError("RED effective risk requires escalation")
+    if risk_order[risk] > risk_order[snapshot.trusted_risk_floor] and raw["verdict"] != "escalate":
+        raise ReviewError("elevated effective risk requires escalation")
     findings_raw = raw["findings"]
     if not isinstance(findings_raw, list) or len(findings_raw) > 50:
         raise ReviewError("findings must be a bounded list")
@@ -423,8 +429,6 @@ def parse_verdict(output: str, snapshot: ReviewSnapshot) -> ReviewVerdict:
                                 _text(item["required_evidence"], "finding required_evidence", 1000)))
     escalation_reason = _optional_text(raw["escalation_reason"], "escalation_reason", 1000)
     verdict = raw["verdict"]
-    if risk == "red" and verdict != "escalate":
-        raise ReviewError("RED effective risk requires escalation")
     if verdict == "clean" and (findings or escalation_reason):
         raise ReviewError("clean verdict cannot contain findings or escalation")
     if verdict == "blocker" and not findings:

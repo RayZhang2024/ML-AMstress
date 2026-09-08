@@ -71,9 +71,36 @@ class ReviewerContractTests(unittest.TestCase):
         for output in bad:
             with self.assertRaises(reviewer.ReviewError):
                 reviewer.parse_verdict(output, self.valid_snapshot)
+
+    def test_trusted_risk_floor_requires_escalation_for_elevation(self):
+        finding = {"id": "F-1", "category": "tests", "message": "Missing test.",
+                   "required_action": "Add test.", "required_evidence": "Focused test passes."}
+        self.assertEqual(reviewer.parse_verdict(verdict(), self.valid_snapshot).effective_risk, "green")
+        self.assertEqual(
+            reviewer.parse_verdict(verdict(verdict="blocker", findings=[finding]), self.valid_snapshot).effective_risk,
+            "green",
+        )
+        for output in (verdict(effective_risk="yellow"),
+                       verdict(verdict="blocker", effective_risk="yellow", findings=[finding])):
+            with self.assertRaisesRegex(reviewer.ReviewError, "elevated effective risk requires escalation"):
+                reviewer.parse_verdict(output, self.valid_snapshot)
         yellow_floor = reviewer.validate_snapshot(snapshot(trusted_risk_floor="yellow"))
+        self.assertEqual(reviewer.parse_verdict(verdict(effective_risk="yellow"), yellow_floor).effective_risk, "yellow")
+        self.assertEqual(
+            reviewer.parse_verdict(verdict(verdict="blocker", effective_risk="yellow", findings=[finding]), yellow_floor).effective_risk,
+            "yellow",
+        )
+        self.assertEqual(
+            reviewer.parse_verdict(
+                verdict(verdict="escalate", effective_risk="yellow", escalation_reason="Risk assessment changed."),
+                self.valid_snapshot,
+            ).verdict,
+            "escalate",
+        )
         with self.assertRaises(reviewer.ReviewError):
             reviewer.parse_verdict(verdict(effective_risk="green"), yellow_floor)
+        with self.assertRaisesRegex(reviewer.ReviewError, "RED effective risk requires escalation"):
+            reviewer.parse_verdict(verdict(effective_risk="red"), self.valid_snapshot)
 
     def test_read_only_command_and_credential_free_stdin_invocation(self):
         raw_secret = "ghp_abcdefghijklmnopqrstuvwxyz"
@@ -81,6 +108,9 @@ class ReviewerContractTests(unittest.TestCase):
         command = reviewer.reviewer_command("C:/tools/codex.exe", "C:/temporary/final.json")
         self.assertEqual(reviewer.REVIEWER_MODEL, "gpt-5.6-terra")
         self.assertEqual(reviewer.REVIEWER_REASONING_EFFORT, "high")
+        self.assertIn("clean and blocker must retain the trusted_risk_floor exactly", prompt)
+        self.assertIn("any justified effective-risk elevation must use verdict escalate with an escalation_reason", prompt)
+        self.assertIn("pending/unverified, never emitted as blocker findings", prompt)
         self.assertEqual(command, [
             "C:/tools/codex.exe", "exec", "--model", "gpt-5.6-terra", "--sandbox", "read-only", "-c", 'approval_policy="never"',
             "-c", 'model_reasoning_effort="high"',
