@@ -44,6 +44,10 @@ MAX_AUDIT = 4096
 MAX_PROTECTED_BLOCKER_FINDINGS = 50
 TRUSTED_AUDIT_AUTHOR = "github-actions[bot]"
 TRUSTED_MAINTAINER_AUTHOR = "RayZhang2024"
+TRUSTED_CREDENTIAL_ENV_NAMES = (
+    "GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY", "AUTOMATION_APP_TOKEN",
+)
+CREDENTIAL_PLACEHOLDER = "[REDACTED_CREDENTIAL]"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 BRANCH_RE = re.compile(r"^codex/issue-[1-9][0-9]*-[a-z0-9][a-z0-9-]{0,80}$")
 PROTECTED_BRANCH_RE = re.compile(r"^protected/issue-([1-9][0-9]*)-[a-z0-9][a-z0-9-]{0,80}$")
@@ -151,6 +155,64 @@ def _bounded_text(value: Any, name: str, maximum: int = reviewer.MAX_TEXT) -> st
     if not isinstance(value, str) or len(value) > maximum:
         raise OrchestrationError(name + " must be a bounded string")
     return value
+
+
+def _trusted_credential_values() -> tuple[str, ...]:
+    """Return only non-empty trusted credentials, longest first for redaction."""
+    return tuple(sorted(
+        {os.environ.get(name, "") for name in TRUSTED_CREDENTIAL_ENV_NAMES if os.environ.get(name, "")},
+        key=len, reverse=True,
+    ))
+
+
+def _contains_trusted_credential(value: str) -> bool:
+    return bool(reviewer.SECRET_RE.search(value) or any(
+        credential in value for credential in _trusted_credential_values()
+    ))
+
+
+def _redact_trusted_credential(value: str) -> str:
+    """Replace only detected material with the stable non-secret placeholder."""
+    result = reviewer.SECRET_RE.sub(CREDENTIAL_PLACEHOLDER, value)
+    for credential in _trusted_credential_values():
+        result = result.replace(credential, CREDENTIAL_PLACEHOLDER)
+    return result
+
+
+def _is_added_repository_line(line: str) -> bool:
+    return line.startswith("+") and not line.startswith(("+++ ", "+++\t"))
+
+
+def _sanitize_patch(patch: str) -> str:
+    """Fail on added credentials; redact them only from non-added diff evidence."""
+    sanitized = []
+    for line in patch.splitlines(keepends=True):
+        if _is_added_repository_line(line):
+            if _contains_trusted_credential(line):
+                raise OrchestrationError("changed file patch adds credential material")
+            sanitized.append(line)
+        else:
+            sanitized.append(_redact_trusted_credential(line))
+    result = "".join(sanitized)
+    if _contains_trusted_credential(result):
+        raise OrchestrationError("changed file patch credential sanitization failed")
+    return result
+
+
+def _reject_snapshot_credentials(value: Any, name: str = "snapshot input") -> None:
+    """Fail closed if an exact trusted credential reaches a non-patch snapshot field."""
+    if isinstance(value, str):
+        if any(credential in value for credential in _trusted_credential_values()):
+            raise OrchestrationError(name + " contains credential material")
+        return
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if key != "patch":
+                _reject_snapshot_credentials(item, name)
+        return
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        for item in value:
+            _reject_snapshot_credentials(item, name)
 
 
 def parse_workflow_run(event: Mapping[str, Any]) -> WorkflowRun:
@@ -619,7 +681,7 @@ def build_snapshot(pr: Mapping[str, Any], issue: Mapping[str, Any], run: Workflo
     for item in files:
         if not isinstance(item, Mapping) or not isinstance(item.get("filename"), str) or not isinstance(item.get("patch"), str):
             raise OrchestrationError("changed-file patch evidence is incomplete")
-        changed.append(reviewer.ChangedFile(item["filename"], item["patch"]))
+        changed.append(reviewer.ChangedFile(item["filename"], _sanitize_patch(item["patch"])))
     if lane == "green":
         paths = _trusted_green_paths(changed)
     elif lane == "protected-yellow":
@@ -646,6 +708,7 @@ def build_snapshot(pr: Mapping[str, Any], issue: Mapping[str, Any], run: Workflo
                 "changed_files": [{"path": item.path, "patch": item.patch} for item in changed],
                 "ci_checks": [{"name": CI_WORKFLOW_NAME, "status": "success"}],
                 "worker_metadata": {"worker_run_id": str(run.run_id), "branch": _pr_branch(pr)}}
+    _reject_snapshot_credentials(snapshot)
     reviewer.validate_snapshot(snapshot)
     return snapshot, paths
 
@@ -693,9 +756,7 @@ def _audit_safe_finding_text(value: Any, name: str) -> str:
     if (any(marker in text for marker in reviewer.REVIEWER_PROMPT_MARKERS)
             or any(pattern.search(text) for pattern in unsafe_patterns)):
         raise OrchestrationError("protected blocker evidence has an unsafe finding field")
-    if any(os.environ.get(name) and os.environ[name] in text for name in (
-        "GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY", "AUTOMATION_APP_TOKEN",
-    )):
+    if any(credential in text for credential in _trusted_credential_values()):
         raise OrchestrationError("protected blocker evidence has an unsafe finding field")
     return text
 
