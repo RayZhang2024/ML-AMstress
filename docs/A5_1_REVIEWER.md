@@ -6,8 +6,8 @@ version-1 snapshot containing exact PR SHAs, linked issue evidence, risk floor,
 bounded changed-file patches, CI status evidence, and trusted worker identity.
 
 `review_snapshot()` sends the generated prompt to the configured Codex CLI via
-stdin (`codex exec --model gpt-5.5 --sandbox read-only -c approval_policy="never"
---output-last-message <temporary-final-message> -`). Codex progress/session
+stdin (`codex exec --model gpt-5.6-terra --sandbox read-only -c approval_policy="never"
+-c model_reasoning_effort="high" --output-last-message <temporary-final-message> -`). Codex progress/session
 output is never treated as the verdict: only the bounded temporary final-message
 file is passed to strict verdict parsing, then its containing directory is
 removed. The explicit model prevents the ChatGPT-account default from selecting
