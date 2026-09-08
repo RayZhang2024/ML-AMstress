@@ -1,14 +1,15 @@
-# A4.18 GREEN worker completion observer
+# A4.18 worker completion observer
 
 The GitHub-native observer in
 `.github/workflows/codex-green-completion-observer.yml` receives only completed
-`workflow_run` events for the exact `GREEN Codex issue worker` workflow. It
+`workflow_run` events for the exact shared `Codex issue worker` workflow. It
 checks out trusted `main` with persisted credentials disabled and runs
 `python -m scripts.codex_completion_observer`.
 
 The observer resolves an issue only when exactly one trusted
 `codex-worker-claim` marker binds the completed GitHub run ID and deterministic
-worker branch to that issue. The `workflow_run` branch/SHA identify the trusted
+GREEN `codex/issue-*` or YELLOW `codex-yellow/issue-*` branch to that issue.
+The `workflow_run` branch/SHA identify the trusted
 `main` execution checkout; they are not the worker implementation branch or PR
 head. If a PR exists, the observer resolves it only through the claimed worker
 branch and records its separately verified PR head SHA. It then creates one

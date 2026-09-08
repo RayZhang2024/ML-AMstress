@@ -36,19 +36,21 @@ heat-treatment, and governance regression modules. The compile check covers
 the Python 3 GUI and dual-runtime data-extraction entry point; it is not an
 Abaqus/CAE compatibility or solver check.
 
-## GREEN Codex worker (Issue #28)
+## GREEN/YELLOW Codex worker
 
 The current operational baseline and recovery catalogue are
 [AUTONOMOUS_WORKER_RUNBOOK.md](AUTONOMOUS_WORKER_RUNBOOK.md) and
 [AUTONOMOUS_TROUBLESHOOTING.md](AUTONOMOUS_TROUBLESHOOTING.md). They supplement
 this overview without changing the worker's review-first policy.
 
-The first worker is intentionally narrow. It runs only from an `issues:
+The shared worker is intentionally narrow. It runs only from an `issues:
 labeled` event whose label is `agent:codex`; it then re-fetches the issue and
-fails closed unless the issue is open, has exactly `status:ready` and
-`risk:green`, has a valid autonomous contract, has satisfied dependencies, and
-has no competing branch or open PR. A deterministic `codex/issue-<number>-<slug>`
-ref is created as the claim lock before the issue is marked
+selects exactly one GREEN or pre-authorized automated-YELLOW lane. Both require
+an open issue, exactly `status:ready`, a valid matching risk/contract, satisfied
+dependencies, and no competing branch or open PR. GREEN uses
+`codex/issue-<number>-<slug>`; YELLOW requires canonical #147 pre-start evidence
+and uses `codex-yellow/issue-<number>-<slug>`. The ref is created as the claim
+lock before the issue is marked
 `status:in-progress`. The worker runs Codex on that branch, rejects any diff
 outside GREEN paths (`docs/`, `scripts/`, `tests/`, and the small
 governance-file allowlist). Control-plane paths are explicitly protected:
@@ -57,7 +59,9 @@ governance-file allowlist). Control-plane paths are explicitly protected:
 always rejected, rather than being part of the autonomous edit surface. It runs the normal-Python checks, pushes once, opens
 one PR against `main`, and changes the issue to `status:review` only after PR
 creation. Failures preserve the branch and report `status:blocked`; no merge or
-auto-merge operation is available.
+auto-merge operation is available. YELLOW diffs must remain a nonempty subset
+of the canonical authorized paths and cannot invoke A5.3 repair or
+controlled/scientific runtime.
 
 The trusted worker uses the built-in `GITHUB_TOKEN` only for issue labels,
 status, and audit state. A repository-scoped, short-lived GitHub App token is

@@ -4,6 +4,7 @@ from pathlib import Path
 import unittest
 
 from scripts import codex_completion_observer as observer
+from scripts import yellow_lane_policy
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -93,6 +94,16 @@ class EventAndClaimTests(unittest.TestCase):
         self.assertIsNone(observer.parse_claim_marker("claim issue:70 run:700 branch:" + BRANCH))
         self.assertIsNone(observer.parse_claim_marker("<!-- codex-worker-claim issue:70 run:local branch:" + BRANCH + " -->"))
 
+    def test_claim_parser_accepts_exact_canonical_yellow_branch(self):
+        branch = yellow_lane_policy.yellow_branch(ISSUE_NUMBER, "Completion observer")
+        self.assertEqual(
+            observer.parse_claim_marker(claim(branch=branch)["body"]),
+            observer.Claim(ISSUE_NUMBER, RUN_ID, branch),
+        )
+        wrong_issue = yellow_lane_policy.yellow_branch(ISSUE_NUMBER + 1, "Completion observer")
+        with self.assertRaises(observer.ObserverError):
+            observer.parse_claim_marker(claim(branch=wrong_issue)["body"])
+
     def test_run_to_issue_resolution_is_exact_and_fails_closed(self):
         client = FakeClient()
         resolved, comments = observer.resolve_claimed_issue(client, observer.parse_workflow_run(event()))
@@ -150,6 +161,14 @@ class ObservationTests(unittest.TestCase):
         self.assertIn('"pr_number":null', body)
         self.assertIn('"pr_head_sha":null', body)
         self.assertNotIn("status:", body)
+        self.assertFalse(hasattr(client, "set_labels"))
+
+    def test_yellow_completion_is_observed_with_the_same_read_only_semantics(self):
+        yellow_branch = yellow_lane_policy.yellow_branch(ISSUE_NUMBER, "Completion observer")
+        client = FakeClient(comments={ISSUE_NUMBER: [claim(branch=yellow_branch)]})
+        self.assertEqual(observer.observe(client, event()), "worker-success")
+        self.assertEqual(client.requested_branch, yellow_branch)
+        self.assertIn('"branch":"' + yellow_branch + '"', client.comment_calls[0][1])
         self.assertFalse(hasattr(client, "set_labels"))
 
     def test_terminal_non_success_records_once_without_retry_or_codex(self):
@@ -229,7 +248,7 @@ class WorkflowContractTests(unittest.TestCase):
 
     def test_workflow_is_exact_workflow_run_trusted_main_and_least_privilege(self):
         self.assertIn("workflow_run:", self.workflow)
-        self.assertIn('workflows: ["GREEN Codex issue worker"]', self.workflow)
+        self.assertIn('workflows: ["Codex issue worker"]', self.workflow)
         self.assertIn("types: [completed]", self.workflow)
         self.assertIn("ref: main", self.workflow)
         self.assertIn("persist-credentials: false", self.workflow)

@@ -1,4 +1,4 @@
-"""Pure, non-activating policy primitives for a future trusted YELLOW lane.
+"""Pure policy primitives for the trusted GREEN/YELLOW issue router.
 
 This module performs no I/O. Unicode titles drop non-ASCII characters before
 slugging; an empty result uses ``yellow-work``.

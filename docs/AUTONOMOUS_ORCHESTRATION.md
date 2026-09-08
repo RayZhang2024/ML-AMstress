@@ -49,18 +49,20 @@ declaration, not permission to bypass the effective-risk escalation rules.
 ### Routing labels
 
 - `agent:codex` — a fresh addition of this label is the explicit trigger for
-  the ordinary GREEN worker. The label alone does not authorize work: the
-  worker revalidates all eligibility, effective-risk, dependency, duplicate,
-  and claim conditions. Re-adding or leaving an existing label is not a retry
-  or permission to bypass a failed claim.
+  the trusted GREEN/YELLOW router. The label alone does not authorize work:
+  the router revalidates all eligibility, effective-risk, dependency,
+  duplicate, and claim conditions. YELLOW additionally requires one canonical
+  trusted pre-start authorization bound to the repository, issue, exact base,
+  effective risk, and authorized paths. Re-adding or leaving an existing label
+  is not a retry or permission to bypass a failed claim.
 - `agent:gpt-review` — optional routing/request metadata for a future GPT
   review pass.
 
-Routing labels do not change risk or satisfy dependencies. `agent:codex` has
-the fresh-event meaning above only for the ordinary GREEN worker; protected
-YELLOW/RED work requires its own explicit authorization and must not be
-triggered by that worker. They may coexist with one status and one risk label,
-or be omitted where no routing is requested.
+Routing labels do not change risk or satisfy dependencies. `agent:codex` can
+route only ordinary GREEN work or a separately pre-authorized automated-YELLOW
+implementation. It never authorizes RED, controlled-runtime, scientific,
+repair, or merge work. Routing labels may coexist with one status and one risk
+label, or be omitted where no routing is requested.
 
 ## Standard autonomous issue contract
 
@@ -166,13 +168,15 @@ or the state cannot be determined, it must stop and set/report `status:blocked`
 rather than racing or duplicating work. Closing an issue or merging a PR is not
 an agent's implicit authority.
 
-### Trusted GREEN worker and sandboxed Codex
+### Trusted GREEN/YELLOW worker and sandboxed Codex
 
 The eligibility and claim rules in this section remain mandatory for any actor
-that owns orchestration, including manual agents. The trusted GREEN worker in
+that owns orchestration, including manual agents. The trusted worker in
 `scripts/codex_issue_worker.py` performs the readiness, dependency,
-duplicate/open-PR/branch, and race re-checks, then claims its deterministic
-branch before it invokes Codex.
+duplicate/open-PR/branch, and race re-checks, then claims exactly one
+deterministic GREEN or YELLOW branch before it invokes Codex. Automated YELLOW
+also validates canonical pre-start and claim evidence and constrains every
+post-Codex diff to a nonempty subset of its pre-authorized paths.
 
 Once that worker has completed those checks for the immutable issue snapshot
 and claimed branch, its sandboxed Codex implementation process must treat the
@@ -188,7 +192,8 @@ Sandboxed Codex remains responsible for the local repository Necessity Gate,
 minimal scoped edits, Do-not-change constraints, effective-risk/scientific
 ambiguity stops, and truthful reporting of optional local checks it could not
 run. Missing optional Python or other tooling in the sandbox does not by itself
-block a clear GREEN edit because the trusted worker performs final validation.
+block a clear authorized edit because the trusted worker performs final
+normal-Python validation.
 The sandboxed process receives no `GITHUB_TOKEN`, `GH_TOKEN`, or
 `OPENAI_API_KEY`.
 
@@ -237,18 +242,26 @@ human/domain-owner approval.
 
 Protected governance/control-plane work and all YELLOW work require explicit
 protected-path implementation authorization. It is separate from any
-controlled-runtime authorization and from merge authorization. The ordinary
-GREEN worker must reject it, even if the issue has `agent:codex`; uncertain
-scope fails closed rather than being inferred GREEN. The protected path must
-preserve the same contract, dependency, duplicate-work, effective-risk, and
-no-merge safeguards.
+controlled-runtime authorization and from merge authorization. The shared
+worker may enter the automated-YELLOW lane only with canonical #147 pre-start
+evidence; `risk:yellow` or `agent:codex` alone is insufficient. It uses the
+canonical `codex-yellow/issue-<N>-<slug>` branch and emits canonical claim and
+A5 identity markers, while automatic YELLOW repair remains disabled. Uncertain
+scope fails closed rather than being inferred GREEN.
+
+The trusted pre-start transport is exactly one maintainer-authored issue
+comment whose entire body is
+`<!-- yellow-implementation-prestart:{canonical-#147-json} -->`. After the
+branch claim, the trusted worker records the unchanged canonical JSON as
+`a5.yellow-prestart`, creates canonical #147 claim JSON as `a5.yellow-claim`,
+and records the ordinary run-bound `codex-worker-claim` used by the read-only
+completion observer. Duplicate, malformed, stale, conflicting, or untrusted
+evidence fails closed before Codex runs.
 
 ## Current activation boundary
 
-These labels, transitions, and syntax do not by themselves activate workers,
-issue pollers, label-management automation, autonomous production-code
-execution, or auto-merge. Issue #28 adds the first explicitly label-triggered
-GREEN-only worker; it is implemented in
-`scripts/codex_issue_worker.py` and `.github/workflows/codex-green-worker.yml`.
-That worker remains fail-closed, review-first, and unable to merge or enable
-auto-merge; YELLOW/RED effective-risk changes are rejected.
+The single `issues:labeled` workflow in `.github/workflows/codex-green-worker.yml`
+activates exactly one lane for a fresh `agent:codex` event: established GREEN,
+or canonical pre-authorized automated YELLOW. Invalid, ambiguous, RED, and
+scientific/runtime scope is rejected. Both lanes remain fail-closed,
+review-first, and unable to repair YELLOW work, merge, or enable auto-merge.

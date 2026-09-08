@@ -1067,7 +1067,7 @@ class WorkflowContractTests(unittest.TestCase):
         diagnostic = self.workflow.index(
             "      - name: Diagnose isolated workspace cleanliness"
         )
-        worker_step = self.workflow.index("      - name: Run fail-closed GREEN worker")
+        worker_step = self.workflow.index("      - name: Run fail-closed GREEN/YELLOW router")
         self.assertLess(checkout, line_endings)
         self.assertLess(line_endings, local_python)
         self.assertLess(line_endings, diagnostic)
@@ -1093,7 +1093,7 @@ class WorkflowContractTests(unittest.TestCase):
         diagnostic = self.workflow.index(
             "      - name: Diagnose isolated workspace cleanliness"
         )
-        worker_step = self.workflow.index("      - name: Run fail-closed GREEN worker")
+        worker_step = self.workflow.index("      - name: Run fail-closed GREEN/YELLOW router")
         self.assertLess(dependencies, diagnostic)
         self.assertLess(diagnostic, worker_step)
         diagnostic_step = self.workflow[diagnostic:worker_step]
