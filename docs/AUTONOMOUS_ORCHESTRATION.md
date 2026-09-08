@@ -252,7 +252,10 @@ A5 identity markers. After an exact-head blocker review, trusted A5 may run the
 separate automated-YELLOW repair contract only after persisting and refetching
 matching #143 blocker evidence, revalidating all #147 identity and path
 authority, and proving every finding is repository-editable and tied to an
-acceptance criterion. Manual protected-YELLOW remains non-repairable. Automated
+acceptance criterion. A canonical category-complete repair-authority audit
+prevents same-head finding reclassification, and trusted path/blob fingerprints
+must remain identical across validation, commit, and the final pre-push check.
+Manual protected-YELLOW remains non-repairable. Automated
 YELLOW and GREEN share one persistent two-attempt history; neither lane can
 reset or extend it. Uncertain scope fails closed rather than being inferred
 GREEN.

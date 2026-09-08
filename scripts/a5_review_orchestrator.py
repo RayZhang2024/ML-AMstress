@@ -55,6 +55,7 @@ STATE_MARKER_RE = re.compile(r"^<!-- a5\.4a-state:(\{.*\}) -->$")
 CI_MARKER_RE = re.compile(r"^<!-- a5\.4a-ci:(\{.*\}) -->$")
 REPAIR_MARKER_RE = re.compile(r"^<!-- a5\.4a-repair:(\{.*\}) -->$")
 PROTECTED_BLOCKER_EVIDENCE_RE = re.compile(r"^<!-- a5\.4b-protected-blocker:(\{.*\}) -->$")
+YELLOW_REPAIR_AUTHORITY_RE = re.compile(r"^<!-- a5\.yellow-repair-authority:(\{.*\}) -->$")
 PROTECTED_IMPLEMENTATION_AUTHORIZATION_RE = re.compile(
     r"^<!-- protected-implementation-authorization:(\{.*\}) -->$"
 )
@@ -831,6 +832,101 @@ def accepted_protected_blocker_evidence(comments: Sequence[Mapping[str, Any]],
     return matches[0]
 
 
+def _yellow_repair_authority_payload(pr: Mapping[str, Any], issue: Mapping[str, Any], head: str,
+                                     verdict: reviewer.ReviewVerdict) -> dict[str, Any]:
+    payload = _protected_blocker_payload(pr, issue, head, verdict)
+    payload["findings"] = [dict(item, category=finding.category)
+                           for item, finding in zip(payload["findings"], verdict.findings)]
+    return payload
+
+
+def _yellow_repair_authority_marker(payload: Mapping[str, Any]) -> str:
+    expected = {
+        "schema_version", "repository", "issue_number", "pr_number", "reviewed_head_sha",
+        "effective_risk", "verdict", "findings",
+    }
+    if not isinstance(payload, Mapping) or set(payload) != expected:
+        raise OrchestrationError("YELLOW repair authority is malformed")
+    findings = payload.get("findings")
+    if not isinstance(findings, list) or not 1 <= len(findings) <= MAX_PROTECTED_BLOCKER_FINDINGS:
+        raise OrchestrationError("YELLOW repair authority findings are unbounded")
+    audit_findings, categories = [], []
+    for finding in findings:
+        keys = {"id", "category", "message", "required_action", "required_evidence"}
+        if not isinstance(finding, Mapping) or set(finding) != keys:
+            raise OrchestrationError("YELLOW repair authority has an invalid finding")
+        category = finding.get("category")
+        if category not in reviewer.FINDING_CATEGORIES:
+            raise OrchestrationError("YELLOW repair authority has an invalid finding category")
+        categories.append(category)
+        audit_findings.append({key: finding[key] for key in (
+            "id", "message", "required_action", "required_evidence",
+        )})
+    audit_payload = dict(payload)
+    audit_payload["findings"] = audit_findings
+    # Reuse the reviewed #143 canonical validator for identity and safe text.
+    _protected_blocker_marker(audit_payload)
+    canonical = dict(payload)
+    canonical["findings"] = [dict(item, category=category)
+                              for item, category in zip(audit_findings, categories)]
+    marker = "<!-- a5.yellow-repair-authority:" + json.dumps(
+        canonical, sort_keys=True, separators=(",", ":")
+    ) + " -->"
+    if len(marker) > MAX_AUDIT:
+        raise OrchestrationError("YELLOW repair authority is oversized")
+    return marker
+
+
+def _yellow_repair_authority_markers(comments: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    if len(comments) > MAX_COMMENTS:
+        raise OrchestrationError("too many comments to inspect safely")
+    markers = []
+    for comment in comments:
+        body = comment.get("body") if isinstance(comment, Mapping) else None
+        if not isinstance(body, str) or len(body) > MAX_AUDIT or not _trusted_comment(comment):
+            continue
+        payload = _marker(YELLOW_REPAIR_AUTHORITY_RE, body)
+        if payload is None:
+            continue
+        if _yellow_repair_authority_marker(payload) != body.strip():
+            raise OrchestrationError("YELLOW repair authority is not deterministic")
+        markers.append(payload)
+    return markers
+
+
+def persist_yellow_repair_authority(client: Any, comments: Sequence[Mapping[str, Any]],
+                                    pr: Mapping[str, Any], issue: Mapping[str, Any], head: str,
+                                    verdict: reviewer.ReviewVerdict) -> None:
+    """Persist one category-complete finding identity before repair evaluation."""
+    payload = _yellow_repair_authority_payload(pr, issue, head, verdict)
+    marker = _yellow_repair_authority_marker(payload)
+    matching = [item for item in _yellow_repair_authority_markers(comments)
+                if item["repository"] == REPOSITORY and item["pr_number"] == pr["number"]
+                and item["issue_number"] == issue["number"] and item["reviewed_head_sha"] == head]
+    if len(matching) > 1:
+        raise OrchestrationError("YELLOW repair authority is ambiguous")
+    if matching:
+        if _yellow_repair_authority_marker(matching[0]) != marker:
+            raise OrchestrationError("YELLOW repair authority conflicts with the validated verdict")
+        return
+    client.comment(pr["number"], marker)
+
+
+def accepted_yellow_repair_authority(comments: Sequence[Mapping[str, Any]],
+                                     pr: Mapping[str, Any], issue: Mapping[str, Any], head: str,
+                                     verdict: reviewer.ReviewVerdict) -> str:
+    expected = _yellow_repair_authority_marker(
+        _yellow_repair_authority_payload(pr, issue, head, verdict)
+    )
+    matching = [_yellow_repair_authority_marker(item)
+                for item in _yellow_repair_authority_markers(comments)
+                if item["repository"] == REPOSITORY and item["pr_number"] == pr["number"]
+                and item["issue_number"] == issue["number"] and item["reviewed_head_sha"] == head]
+    if len(matching) != 1 or matching[0] != expected:
+        raise OrchestrationError("accepted YELLOW repair authority is missing, ambiguous, or conflicting")
+    return matching[0]
+
+
 def _repair_failure_marker(attempt: int, error: Exception | None = None) -> str:
     payload: dict[str, Any] = {"schema_version": 1, "attempt": attempt, "category": "trusted-repair-failed"}
     detail = repair.audit_safe_error_detail(error) if error is not None else None
@@ -972,10 +1068,14 @@ def _revalidate_yellow_repair_authorization(
             or current.review_head_sha != run.head_sha):
         raise OrchestrationError("YELLOW blocker repair authorization no longer matches the exact head")
     blocker_marker = accepted_protected_blocker_evidence(comments, pr, issue, run.head_sha, verdict)
+    repair_authority = accepted_yellow_repair_authority(comments, pr, issue, run.head_sha, verdict)
     authorization_text = json.dumps(authorization, sort_keys=True, separators=(",", ":"))
     return (pr, issue, comments, current, paths,
             yellow_repair.evidence_key("authorization", authorization_text),
-            yellow_repair.evidence_key("blocker", blocker_marker))
+            yellow_repair.evidence_key("blocker", json.dumps(
+                {"audit": blocker_marker, "repair_authority": repair_authority},
+                sort_keys=True, separators=(",", ":"),
+            )))
 
 
 def _repair(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any], comments: Sequence[Mapping[str, Any]],
@@ -1148,9 +1248,16 @@ def orchestrate(client: Any, event: Mapping[str, Any], cwd: str,
         pr, issue, comments = _refetch_unchanged(
             client, pr_number, issue_number, run.head_sha, run, current, authorization
         )
-        persist_protected_blocker_evidence(client, comments, pr, issue, run.head_sha, verdict)
+        if current.review_label == "review:pending":
+            # Persist category-complete authority first. A partial/crashed write
+            # can then never be reclassified from the category-less #143 audit.
+            persist_yellow_repair_authority(client, comments, pr, issue, run.head_sha, verdict)
+            persist_protected_blocker_evidence(
+                client, client.comments(pr_number), pr, issue, run.head_sha, verdict
+            )
         pr, issue, comments = client.pr(pr_number), client.issue(issue_number), client.comments(pr_number)
         accepted_protected_blocker_evidence(comments, pr, issue, run.head_sha, verdict)
+        accepted_yellow_repair_authority(comments, pr, issue, run.head_sha, verdict)
         try:
             reviewer.validate_repairable_findings(trusted_snapshot, verdict)
         except reviewer.ReviewError as error:

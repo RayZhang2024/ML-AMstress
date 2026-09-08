@@ -1060,6 +1060,58 @@ class StateAndRepairTests(unittest.TestCase):
         yellow_call.assert_not_called()
         self.assertEqual(orchestrator.repair_attempt_count(client.comment_data, 175), 0)
 
+    def test_automated_yellow_finding_reclassification_conflicts_without_repair(self):
+        client = FakeClient(
+            pr=automated_yellow_pull_request(), linked_issue=automated_yellow_issue(),
+            issue_comments=automated_evidence(),
+        )
+        fields = ("same message", "same action", "[AC-1] same evidence")
+        scientific = protected_blocker_verdict((reviewer.Finding(
+            "F-1", "scientific", *fields
+        ),))
+        with self.assertRaises(repair.RepairError):
+            orchestrator.orchestrate(client, event(), ".", lambda *_: scientific)
+        self.assertEqual(orchestrator.repair_attempt_count(client.comment_data, 175), 0)
+        authority = [item["body"] for item in client.comment_data
+                     if "a5.yellow-repair-authority" in item["body"]]
+        self.assertEqual(len(authority), 1)
+        self.assertIn('"category":"scientific"', authority[0])
+
+        reclassified = protected_blocker_verdict((reviewer.Finding(
+            "F-1", "tests", *fields
+        ),))
+        with mock.patch.object(orchestrator, "_yellow_repair") as yellow_call:
+            with self.assertRaisesRegex(orchestrator.OrchestrationError, "authority.*conflict"):
+                orchestrator.orchestrate(client, event(), ".", lambda *_: reclassified)
+        yellow_call.assert_not_called()
+        self.assertEqual(orchestrator.repair_attempt_count(client.comment_data, 175), 0)
+        self.assertEqual(len([item for item in client.comment_data
+                              if "a5.yellow-repair-authority" in item["body"]]), 1)
+
+    def test_categoryless_historical_blocker_cannot_gain_repair_authority_on_replay(self):
+        client = FakeClient(
+            pr=automated_yellow_pull_request(), linked_issue=automated_yellow_issue(),
+            issue_comments=automated_evidence(),
+        )
+        verdict = protected_blocker_verdict()
+        # Simulate an old exact-head #143 audit and accepted blocker state from
+        # before category-complete YELLOW repair authority existed.
+        orchestrator.persist_protected_blocker_evidence(
+            client, client.comment_data, client.pr_data, client.issue_data, HEAD, verdict
+        )
+        current = orchestrator.CurrentReviewState("status:review", "review:pending", HEAD)
+        transition_input = orchestrator._state_input(175, 75, HEAD, current, "verdict", verdict)
+        plan = state_contract.transition(transition_input)
+        orchestrator.apply_transition(
+            client, client.pr_data, client.issue_data, client.comment_data, transition_input, plan
+        )
+        with mock.patch.object(orchestrator, "_yellow_repair") as yellow_call:
+            with self.assertRaisesRegex(orchestrator.OrchestrationError, "authority is missing"):
+                orchestrator.orchestrate(client, event(), ".", lambda *_: verdict)
+        yellow_call.assert_not_called()
+        self.assertEqual(orchestrator.repair_attempt_count(client.comment_data, 175), 0)
+        self.assertFalse(any("a5.yellow-repair-authority" in item["body"] for item in client.comment_data))
+
     def test_automated_yellow_authorization_race_blocks_transition_and_repair(self):
         client = FakeClient(
             pr=automated_yellow_pull_request(),

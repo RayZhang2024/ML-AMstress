@@ -1,7 +1,9 @@
 import dataclasses
 import inspect
 import os
+from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -89,6 +91,24 @@ class YellowRequestTests(unittest.TestCase):
 
 
 class YellowExecutionTests(unittest.TestCase):
+    @staticmethod
+    def _git(cwd, *arguments):
+        return subprocess.run(("git", *arguments), cwd=cwd, check=True, text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def _repository(self, directory):
+        root = Path(directory)
+        self._git(directory, "init", "-q")
+        self._git(directory, "config", "user.name", "YELLOW test")
+        self._git(directory, "config", "user.email", "yellow@example.invalid")
+        self._git(directory, "config", "core.autocrlf", "false")
+        self._git(directory, "checkout", "-qb", BRANCH)
+        (root / "docs").mkdir()
+        (root / "docs" / "change.md").write_text("before\n", encoding="utf-8")
+        self._git(directory, "add", "docs/change.md")
+        self._git(directory, "commit", "-qm", "initial")
+        return root, self._git(directory, "rev-parse", "HEAD").stdout.strip()
+
     def test_codex_uses_workspace_write_stdin_and_stripped_credentials(self):
         completed = subprocess.CompletedProcess([], 0, "", "")
         with mock.patch.object(green, "resolve_codex_executable", return_value="codex.exe"), \
@@ -132,6 +152,69 @@ class YellowExecutionTests(unittest.TestCase):
         self.assertNotIn("shell=true", source)
         self.assertNotIn("auto-merge", source)
         self.assertNotIn("/merges", source)
+
+    def test_validation_cannot_add_change_state_or_mutate_candidate(self):
+        def unauthorized(root):
+            (root / "docs" / "extra.md").write_text("unauthorized\n", encoding="utf-8")
+        def changed_state(root):
+            self._git(str(root), "add", "docs/change.md")
+        def mutate(root):
+            (root / "docs" / "change.md").write_text("validation mutation\n", encoding="utf-8")
+
+        for name, validation_mutation in (
+            ("unauthorized", unauthorized), ("path-state", changed_state), ("content", mutate),
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root, head = self._repository(directory)
+                item = request(expected_head_sha=head, review_state_head_sha=head)
+                def codex(*_):
+                    (root / "docs" / "change.md").write_text("repair\n", encoding="utf-8")
+                def validation(*_):
+                    validation_mutation(root)
+                push = mock.Mock()
+                with mock.patch.object(yellow, "run_codex", side_effect=codex), \
+                        mock.patch.object(green, "run_validation", side_effect=validation):
+                    with self.assertRaises(green.RepairError):
+                        yellow.execute_repair(item, directory, push=push)
+                push.assert_not_called()
+                self.assertEqual(self._git(directory, "rev-parse", "HEAD").stdout.strip(), head)
+
+    def test_success_reports_exact_committed_paths_and_verifies_before_push(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, head = self._repository(directory)
+            item = request(expected_head_sha=head, review_state_head_sha=head)
+            def codex(*_):
+                (root / "docs" / "change.md").write_text("repair\n", encoding="utf-8")
+            push = mock.Mock()
+            with mock.patch.object(yellow, "run_codex", side_effect=codex), \
+                    mock.patch.object(green, "run_validation"):
+                result = yellow.execute_repair(item, directory, push=push)
+            self.assertEqual(result.changed_paths, ("docs/change.md",))
+            self.assertNotEqual(result.old_head_sha, result.new_head_sha)
+            push.assert_called_once_with(item, directory, result.new_head_sha)
+            self.assertEqual(self._git(directory, "status", "--porcelain").stdout, "")
+
+    def test_second_pre_push_verification_failure_prevents_push(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, head = self._repository(directory)
+            item = request(expected_head_sha=head, review_state_head_sha=head)
+            def codex(*_):
+                (root / "docs" / "change.md").write_text("repair\n", encoding="utf-8")
+            original = yellow.verify_committed_repair
+            calls = 0
+            def verify(*args):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise yellow.YellowRepairError("pre-push identity changed")
+                return original(*args)
+            push = mock.Mock()
+            with mock.patch.object(yellow, "run_codex", side_effect=codex), \
+                    mock.patch.object(green, "run_validation"), \
+                    mock.patch.object(yellow, "verify_committed_repair", side_effect=verify):
+                with self.assertRaises(yellow.YellowRepairError):
+                    yellow.execute_repair(item, directory, push=push)
+            push.assert_not_called()
 
 
 class SharedAttemptHistoryTests(unittest.TestCase):
