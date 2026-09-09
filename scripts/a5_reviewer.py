@@ -84,6 +84,13 @@ POST_RUN_CONTROL_PLANE_REQUIREMENT_RE = re.compile(
 # can be established by changing source, tests, documentation, or snapshot
 # prose.  Keep this tied to both a validation subject and an outcome word so
 # that current-head source/file/content requirements remain repairable.
+# A compound validation list can contain a dotted ref such as
+# ``origin/main...HEAD`` before its one shared result.  Permit embedded dots,
+# but do not cross a conventional sentence boundary before finding that result.
+VALIDATION_RESULT_GAP_RE = r"(?:[^.]|\.(?!\s)){0,1000}"
+VALIDATION_RESULT_SIGNAL_RE = (
+    r"(?:pass(?:es|ed)?|success|succeeds?|complete(?:d)?\s+successfully|successful\s+completion)"
+)
 VALIDATION_RESULT_REQUIREMENT_RE = re.compile(
     r"(?ix)\b(?:"
     r"(?:a5\s+repair\s+)?regressions?|"
@@ -96,8 +103,8 @@ VALIDATION_RESULT_REQUIREMENT_RE = re.compile(
     r"(?:lint|static(?:\s+(?:analysis|check))?)\s+(?:checks?|results?|outcomes?)?|"
     r"(?:hosted\s+)?(?:normal[-\s]+python\s+)?ci(?:\s+(?:check|run))?|"
     r"trusted(?:[-\s]+current[-\s]+main)?\s+(?:a5|reviewer)"
-    r")\b[^.]{0,1000}\b(?:pass(?:es|ed)?|success|succeeds?)\b|"
-    r"\b(?:pass(?:es|ed)?|success|succeeds?)\b[^.]{0,1000}\b(?:"
+    r")\b" + VALIDATION_RESULT_GAP_RE + r"\b" + VALIDATION_RESULT_SIGNAL_RE + r"\b|"
+    r"\b" + VALIDATION_RESULT_SIGNAL_RE + r"\b" + VALIDATION_RESULT_GAP_RE + r"\b(?:"
     r"(?:a5\s+repair\s+)?regressions?|"
     r"(?:unit|regression|integration|functional|normal[-\s]+python)?\s*tests?(?:\s+(?:suite|run))?|"
     r"(?:unit|regression|integration|functional|normal[-\s]+python)\s+(?:test\s+)?suites?|"
