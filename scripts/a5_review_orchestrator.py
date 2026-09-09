@@ -16,6 +16,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Callable, Mapping, Sequence
@@ -38,6 +39,8 @@ REVIEW_LABEL_SPECS = {
     for name in sorted(REVIEW_LABELS)
 }
 MAX_REPAIR_ATTEMPTS = repair.MAX_REPAIR_ATTEMPTS
+MAX_REPAIR_PUSH_HEAD_VERIFICATION_READS = 3
+REPAIR_PUSH_HEAD_VERIFICATION_DELAY_SECONDS = 1
 MAX_COMMENTS = 200
 MAX_CHANGED_FILES = reviewer.MAX_CHANGED_FILES
 MAX_AUDIT = 4096
@@ -84,6 +87,14 @@ _CONNECTION_UNREACHABLE_ERRNOS = frozenset((
 
 class OrchestrationError(Exception):
     """A fail-closed trusted orchestration failure."""
+
+
+def _transient_repair_push_head_read(error: Exception) -> bool:
+    """Allow only explicit, retry-safe get-pr transport classifications."""
+    return isinstance(error, OrchestrationError) and str(error) in {
+        "GitHub get-pr: transport " + category
+        for category in TRANSPORT_CATEGORIES - {"other-transport"}
+    }
 
 
 def _proxy_reason(reason: object) -> bool:
@@ -318,6 +329,37 @@ def validate_pr_identity(pr: Mapping[str, Any], run: WorkflowRun) -> tuple[int, 
     if isinstance(number, bool) or not isinstance(number, int) or number < 1:
         raise OrchestrationError("PR number is invalid")
     return number, _pr_branch(pr)
+
+
+def _verify_repair_push_head(client: Any, pr_number: int, expected_branch: str,
+                             expected_old_head: str, returned_new_head: str,
+                             delay: Callable[[float], None] = time.sleep) -> Mapping[str, Any]:
+    """Observe a pushed repair head with bounded stale-read tolerance only."""
+    if (isinstance(pr_number, bool) or not isinstance(pr_number, int) or pr_number < 1
+            or not isinstance(expected_branch, str)):
+        raise OrchestrationError("repair push verification identity is malformed")
+    _sha(expected_old_head, "expected repaired PR head")
+    _sha(returned_new_head, "returned repaired PR head")
+    for read_number in range(MAX_REPAIR_PUSH_HEAD_VERIFICATION_READS):
+        try:
+            refreshed = client.pr(pr_number)
+        except Exception as error:
+            if (not _transient_repair_push_head_read(error)
+                    or read_number + 1 == MAX_REPAIR_PUSH_HEAD_VERIFICATION_READS):
+                raise
+        else:
+            if not isinstance(refreshed, Mapping) or refreshed.get("number") != pr_number:
+                raise OrchestrationError("repair push verification PR identity is malformed")
+            if _pr_branch(refreshed) != expected_branch:
+                raise OrchestrationError("repair push verification branch identity differs")
+            observed_head = _sha(refreshed.get("head", {}).get("sha"), "repaired PR head")
+            if observed_head == returned_new_head:
+                return refreshed
+            if observed_head != expected_old_head:
+                raise OrchestrationError("repair push head conflicts with an unexpected concurrent head")
+        if read_number + 1 < MAX_REPAIR_PUSH_HEAD_VERIFICATION_READS:
+            delay(REPAIR_PUSH_HEAD_VERIFICATION_DELAY_SECONDS)
+    raise OrchestrationError("repair push head could not be verified")
 
 
 def _protected_implementation_authorization(comments: Sequence[Mapping[str, Any]], issue_number: int,
@@ -1171,9 +1213,9 @@ def _repair(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any], commen
         if failed not in [item.get("body") for item in client.comments(pr["number"]) if _trusted_comment(item)]:
             client.comment(pr["number"], failed)
         return "repair-failed"
-    refreshed = client.pr(pr["number"])
-    if _sha(refreshed.get("head", {}).get("sha"), "repaired PR head") != result.new_head_sha:
-        raise OrchestrationError("repair push head could not be verified")
+    refreshed = _verify_repair_push_head(
+        client, pr["number"], request.branch, request.expected_head_sha, result.new_head_sha,
+    )
     refreshed_issue, refreshed_comments = client.issue(issue["number"]), client.comments(pr["number"])
     refreshed_state = current_review_state(refreshed, refreshed_issue, refreshed_comments)
     plan_input = _state_input(pr["number"], issue["number"], result.new_head_sha, refreshed_state, "new_head")
@@ -1224,9 +1266,9 @@ def _yellow_repair(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any],
         if failed not in [item.get("body") for item in client.comments(pr["number"]) if _trusted_comment(item)]:
             client.comment(pr["number"], failed)
         return "repair-failed"
-    refreshed = client.pr(pr["number"])
-    if _sha(refreshed.get("head", {}).get("sha"), "repaired PR head") != result.new_head_sha:
-        raise OrchestrationError("repair push head could not be verified")
+    refreshed = _verify_repair_push_head(
+        client, pr["number"], request.branch, request.expected_head_sha, result.new_head_sha,
+    )
     refreshed_issue, refreshed_comments = client.issue(issue["number"]), client.comments(pr["number"])
     refreshed_state = current_review_state(refreshed, refreshed_issue, refreshed_comments)
     plan_input = _state_input(pr["number"], issue["number"], result.new_head_sha, refreshed_state, "new_head")
