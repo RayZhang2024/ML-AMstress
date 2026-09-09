@@ -16,6 +16,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Callable, Mapping, Sequence
@@ -38,6 +39,8 @@ REVIEW_LABEL_SPECS = {
     for name in sorted(REVIEW_LABELS)
 }
 MAX_REPAIR_ATTEMPTS = repair.MAX_REPAIR_ATTEMPTS
+MAX_REPAIR_PUSH_HEAD_VERIFICATION_READS = 3
+REPAIR_PUSH_HEAD_VERIFICATION_DELAY_SECONDS = 0.5
 MAX_COMMENTS = 200
 MAX_CHANGED_FILES = reviewer.MAX_CHANGED_FILES
 MAX_AUDIT = 4096
@@ -149,6 +152,56 @@ def _sha(value: Any, name: str) -> str:
     if not isinstance(value, str) or not SHA_RE.fullmatch(value):
         raise OrchestrationError(name + " must be a lowercase 40-character SHA")
     return value
+
+
+def _is_transient_pr_read_failure(error: Exception) -> bool:
+    """Allow only the existing classified transport failures during re-reads."""
+    if isinstance(error, urllib.error.URLError):
+        return classify_transport_failure(error) in TRANSPORT_CATEGORIES
+    if not isinstance(error, OrchestrationError):
+        return False
+    return bool(re.fullmatch(
+        r"GitHub get-pr: transport (?:" + "|".join(re.escape(item) for item in TRANSPORT_CATEGORIES) + r")",
+        str(error),
+    ))
+
+
+def _verify_repair_push_head(client: Any, pr: Mapping[str, Any], expected_head: str,
+                             returned_head: str) -> Mapping[str, Any]:
+    """Confirm one exact trusted repair head, allowing only a bounded stale old head."""
+    pr_number = pr.get("number")
+    if isinstance(pr_number, bool) or not isinstance(pr_number, int) or pr_number < 1:
+        raise OrchestrationError("trusted PR number is invalid")
+    branch = _pr_branch(pr)
+    expected_head = _sha(expected_head, "expected repair head")
+    returned_head = _sha(returned_head, "returned repair head")
+    if returned_head == expected_head:
+        raise OrchestrationError("returned repair head must differ from the expected head")
+    for read_number in range(MAX_REPAIR_PUSH_HEAD_VERIFICATION_READS):
+        try:
+            refreshed = client.pr(pr_number)
+        except Exception as error:
+            if not _is_transient_pr_read_failure(error):
+                raise OrchestrationError("repair push head verification read failed") from None
+        else:
+            observed_number = refreshed.get("number") if isinstance(refreshed, Mapping) else None
+            if (isinstance(observed_number, bool) or not isinstance(observed_number, int)
+                    or observed_number < 1 or observed_number != pr_number):
+                raise OrchestrationError("refreshed PR number is invalid or mismatched")
+            base = refreshed.get("base") if isinstance(refreshed, Mapping) else None
+            if not isinstance(base, Mapping) or base.get("ref") != BASE_BRANCH:
+                raise OrchestrationError("refreshed PR base is invalid or mismatched")
+            _repository_identity(base.get("repo"), "refreshed PR base repository")
+            if _pr_branch(refreshed) != branch:
+                raise OrchestrationError("refreshed PR repository or branch changed")
+            observed_head = _sha(refreshed.get("head", {}).get("sha"), "repaired PR head")
+            if observed_head == returned_head:
+                return refreshed
+            if observed_head != expected_head:
+                raise OrchestrationError("repair push head conflicts with an unexpected head")
+        if read_number + 1 < MAX_REPAIR_PUSH_HEAD_VERIFICATION_READS:
+            time.sleep(REPAIR_PUSH_HEAD_VERIFICATION_DELAY_SECONDS)
+    raise OrchestrationError("repair push head could not be verified within bounded re-read window")
 
 
 def _bounded_text(value: Any, name: str, maximum: int = reviewer.MAX_TEXT) -> str:
@@ -1171,9 +1224,7 @@ def _repair(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any], commen
         if failed not in [item.get("body") for item in client.comments(pr["number"]) if _trusted_comment(item)]:
             client.comment(pr["number"], failed)
         return "repair-failed"
-    refreshed = client.pr(pr["number"])
-    if _sha(refreshed.get("head", {}).get("sha"), "repaired PR head") != result.new_head_sha:
-        raise OrchestrationError("repair push head could not be verified")
+    refreshed = _verify_repair_push_head(client, pr, request.expected_head_sha, result.new_head_sha)
     refreshed_issue, refreshed_comments = client.issue(issue["number"]), client.comments(pr["number"])
     refreshed_state = current_review_state(refreshed, refreshed_issue, refreshed_comments)
     plan_input = _state_input(pr["number"], issue["number"], result.new_head_sha, refreshed_state, "new_head")
@@ -1224,9 +1275,7 @@ def _yellow_repair(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any],
         if failed not in [item.get("body") for item in client.comments(pr["number"]) if _trusted_comment(item)]:
             client.comment(pr["number"], failed)
         return "repair-failed"
-    refreshed = client.pr(pr["number"])
-    if _sha(refreshed.get("head", {}).get("sha"), "repaired PR head") != result.new_head_sha:
-        raise OrchestrationError("repair push head could not be verified")
+    refreshed = _verify_repair_push_head(client, pr, request.expected_head_sha, result.new_head_sha)
     refreshed_issue, refreshed_comments = client.issue(issue["number"]), client.comments(pr["number"])
     refreshed_state = current_review_state(refreshed, refreshed_issue, refreshed_comments)
     plan_input = _state_input(pr["number"], issue["number"], result.new_head_sha, refreshed_state, "new_head")
