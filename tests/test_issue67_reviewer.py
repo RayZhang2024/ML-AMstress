@@ -206,6 +206,13 @@ class ReviewerContractTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, diagnostic)
 
+    def test_local_absolute_path_matcher_preserves_repository_relative_traversal_text(self):
+        safe = "validate_manifest accepts tests/../README.md as a test path"
+        self.assertIsNone(reviewer.LOCAL_ABSOLUTE_PATH_RE.search(safe))
+        for absolute_path in ("C:/Users/alice/private.txt", r"\\server\share\private.txt", "/etc/passwd"):
+            with self.subTest(absolute_path=absolute_path):
+                self.assertIsNotNone(reviewer.LOCAL_ABSOLUTE_PATH_RE.search(absolute_path))
+
     def test_reviewer_failure_diagnostic_is_deterministically_bounded(self):
         diagnostic = reviewer.reviewer_process_failure_diagnostic(
             1, "", "\n".join("line-%d %s" % (index, "x" * 300) for index in range(8))

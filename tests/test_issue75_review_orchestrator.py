@@ -1388,6 +1388,38 @@ class ProtectedBlockerEvidenceTests(unittest.TestCase):
         orchestrator.persist_protected_blocker_evidence(client, client.comment_data, client.pr_data, client.issue_data, HEAD, verdict)
         self.assertEqual([item["body"] for item in client.comment_data].count(marker), 1)
 
+    def test_repository_relative_traversal_finding_persists_deterministic_blocker_and_authority(self):
+        client = FakeClient(
+            pr=automated_yellow_pull_request(), linked_issue=automated_yellow_issue(),
+            issue_comments=automated_evidence(),
+        )
+        traversal = "tests/../README.md"
+        verdict = protected_blocker_verdict((reviewer.Finding(
+            "F-1", "tests",
+            "validate_manifest accepts %s as a test path" % traversal,
+            "Reject %s unless it is a repository-relative test path" % traversal,
+            "[AC-1] cover %s in the manifest regression" % traversal,
+        ),))
+        with mock.patch.object(orchestrator, "_repair") as green_call, \
+                mock.patch.object(orchestrator, "_yellow_repair", return_value="repair-pushed") as yellow_call:
+            self.assertEqual(orchestrator.orchestrate(client, event(), ".", lambda *_: verdict), "repair-pushed")
+        green_call.assert_not_called()
+        yellow_call.assert_called_once()
+        blocker = orchestrator._protected_blocker_markers(client.comment_data)
+        authority = orchestrator._yellow_repair_authority_markers(client.comment_data)
+        self.assertEqual(len(blocker), 1)
+        self.assertEqual(len(authority), 1)
+        self.assertEqual(
+            blocker[0]["findings"][0],
+            {"id": "F-1", "message": "validate_manifest accepts %s as a test path" % traversal,
+             "required_action": "Reject %s unless it is a repository-relative test path" % traversal,
+             "required_evidence": "[AC-1] cover %s in the manifest regression" % traversal},
+        )
+        self.assertEqual(authority[0]["findings"][0]["category"], "tests")
+        bodies = [item["body"] for item in client.comment_data]
+        self.assertIn(orchestrator._protected_blocker_marker(blocker[0]), bodies)
+        self.assertIn(orchestrator._yellow_repair_authority_marker(authority[0]), bodies)
+
     def test_conflicting_malformed_or_stale_protected_evidence_fails_closed(self):
         client = self._client()
         verdict = protected_blocker_verdict()
@@ -1444,6 +1476,32 @@ class ProtectedBlockerEvidenceTests(unittest.TestCase):
                     )
                 self.assertFalse(any("a5.4b-protected-blocker" in comment.get("body", "")
                                      for comment in client.comment_data))
+
+    def test_actual_absolute_paths_in_every_finding_field_fail_closed_without_leaking(self):
+        fields = ("message", "required_action", "required_evidence")
+        absolute_paths = ("C:/Users/alice/private.txt", r"\\server\share\private.txt", "/etc/passwd")
+        for field in fields:
+            for absolute_path in absolute_paths:
+                with self.subTest(field=field, absolute_path=absolute_path):
+                    client = self._client()
+                    finding = {
+                        "message": "A bounded finding message.",
+                        "required_action": "Make the bounded repair.",
+                        "required_evidence": "Run the bounded regression.",
+                    }
+                    finding[field] = absolute_path
+                    verdict = protected_blocker_verdict((reviewer.Finding(
+                        "F-1", "policy", finding["message"], finding["required_action"],
+                        finding["required_evidence"],
+                    ),))
+                    for persist in (orchestrator.persist_protected_blocker_evidence,
+                                    orchestrator.persist_yellow_repair_authority):
+                        with self.assertRaisesRegex(orchestrator.OrchestrationError, "unsafe finding field") as raised:
+                            persist(client, client.comment_data, client.pr_data, client.issue_data, HEAD, verdict)
+                        self.assertNotIn(absolute_path, str(raised.exception))
+                    self.assertFalse(any("a5.4b-protected-blocker" in comment.get("body", "")
+                                         or "a5.yellow-repair-authority" in comment.get("body", "")
+                                         for comment in client.comment_data))
 
     def test_oversized_valid_fields_fail_closed_without_writing_evidence(self):
         client = self._client()
