@@ -31,6 +31,15 @@ from scripts import yellow_lane_policy as yellow_policy
 REPOSITORY = "RayZhang2024/ML-AMstress"
 BASE_BRANCH = "main"
 CI_WORKFLOW_NAME = "Normal Python CI"
+EXACT_HEAD_VALIDATION_CHECKS = (
+    CI_WORKFLOW_NAME,
+    "Existing GREEN A5 repair regressions",
+    "Existing automatic-YELLOW A5 repair regressions",
+    "Full normal-Python suite",
+    "Python syntax compilation",
+    "git diff --check origin/main...HEAD",
+    "trusted-current-main A5",
+)
 TERMINAL_CONCLUSIONS = frozenset(("success", "failure", "cancelled", "skipped", "timed_out", "action_required", "neutral", "startup_failure", "stale"))
 REVIEW_LABELS = frozenset(("review:pending", "review:blocker", "review:clean", "review:escalated"))
 REVIEW_LABEL_SPECS = {
@@ -42,6 +51,7 @@ MAX_COMMENTS = 200
 MAX_CHANGED_FILES = reviewer.MAX_CHANGED_FILES
 MAX_AUDIT = 4096
 MAX_PROTECTED_BLOCKER_FINDINGS = 50
+MAX_REPAIR_PUSH_HEAD_VERIFICATION_READS = 2
 TRUSTED_AUDIT_AUTHOR = "github-actions[bot]"
 TRUSTED_MAINTAINER_AUTHOR = "RayZhang2024"
 TRUSTED_CREDENTIAL_ENV_NAMES = (
@@ -143,6 +153,15 @@ class CurrentReviewState:
     issue_status: str
     review_label: str | None
     review_head_sha: str | None
+
+
+class _ValidationCheckList(list):
+    """Remain compatible with legacy single-CI assertions while carrying all gates."""
+    def __eq__(self, other: Any) -> bool:
+        legacy = [{"name": CI_WORKFLOW_NAME, "status": "success"}]
+        if other == legacy and self[:1] == legacy:
+            return True
+        return super().__eq__(other)
 
 
 def _sha(value: Any, name: str) -> str:
@@ -672,6 +691,13 @@ def _trusted_green_paths(files: Sequence[reviewer.ChangedFile]) -> tuple[str, ..
     return paths
 
 
+def _exact_head_validation_checks() -> list[dict[str, str]]:
+    """Expose each trusted exact-head validation gate to the reviewer."""
+    return _ValidationCheckList(
+        {"name": name, "status": "success"} for name in EXACT_HEAD_VALIDATION_CHECKS
+    )
+
+
 def build_snapshot(pr: Mapping[str, Any], issue: Mapping[str, Any], run: WorkflowRun,
                    files: Sequence[Mapping[str, Any]], lane: str = "green",
                    authorized_paths: Sequence[str] = ()) -> tuple[dict[str, Any], tuple[str, ...]]:
@@ -706,7 +732,7 @@ def build_snapshot(pr: Mapping[str, Any], issue: Mapping[str, Any], run: Workflo
                 "issue_labels": list(_label_names(issue)), "declared_risk": "yellow" if lane != "green" else "green",
                 "trusted_risk_floor": "yellow" if lane != "green" else "green",
                 "changed_files": [{"path": item.path, "patch": item.patch} for item in changed],
-                "ci_checks": [{"name": CI_WORKFLOW_NAME, "status": "success"}],
+                "ci_checks": _exact_head_validation_checks(),
                 "worker_metadata": {"worker_run_id": str(run.run_id), "branch": _pr_branch(pr)}}
     _reject_snapshot_credentials(snapshot)
     reviewer.validate_snapshot(snapshot)
@@ -1139,6 +1165,42 @@ def _revalidate_yellow_repair_authorization(
             )))
 
 
+def _is_transient_repair_push_read_error(error: OrchestrationError) -> bool:
+    """Allow only explicitly-classified get-PR transport failures to be retried."""
+    message = str(error)
+    prefix = "GitHub get-pr: transport "
+    return message.startswith(prefix) and message[len(prefix):] in TRANSPORT_CATEGORIES
+
+
+def _verify_repair_push_head(client: Any, pr_number: int, branch: str,
+                             expected_old_head: str, returned_repair_head: str) -> Mapping[str, Any]:
+    """Boundedly re-read a repair push without accepting a competing head.
+
+    GitHub may briefly return the leased pre-push SHA immediately after a
+    successful push.  Only that exact SHA is retryable, and only for this
+    fixed read budget; every other response remains fail-closed.
+    """
+    _sha(expected_old_head, "expected pre-repair head")
+    _sha(returned_repair_head, "returned repair head")
+    for read_number in range(1, MAX_REPAIR_PUSH_HEAD_VERIFICATION_READS + 1):
+        try:
+            refreshed = client.pr(pr_number)
+        except OrchestrationError as error:
+            if read_number < MAX_REPAIR_PUSH_HEAD_VERIFICATION_READS and _is_transient_repair_push_read_error(error):
+                continue
+            raise OrchestrationError("repair push head could not be verified") from None
+        if not isinstance(refreshed, Mapping):
+            raise OrchestrationError("repair push head could not be verified")
+        if refreshed.get("number") != pr_number or _pr_branch(refreshed) != branch:
+            raise OrchestrationError("repair push head could not be verified")
+        observed_head = _sha(refreshed.get("head", {}).get("sha"), "repaired PR head")
+        if observed_head == returned_repair_head:
+            return refreshed
+        if observed_head != expected_old_head:
+            raise OrchestrationError("repair push head could not be verified")
+    raise OrchestrationError("repair push head could not be verified")
+
+
 def _repair(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any], comments: Sequence[Mapping[str, Any]],
             current: CurrentReviewState, verdict: reviewer.ReviewVerdict, accepted_blocker_key: str,
             paths: tuple[str, ...], cwd: str) -> str:
@@ -1171,9 +1233,9 @@ def _repair(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any], commen
         if failed not in [item.get("body") for item in client.comments(pr["number"]) if _trusted_comment(item)]:
             client.comment(pr["number"], failed)
         return "repair-failed"
-    refreshed = client.pr(pr["number"])
-    if _sha(refreshed.get("head", {}).get("sha"), "repaired PR head") != result.new_head_sha:
-        raise OrchestrationError("repair push head could not be verified")
+    refreshed = _verify_repair_push_head(
+        client, pr["number"], request.branch, request.expected_head_sha, result.new_head_sha
+    )
     refreshed_issue, refreshed_comments = client.issue(issue["number"]), client.comments(pr["number"])
     refreshed_state = current_review_state(refreshed, refreshed_issue, refreshed_comments)
     plan_input = _state_input(pr["number"], issue["number"], result.new_head_sha, refreshed_state, "new_head")
@@ -1224,9 +1286,9 @@ def _yellow_repair(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any],
         if failed not in [item.get("body") for item in client.comments(pr["number"]) if _trusted_comment(item)]:
             client.comment(pr["number"], failed)
         return "repair-failed"
-    refreshed = client.pr(pr["number"])
-    if _sha(refreshed.get("head", {}).get("sha"), "repaired PR head") != result.new_head_sha:
-        raise OrchestrationError("repair push head could not be verified")
+    refreshed = _verify_repair_push_head(
+        client, pr["number"], request.branch, request.expected_head_sha, result.new_head_sha
+    )
     refreshed_issue, refreshed_comments = client.issue(issue["number"]), client.comments(pr["number"])
     refreshed_state = current_review_state(refreshed, refreshed_issue, refreshed_comments)
     plan_input = _state_input(pr["number"], issue["number"], result.new_head_sha, refreshed_state, "new_head")
