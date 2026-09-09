@@ -16,6 +16,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Callable, Mapping, Sequence
@@ -38,10 +39,18 @@ REVIEW_LABEL_SPECS = {
     for name in sorted(REVIEW_LABELS)
 }
 MAX_REPAIR_ATTEMPTS = repair.MAX_REPAIR_ATTEMPTS
+MAX_REPAIR_PUSH_HEAD_VERIFICATION_READS = 3
+REPAIR_PUSH_HEAD_VERIFICATION_DELAY_SECONDS = 1
 MAX_COMMENTS = 200
 MAX_CHANGED_FILES = reviewer.MAX_CHANGED_FILES
 MAX_AUDIT = 4096
 MAX_PROTECTED_BLOCKER_FINDINGS = 50
+REQUIRED_AC13_VALIDATION_NAMES = frozenset((
+    "focused-normal-python-tests",
+    "full-normal-python-tests",
+    "python-syntax-compilation",
+    "diff-check-origin-main-head",
+))
 TRUSTED_AUDIT_AUTHOR = "github-actions[bot]"
 TRUSTED_MAINTAINER_AUTHOR = "RayZhang2024"
 TRUSTED_CREDENTIAL_ENV_NAMES = (
@@ -60,6 +69,8 @@ CI_MARKER_RE = re.compile(r"^<!-- a5\.4a-ci:(\{.*\}) -->$")
 REPAIR_MARKER_RE = re.compile(r"^<!-- a5\.4a-repair:(\{.*\}) -->$")
 PROTECTED_BLOCKER_EVIDENCE_RE = re.compile(r"^<!-- a5\.4b-protected-blocker:(\{.*\}) -->$")
 YELLOW_REPAIR_AUTHORITY_RE = re.compile(r"^<!-- a5\.yellow-repair-authority:(\{.*\}) -->$")
+AC13_VALIDATION_EVIDENCE_RE = re.compile(r"^<!-- a5\.ac13-validation-evidence:(\{.*\}) -->$")
+TRUSTED_CURRENT_MAIN_A5_RESULT_RE = re.compile(r"^<!-- a5\.trusted-current-main-a5-result:(\{.*\}) -->$")
 PROTECTED_IMPLEMENTATION_AUTHORIZATION_RE = re.compile(
     r"^<!-- protected-implementation-authorization:(\{.*\}) -->$"
 )
@@ -84,6 +95,14 @@ _CONNECTION_UNREACHABLE_ERRNOS = frozenset((
 
 class OrchestrationError(Exception):
     """A fail-closed trusted orchestration failure."""
+
+
+def _transient_repair_push_head_read(error: Exception) -> bool:
+    """Allow only explicit, retry-safe get-pr transport classifications."""
+    return isinstance(error, OrchestrationError) and str(error) in {
+        "GitHub get-pr: transport " + category
+        for category in TRANSPORT_CATEGORIES - {"other-transport"}
+    }
 
 
 def _proxy_reason(reason: object) -> bool:
@@ -318,6 +337,39 @@ def validate_pr_identity(pr: Mapping[str, Any], run: WorkflowRun) -> tuple[int, 
     if isinstance(number, bool) or not isinstance(number, int) or number < 1:
         raise OrchestrationError("PR number is invalid")
     return number, _pr_branch(pr)
+
+
+def _verify_repair_push_head(client: Any, pr_number: int, expected_branch: str,
+                             expected_old_head: str, returned_new_head: str,
+                             delay: Callable[[float], None] = time.sleep) -> Mapping[str, Any]:
+    """Observe a pushed repair head with bounded stale-read tolerance only."""
+    if (isinstance(pr_number, bool) or not isinstance(pr_number, int) or pr_number < 1
+            or not isinstance(expected_branch, str)):
+        raise OrchestrationError("repair push verification identity is malformed")
+    _sha(expected_old_head, "expected repaired PR head")
+    _sha(returned_new_head, "returned repaired PR head")
+    for read_number in range(MAX_REPAIR_PUSH_HEAD_VERIFICATION_READS):
+        try:
+            refreshed = client.pr(pr_number)
+        except Exception as error:
+            if (not _transient_repair_push_head_read(error)
+                    or read_number + 1 == MAX_REPAIR_PUSH_HEAD_VERIFICATION_READS):
+                raise
+        else:
+            refreshed_number = refreshed.get("number") if isinstance(refreshed, Mapping) else None
+            if (isinstance(refreshed_number, bool) or not isinstance(refreshed_number, int)
+                    or refreshed_number < 1 or refreshed_number != pr_number):
+                raise OrchestrationError("repair push verification PR identity is malformed")
+            if _pr_branch(refreshed) != expected_branch:
+                raise OrchestrationError("repair push verification branch identity differs")
+            observed_head = _sha(refreshed.get("head", {}).get("sha"), "repaired PR head")
+            if observed_head == returned_new_head:
+                return refreshed
+            if observed_head != expected_old_head:
+                raise OrchestrationError("repair push head conflicts with an unexpected concurrent head")
+        if read_number + 1 < MAX_REPAIR_PUSH_HEAD_VERIFICATION_READS:
+            delay(REPAIR_PUSH_HEAD_VERIFICATION_DELAY_SECONDS)
+    raise OrchestrationError("repair push head could not be verified")
 
 
 def _protected_implementation_authorization(comments: Sequence[Mapping[str, Any]], issue_number: int,
@@ -568,6 +620,190 @@ def _comments_with_marker(comments: Sequence[Mapping[str, Any]], pattern: re.Pat
         if value is not None:
             found.append(value)
     return found
+
+
+def _audit_safe_validation_command(value: Any) -> str:
+    command = _bounded_text(value, "validation command", 300)
+    unsafe_patterns = (
+        reviewer.LOCAL_ABSOLUTE_PATH_RE, reviewer.APP_TOKEN_ASSIGNMENT_RE,
+        reviewer.GITHUB_PAT_RE, reviewer.QUOTED_AUTHORIZATION_VALUE_RE,
+        green_worker.AUTHORIZATION_VALUE_RE, green_worker.TOKEN_ASSIGNMENT_RE,
+        green_worker.OAUTH_TOKEN_ASSIGNMENT_RE, green_worker.JWT_LIKE_TOKEN_RE,
+        green_worker.COOKIE_VALUE_RE, green_worker.COMMON_API_KEY_RE,
+    )
+    if (any(marker in command for marker in reviewer.REVIEWER_PROMPT_MARKERS)
+            or any(pattern.search(command) for pattern in unsafe_patterns)
+            or any(credential in command for credential in _trusted_credential_values())):
+        raise OrchestrationError("AC-13 validation evidence has an unsafe command")
+    return command
+
+
+def _ac13_validation_evidence_marker(payload: Mapping[str, Any]) -> str:
+    expected = {
+        "schema_version", "repository", "issue_number", "pr_number", "reviewed_head_sha",
+        "source", "results",
+    }
+    if not isinstance(payload, Mapping) or set(payload) != expected:
+        raise OrchestrationError("AC-13 validation evidence is malformed")
+    if payload.get("schema_version") != 1 or payload.get("repository") != REPOSITORY:
+        raise OrchestrationError("AC-13 validation evidence is malformed")
+    _sha(payload.get("reviewed_head_sha"), "AC-13 validation evidence head")
+    if (isinstance(payload.get("issue_number"), bool) or not isinstance(payload.get("issue_number"), int)
+            or payload["issue_number"] < 1 or isinstance(payload.get("pr_number"), bool)
+            or not isinstance(payload.get("pr_number"), int) or payload["pr_number"] < 1):
+        raise OrchestrationError("AC-13 validation evidence is malformed")
+    if payload.get("source") not in ("trusted-check-artifact", "trusted-repair-validation"):
+        raise OrchestrationError("AC-13 validation evidence source is invalid")
+    results = payload.get("results")
+    if not isinstance(results, list) or len(results) != len(REQUIRED_AC13_VALIDATION_NAMES):
+        raise OrchestrationError("AC-13 validation evidence results are incomplete")
+    canonical_results, names = [], set()
+    for result in results:
+        if not isinstance(result, Mapping) or set(result) != {"name", "command", "status"}:
+            raise OrchestrationError("AC-13 validation evidence result is malformed")
+        name = result.get("name")
+        if not isinstance(name, str) or name not in REQUIRED_AC13_VALIDATION_NAMES or name in names:
+            raise OrchestrationError("AC-13 validation evidence result is invalid")
+        if result.get("status") != "passed":
+            raise OrchestrationError("AC-13 validation evidence did not pass")
+        names.add(name)
+        canonical_results.append({
+            "name": name,
+            "command": _audit_safe_validation_command(result.get("command")),
+            "status": "passed",
+        })
+    if names != REQUIRED_AC13_VALIDATION_NAMES:
+        raise OrchestrationError("AC-13 validation evidence results are incomplete")
+    canonical = dict(payload)
+    canonical["results"] = sorted(canonical_results, key=lambda item: item["name"])
+    marker = "<!-- a5.ac13-validation-evidence:" + json.dumps(
+        canonical, sort_keys=True, separators=(",", ":")
+    ) + " -->"
+    if len(marker) > MAX_AUDIT:
+        raise OrchestrationError("AC-13 validation evidence is oversized")
+    return marker
+
+
+def _ac13_validation_evidence_markers(comments: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    if len(comments) > MAX_COMMENTS:
+        raise OrchestrationError("too many comments to inspect safely")
+    markers = []
+    for comment in comments:
+        body = comment.get("body") if isinstance(comment, Mapping) else None
+        if not isinstance(body, str) or len(body) > MAX_AUDIT or not _trusted_comment(comment):
+            continue
+        payload = _marker(AC13_VALIDATION_EVIDENCE_RE, body)
+        if payload is None:
+            continue
+        if _ac13_validation_evidence_marker(payload) != body.strip():
+            raise OrchestrationError("AC-13 validation evidence is not deterministic")
+        markers.append(payload)
+    return markers
+
+
+def accepted_ac13_validation_evidence(comments: Sequence[Mapping[str, Any]], pr: Mapping[str, Any],
+                                      issue: Mapping[str, Any], head: str) -> str:
+    matches = []
+    for payload in _ac13_validation_evidence_markers(comments):
+        if (payload["repository"] == REPOSITORY and payload["pr_number"] == pr["number"]
+                and payload["issue_number"] == issue["number"]
+                and payload["reviewed_head_sha"] == head):
+            matches.append(_ac13_validation_evidence_marker(payload))
+    if len(matches) != 1:
+        raise OrchestrationError("accepted AC-13 validation evidence is missing or ambiguous")
+    return matches[0]
+
+
+def _validation_evidence_key(marker: str) -> str:
+    if not isinstance(marker, str) or _marker(AC13_VALIDATION_EVIDENCE_RE, marker) is None:
+        raise OrchestrationError("AC-13 validation evidence key input is invalid")
+    return "a5.ac13:" + hashlib.sha256(marker.encode("utf-8")).hexdigest()
+
+
+def _trusted_current_main_a5_result_marker(payload: Mapping[str, Any]) -> str:
+    expected = {
+        "schema_version", "repository", "issue_number", "pr_number", "reviewed_head_sha",
+        "context", "status", "validation_evidence_key", "unauthorized_repair",
+        "synthesized_evidence",
+    }
+    if not isinstance(payload, Mapping) or set(payload) != expected:
+        raise OrchestrationError("trusted-current-main A5 result is malformed")
+    if (payload.get("schema_version") != 1 or payload.get("repository") != REPOSITORY
+            or payload.get("context") != "trusted-current-main"
+            or payload.get("status") != "success"
+            or payload.get("unauthorized_repair") is not False
+            or payload.get("synthesized_evidence") is not False):
+        raise OrchestrationError("trusted-current-main A5 result is malformed")
+    _sha(payload.get("reviewed_head_sha"), "trusted-current-main A5 result head")
+    if (isinstance(payload.get("issue_number"), bool) or not isinstance(payload.get("issue_number"), int)
+            or payload["issue_number"] < 1 or isinstance(payload.get("pr_number"), bool)
+            or not isinstance(payload.get("pr_number"), int) or payload["pr_number"] < 1):
+        raise OrchestrationError("trusted-current-main A5 result is malformed")
+    key = payload.get("validation_evidence_key")
+    if not isinstance(key, str) or not re.fullmatch(r"a5\.ac13:[0-9a-f]{64}", key):
+        raise OrchestrationError("trusted-current-main A5 result validation key is invalid")
+    marker = "<!-- a5.trusted-current-main-a5-result:" + json.dumps(
+        dict(payload), sort_keys=True, separators=(",", ":")
+    ) + " -->"
+    if len(marker) > MAX_AUDIT:
+        raise OrchestrationError("trusted-current-main A5 result is oversized")
+    return marker
+
+
+def accepted_trusted_current_main_a5_result(comments: Sequence[Mapping[str, Any]],
+                                            pr: Mapping[str, Any], issue: Mapping[str, Any],
+                                            head: str) -> str:
+    validation_key = _validation_evidence_key(
+        accepted_ac13_validation_evidence(comments, pr, issue, head)
+    )
+    matches = []
+    for payload in _comments_with_marker(comments, TRUSTED_CURRENT_MAIN_A5_RESULT_RE):
+        if (payload.get("repository") == REPOSITORY and payload.get("pr_number") == pr["number"]
+                and payload.get("issue_number") == issue["number"]
+                and payload.get("reviewed_head_sha") == head):
+            marker = _trusted_current_main_a5_result_marker(payload)
+            if payload.get("validation_evidence_key") != validation_key:
+                raise OrchestrationError("trusted-current-main A5 result conflicts with AC-13 evidence")
+            matches.append(marker)
+    if len(matches) != 1:
+        raise OrchestrationError("accepted trusted-current-main A5 result is missing or ambiguous")
+    return matches[0]
+
+
+def maybe_persist_trusted_current_main_a5_result(client: Any, comments: Sequence[Mapping[str, Any]],
+                                                pr: Mapping[str, Any], issue: Mapping[str, Any],
+                                                head: str) -> None:
+    """Record AC-14 only when exact-head AC-13 evidence is already trusted."""
+    try:
+        validation_marker = accepted_ac13_validation_evidence(comments, pr, issue, head)
+    except OrchestrationError:
+        return
+    payload = {
+        "schema_version": 1,
+        "repository": REPOSITORY,
+        "issue_number": issue["number"],
+        "pr_number": pr["number"],
+        "reviewed_head_sha": head,
+        "context": "trusted-current-main",
+        "status": "success",
+        "validation_evidence_key": _validation_evidence_key(validation_marker),
+        "unauthorized_repair": False,
+        "synthesized_evidence": False,
+    }
+    marker = _trusted_current_main_a5_result_marker(payload)
+    matching = []
+    for item in _comments_with_marker(comments, TRUSTED_CURRENT_MAIN_A5_RESULT_RE):
+        if (item.get("repository") == REPOSITORY and item.get("pr_number") == pr["number"]
+                and item.get("issue_number") == issue["number"]
+                and item.get("reviewed_head_sha") == head):
+            matching.append(item)
+    if len(matching) > 1:
+        raise OrchestrationError("trusted-current-main A5 result is ambiguous")
+    if matching:
+        if _trusted_current_main_a5_result_marker(matching[0]) != marker:
+            raise OrchestrationError("trusted-current-main A5 result conflicts with AC-13 evidence")
+        return
+    client.comment(pr["number"], marker)
 
 
 def current_review_state(pr: Mapping[str, Any], issue: Mapping[str, Any], comments: Sequence[Mapping[str, Any]]) -> CurrentReviewState:
@@ -1171,9 +1407,9 @@ def _repair(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any], commen
         if failed not in [item.get("body") for item in client.comments(pr["number"]) if _trusted_comment(item)]:
             client.comment(pr["number"], failed)
         return "repair-failed"
-    refreshed = client.pr(pr["number"])
-    if _sha(refreshed.get("head", {}).get("sha"), "repaired PR head") != result.new_head_sha:
-        raise OrchestrationError("repair push head could not be verified")
+    refreshed = _verify_repair_push_head(
+        client, pr["number"], request.branch, request.expected_head_sha, result.new_head_sha,
+    )
     refreshed_issue, refreshed_comments = client.issue(issue["number"]), client.comments(pr["number"])
     refreshed_state = current_review_state(refreshed, refreshed_issue, refreshed_comments)
     plan_input = _state_input(pr["number"], issue["number"], result.new_head_sha, refreshed_state, "new_head")
@@ -1224,9 +1460,9 @@ def _yellow_repair(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any],
         if failed not in [item.get("body") for item in client.comments(pr["number"]) if _trusted_comment(item)]:
             client.comment(pr["number"], failed)
         return "repair-failed"
-    refreshed = client.pr(pr["number"])
-    if _sha(refreshed.get("head", {}).get("sha"), "repaired PR head") != result.new_head_sha:
-        raise OrchestrationError("repair push head could not be verified")
+    refreshed = _verify_repair_push_head(
+        client, pr["number"], request.branch, request.expected_head_sha, result.new_head_sha,
+    )
     refreshed_issue, refreshed_comments = client.issue(issue["number"]), client.comments(pr["number"])
     refreshed_state = current_review_state(refreshed, refreshed_issue, refreshed_comments)
     plan_input = _state_input(pr["number"], issue["number"], result.new_head_sha, refreshed_state, "new_head")
@@ -1273,6 +1509,7 @@ def orchestrate(client: Any, event: Mapping[str, Any], cwd: str,
         pr, issue, comments = client.pr(pr_number), client.issue(issue_number), client.comments(pr_number)
         current = current_review_state(pr, issue, comments)
     if current.review_label == "review:clean" and current.review_head_sha == run.head_sha:
+        maybe_persist_trusted_current_main_a5_result(client, comments, pr, issue, run.head_sha)
         return "review-clean"
 
     authorized_paths: Sequence[str] = ()
@@ -1342,6 +1579,7 @@ def orchestrate(client: Any, event: Mapping[str, Any], cwd: str,
     plan = state_contract.transition(transition_input)
     apply_transition(client, pr, issue, comments, transition_input, plan)
     if verdict.verdict == "clean":
+        maybe_persist_trusted_current_main_a5_result(client, client.comments(pr_number), pr, issue, run.head_sha)
         return "review-clean"
     if verdict.verdict == "escalate":
         return "review-escalated"
