@@ -124,12 +124,15 @@ The effective risk is assessed both before an issue becomes executable and
 again from the actual PR. It is the highest class implied by any changed file,
 code path, generated artifact, resulting behavior, or required evidence. A PR
 is blocked when its effective risk is higher than the issue's declared class.
-The agent must stop, explain the mismatch in the PR, and request issue
-reclassification, scope correction, or explicit human direction before
-continuing. Tests or a low-risk wrapper do not make a higher-risk behavior
-GREEN. Future automation may enforce this rule by comparing issue metadata,
-changed paths, and reviewed behavior; this document does not activate that
-automation.
+When a protected or trusted path records a declared risk floor, the final
+effective-risk evidence must also be at least that floor; automation must fail
+closed rather than accepting an unexplained downgrade such as declared YELLOW
+with effective GREEN. The agent must stop, explain the mismatch in the PR, and
+request issue reclassification, scope correction, or explicit human direction
+before continuing. Tests or a low-risk wrapper do not make a higher-risk
+behavior GREEN. Future automation may enforce this rule by comparing issue
+metadata, changed paths, and reviewed behavior; this document does not activate
+that automation.
 
 ## Protected YELLOW governance and authorization boundaries
 
@@ -151,16 +154,25 @@ been satisfied.
 
 ## Merge authority
 
-- GREEN changes are eligible for human merge only after all required CI checks
-  pass and review is clean.
-- YELLOW changes are eventually eligible only after the stronger required
-  runtime validation for their workflow has passed and review is clean.
-- RED changes are never auto-merged. An explicit human/domain-owner approval
-  is required in addition to the required checks and scientific validation.
+The GPT-managed GREEN/YELLOW merge policy permits GPT, as the separate merge
+decision-maker, to mark a GREEN or YELLOW PR merge-ready only after an
+exact-head pre-merge recheck. That recheck requires the open, unmerged,
+non-draft, mergeable same-repository PR against `main`; full authorized scope;
+all contract-required exact-head CI and repository validation; and a trusted
+exact-head A5 `review:clean` with no blockers, unresolved threads, or blocking
+review submissions. Required runtime evidence is contract-driven: `risk:yellow`
+does not by itself require Abaqus or other scientific runtime evidence.
 
-No merge is implied by an agent completing a branch or opening a PR. The
-repository's current workflow remains review-first and does not enable merge
-automation through this policy.
+Implementation authorization, controlled-runtime authorization, and merge
+authorization are separate authorization scopes. A new head invalidates all
+head-bound review, CI, runtime, and merge-authorization evidence. RED requires explicit current user/domain-owner authorization bound to the reviewed head, plus every required scientific/runtime evidence item; it is otherwise not merge-ready.
+
+PRs created by repository workers, Codex, A5, and unattended GitHub workflows are never auto-merged
+and those actors cannot merge or enable auto-merge. This separation leaves GPT responsible
+for the standing GREEN/YELLOW merge decision only after every applicable gate
+passes.
+
+No merge is implied by an agent completing a branch or opening a PR; this document does not enable merge by repository workers, Codex, A5, or unattended workflows.
 
 ## Credential and safety boundaries
 
