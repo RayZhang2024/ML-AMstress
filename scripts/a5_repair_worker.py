@@ -27,6 +27,7 @@ MAX_TEXT = 1000
 MAX_PATH = 240
 MAX_RESULT_CHANGES = 50
 MAX_IDENTIFIER_NUMBER = 2_000_000_000
+MAX_CODEX_DIAGNOSTIC_CHARS = 4096
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 BRANCH_RE = re.compile(r"^(?!/)(?!.*//)(?!.*\.\.)(?!.*[~^:?*\[\\\s])[^/].{0,199}$")
@@ -50,7 +51,15 @@ AUDIT_SAFE_ERROR_MESSAGES = frozenset((
     "working tree is not clean",
     "current branch does not match repair branch",
     "local HEAD does not match expected repair head",
-    "Codex execution failed",
+    "Codex execution failed: unknown-nonzero",
+    "Codex execution failed: launch",
+    "Codex execution failed: timeout",
+    "Codex execution failed: terminated",
+    "Codex execution failed: authentication",
+    "Codex execution failed: usage",
+    "Codex execution failed: model",
+    "Codex execution failed: service",
+    "Codex execution failed: transport",
     "Codex changed the repair branch",
     "Codex changed local HEAD",
     "could not inspect repair changes",
@@ -70,6 +79,17 @@ AUDIT_SAFE_ERROR_MESSAGES = frozenset((
     "trusted App push credential is unavailable",
     "remote repair branch moved or push failed",
 ))
+CODEX_FAILURE_UNKNOWN = "Codex execution failed: unknown-nonzero"
+CODEX_FAILURE_LAUNCH = "Codex execution failed: launch"
+CODEX_FAILURE_TIMEOUT = "Codex execution failed: timeout"
+CODEX_FAILURE_TERMINATED = "Codex execution failed: terminated"
+CODEX_FAILURE_SIGNATURES = {
+    "authentication": ("authentication failed", "unauthorized", "invalid api key"),
+    "usage": ("usage limit", "rate limit exceeded", "quota exceeded"),
+    "model": ("model not found", "unsupported model"),
+    "service": ("internal server error", "service unavailable"),
+    "transport": ("connection refused", "network is unreachable", "tls handshake failed"),
+}
 
 
 class RepairError(Exception):
@@ -82,6 +102,25 @@ def audit_safe_error_detail(error: Exception) -> str | None:
         return None
     message = str(error)
     return message if message in AUDIT_SAFE_ERROR_MESSAGES else None
+
+
+def classify_codex_execution_failure(result: Any) -> str:
+    """Return one static diagnostic identifier without retaining process output."""
+    returncode = getattr(result, "returncode", None)
+    if isinstance(returncode, int) and not isinstance(returncode, bool) and returncode < 0:
+        return CODEX_FAILURE_TERMINATED
+    streams = []
+    for name in ("stdout", "stderr"):
+        value = getattr(result, name, "")
+        if isinstance(value, str):
+            streams.append(value[:MAX_CODEX_DIAGNOSTIC_CHARS].casefold())
+    categories = {
+        category for category, signatures in CODEX_FAILURE_SIGNATURES.items()
+        if any(signature in stream for stream in streams for signature in signatures)
+    }
+    if len(categories) == 1:
+        return "Codex execution failed: " + categories.pop()
+    return CODEX_FAILURE_UNKNOWN
 
 
 @dataclasses.dataclass(frozen=True)
@@ -305,11 +344,19 @@ def preflight(request: RepairRequest, cwd: str) -> None:
 
 
 def run_codex(request: RepairRequest, cwd: str, executable: str | None = None) -> None:
-    command = [resolve_codex_executable(executable), "exec", "--model", CODEX_REPAIR_MODEL,
-               "--sandbox", "workspace-write", "-c", 'approval_policy="never"', "-"]
-    result = _run(command, cwd, _isolated_environment(), build_repair_prompt(request))
+    try:
+        command = [resolve_codex_executable(executable), "exec", "--model", CODEX_REPAIR_MODEL,
+                   "--sandbox", "workspace-write", "-c", 'approval_policy="never"', "-"]
+        result = _run(command, cwd, _isolated_environment(), build_repair_prompt(request))
+    except subprocess.TimeoutExpired:
+        raise RepairError(CODEX_FAILURE_TIMEOUT) from None
+    except RepairError as error:
+        if str(error) in ("Codex executable is not configured", "Codex executable is not available",
+                          "trusted subprocess could not start"):
+            raise RepairError(CODEX_FAILURE_LAUNCH) from None
+        raise
     if result.returncode:
-        raise RepairError("Codex execution failed")
+        raise RepairError(classify_codex_execution_failure(result))
 
 
 def post_codex_identity(request: RepairRequest, cwd: str) -> None:

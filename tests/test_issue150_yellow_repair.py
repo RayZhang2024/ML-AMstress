@@ -127,6 +127,34 @@ class YellowExecutionTests(unittest.TestCase):
             self.assertNotIn(name, environment)
         self.assertNotIn("dangerously", " ".join(command))
 
+    def test_codex_failure_diagnostics_are_bounded_and_single_invocation(self):
+        secret = "Bearer abc.def.ghi prompt=C:/Users/private/sentinel"
+        completed = subprocess.CompletedProcess([], 1, "service unavailable " + secret, "")
+        with mock.patch.object(green, "resolve_codex_executable", return_value="codex"), \
+                mock.patch.object(green, "_run", return_value=completed) as run:
+            with self.assertRaisesRegex(yellow.YellowRepairError, "^Codex execution failed: service$") as caught:
+                yellow.run_codex(request(), ".")
+        self.assertEqual(run.call_count, 1)
+        self.assertNotIn("sentinel", str(caught.exception))
+        self.assertEqual(green.audit_safe_error_detail(caught.exception), "Codex execution failed: service")
+
+    def test_codex_failure_conflicts_and_unknown_output_fail_closed(self):
+        for stdout, stderr in (("authentication failed", "model not found"), ("adversarial token=abc.def.ghi", "")):
+            with self.subTest(stdout=stdout):
+                completed = subprocess.CompletedProcess([], 7, stdout, stderr)
+                with mock.patch.object(green, "resolve_codex_executable", return_value="codex"), \
+                        mock.patch.object(green, "_run", return_value=completed) as run:
+                    with self.assertRaisesRegex(yellow.YellowRepairError, "^Codex execution failed: unknown-nonzero$") as caught:
+                        yellow.run_codex(request(), ".")
+                self.assertEqual(run.call_count, 1)
+                self.assertNotIn("abc.def.ghi", str(caught.exception))
+
+    def test_successful_codex_execution_has_no_failure_diagnostic(self):
+        completed = subprocess.CompletedProcess([], 0, "authentication failed", "")
+        with mock.patch.object(green, "resolve_codex_executable", return_value="codex"), \
+                mock.patch.object(green, "_run", return_value=completed):
+            self.assertIsNone(yellow.run_codex(request(), "."))
+
     def test_exact_scope_rejects_added_path_and_scientific_path(self):
         yellow.enforce_change_scope(request(), ("docs/change.md",))
         for paths in (("docs/extra.md",), ("import_and_partition.py",)):
