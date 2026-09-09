@@ -16,6 +16,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Callable, Mapping, Sequence
@@ -38,6 +39,8 @@ REVIEW_LABEL_SPECS = {
     for name in sorted(REVIEW_LABELS)
 }
 MAX_REPAIR_ATTEMPTS = repair.MAX_REPAIR_ATTEMPTS
+MAX_REPAIR_PUSH_HEAD_VERIFICATION_READS = 3
+REPAIR_PUSH_HEAD_VERIFICATION_DELAY_SECONDS = 0.5
 MAX_COMMENTS = 200
 MAX_CHANGED_FILES = reviewer.MAX_CHANGED_FILES
 MAX_AUDIT = 4096
@@ -1139,6 +1142,61 @@ def _revalidate_yellow_repair_authorization(
             )))
 
 
+def _is_retryable_repair_head_read_failure(error: Exception) -> bool:
+    """Allow only the existing classified get-PR transport failures to retry."""
+    if isinstance(error, urllib.error.URLError):
+        return classify_transport_failure(error) in TRANSPORT_CATEGORIES
+    if not isinstance(error, OrchestrationError):
+        return False
+    return any(str(error) == "GitHub get-pr: transport " + category
+               for category in TRANSPORT_CATEGORIES)
+
+
+def _verify_repair_push_head(client: Any, pr: Mapping[str, Any], returned_head: str) -> Mapping[str, Any]:
+    """Confirm a repair push without accepting any head other than old or returned."""
+    expected_number = pr.get("number")
+    if isinstance(expected_number, bool) or not isinstance(expected_number, int) or expected_number < 1:
+        raise OrchestrationError("expected PR number is invalid")
+    expected_branch = _pr_branch(pr)
+    expected_base = pr.get("base")
+    if not isinstance(expected_base, Mapping) or expected_base.get("ref") != BASE_BRANCH:
+        raise OrchestrationError("expected PR base is invalid")
+    _repository_identity(expected_base.get("repo"), "expected PR base repository")
+    expected_head = _sha(pr.get("head", {}).get("sha"), "expected repaired PR head")
+    returned_head = _sha(returned_head, "returned repair head")
+    for read_number in range(MAX_REPAIR_PUSH_HEAD_VERIFICATION_READS):
+        try:
+            refreshed = client.pr(expected_number)
+        except Exception as error:
+            if not _is_retryable_repair_head_read_failure(error):
+                raise OrchestrationError("repair push head read failed closed") from None
+            if read_number + 1 == MAX_REPAIR_PUSH_HEAD_VERIFICATION_READS:
+                raise OrchestrationError("repair push head verification exhausted after bounded transient reads") from None
+            time.sleep(REPAIR_PUSH_HEAD_VERIFICATION_DELAY_SECONDS)
+            continue
+        observed_number = refreshed.get("number") if isinstance(refreshed, Mapping) else None
+        if isinstance(observed_number, bool) or not isinstance(observed_number, int) or observed_number < 1:
+            raise OrchestrationError("refreshed PR number is invalid")
+        if observed_number != expected_number:
+            raise OrchestrationError("refreshed PR number differs from the repaired PR")
+        observed_branch = _pr_branch(refreshed)
+        if observed_branch != expected_branch:
+            raise OrchestrationError("refreshed PR branch differs from the repaired PR")
+        refreshed_base = refreshed.get("base")
+        if not isinstance(refreshed_base, Mapping) or refreshed_base.get("ref") != BASE_BRANCH:
+            raise OrchestrationError("refreshed PR base is invalid")
+        _repository_identity(refreshed_base.get("repo"), "refreshed PR base repository")
+        observed_head = _sha(refreshed.get("head", {}).get("sha"), "repaired PR head")
+        if observed_head == returned_head:
+            return refreshed
+        if observed_head != expected_head:
+            raise OrchestrationError("repair push observed an unexpected concurrent or stale head")
+        if read_number + 1 == MAX_REPAIR_PUSH_HEAD_VERIFICATION_READS:
+            raise OrchestrationError("repair push head remained at expected head after bounded verification reads")
+        time.sleep(REPAIR_PUSH_HEAD_VERIFICATION_DELAY_SECONDS)
+    raise OrchestrationError("repair push head verification did not complete")
+
+
 def _repair(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any], comments: Sequence[Mapping[str, Any]],
             current: CurrentReviewState, verdict: reviewer.ReviewVerdict, accepted_blocker_key: str,
             paths: tuple[str, ...], cwd: str) -> str:
@@ -1171,9 +1229,7 @@ def _repair(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any], commen
         if failed not in [item.get("body") for item in client.comments(pr["number"]) if _trusted_comment(item)]:
             client.comment(pr["number"], failed)
         return "repair-failed"
-    refreshed = client.pr(pr["number"])
-    if _sha(refreshed.get("head", {}).get("sha"), "repaired PR head") != result.new_head_sha:
-        raise OrchestrationError("repair push head could not be verified")
+    refreshed = _verify_repair_push_head(client, pr, result.new_head_sha)
     refreshed_issue, refreshed_comments = client.issue(issue["number"]), client.comments(pr["number"])
     refreshed_state = current_review_state(refreshed, refreshed_issue, refreshed_comments)
     plan_input = _state_input(pr["number"], issue["number"], result.new_head_sha, refreshed_state, "new_head")
@@ -1224,9 +1280,7 @@ def _yellow_repair(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any],
         if failed not in [item.get("body") for item in client.comments(pr["number"]) if _trusted_comment(item)]:
             client.comment(pr["number"], failed)
         return "repair-failed"
-    refreshed = client.pr(pr["number"])
-    if _sha(refreshed.get("head", {}).get("sha"), "repaired PR head") != result.new_head_sha:
-        raise OrchestrationError("repair push head could not be verified")
+    refreshed = _verify_repair_push_head(client, pr, result.new_head_sha)
     refreshed_issue, refreshed_comments = client.issue(issue["number"]), client.comments(pr["number"])
     refreshed_state = current_review_state(refreshed, refreshed_issue, refreshed_comments)
     plan_input = _state_input(pr["number"], issue["number"], result.new_head_sha, refreshed_state, "new_head")
