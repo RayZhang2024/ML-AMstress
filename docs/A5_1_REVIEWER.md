@@ -36,3 +36,11 @@ evidence. They remain pending, verified, or contradictory only from the
 trusted snapshot metadata; they cannot become blocker findings or targets for
 repository repair. Current-head changed-file scope, file content, and
 protected-path constraints remain repository requirements.
+
+Historical file/content evidence is external as well. In particular, a
+criterion describing the state before a controlled or deliberate defect
+injection, before a controlled test/setup transition, or a pre-defect state
+cannot be satisfied by appending historical text to the current repository.
+This classification takes precedence over the ordinary explicit-file
+deliverable rule; current-head file requirements and ordinary future
+before-merge requirements remain repository-editable.
