@@ -282,3 +282,21 @@ After a valid first-attempt event resolves the exact issue, a routing or
 pre-start rejection replaces all issue status labels with exactly
 `status:blocked`. Malformed or untrusted event identity is rejected before any
 issue mutation.
+
+## A8 GPT-managed merge-readiness gate
+
+`scripts/a8_merge_policy.py` is a pure local evaluator of a bounded,
+already-observed snapshot. It does not contact GitHub, run Codex or tests,
+dispatch runtime validation, write labels, merge, or enable auto-merge. Before
+GPT may make a GREEN/YELLOW merge decision, it requires a current exact-head
+recheck of PR identity, full changed-file enumeration and authorized scope,
+effective risk, contract-required exact-head validation/CI, and clean A5
+review state. Runtime evidence is required only where the live issue contract
+or protected-runtime policy requires it; YELLOW alone does not imply Abaqus.
+
+Implementation, controlled-runtime, and merge authorization are separate
+scopes. A changed head invalidates head-bound evidence. RED is excluded unless
+an explicit current user/domain-owner RED merge authorization and all required
+scientific/runtime evidence are bound to that reviewed head. Workers, Codex,
+A5, and workflows remain non-merging actors; GPT is the standing GREEN/YELLOW
+decision-maker after every gate passes.
