@@ -124,12 +124,15 @@ The effective risk is assessed both before an issue becomes executable and
 again from the actual PR. It is the highest class implied by any changed file,
 code path, generated artifact, resulting behavior, or required evidence. A PR
 is blocked when its effective risk is higher than the issue's declared class.
-The agent must stop, explain the mismatch in the PR, and request issue
-reclassification, scope correction, or explicit human direction before
-continuing. Tests or a low-risk wrapper do not make a higher-risk behavior
-GREEN. Future automation may enforce this rule by comparing issue metadata,
-changed paths, and reviewed behavior; this document does not activate that
-automation.
+When a protected or trusted path records a declared risk floor, the final
+effective-risk evidence must also be at least that floor; automation must fail
+closed rather than accepting an unexplained downgrade such as declared YELLOW
+with effective GREEN. The agent must stop, explain the mismatch in the PR, and
+request issue reclassification, scope correction, or explicit human direction
+before continuing. Tests or a low-risk wrapper do not make a higher-risk
+behavior GREEN. Future automation may enforce this rule by comparing issue
+metadata, changed paths, and reviewed behavior; this document does not activate
+that automation.
 
 ## Protected YELLOW governance and authorization boundaries
 

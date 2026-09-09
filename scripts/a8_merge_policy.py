@@ -91,6 +91,8 @@ def evaluate(snapshot: Any) -> dict[str, Any]:
     effective = scope.get("effective_risk")
     if effective not in RISKS or declared not in RISKS or RISKS.index(effective) > RISKS.index(declared):
         reasons.add("risk_elevation_or_unknown")
+    elif RISKS.index(effective) < RISKS.index(declared):
+        reasons.add("risk_floor_mismatch")
     if issue.get("dependencies_satisfied") is not True:
         reasons.add("unresolved_dependencies")
     if issue.get("duplicate_or_conflicting_work") is not False:

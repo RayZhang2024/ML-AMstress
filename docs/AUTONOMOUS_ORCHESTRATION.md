@@ -293,6 +293,10 @@ recheck of PR identity, full changed-file enumeration and authorized scope,
 effective risk, contract-required exact-head validation/CI, and clean A5
 review state. Runtime evidence is required only where the live issue contract
 or protected-runtime policy requires it; YELLOW alone does not imply Abaqus.
+For protected or trusted lanes, the declared risk is a floor as well as an
+upper bound: an exact-head snapshot with declared YELLOW and effective GREEN is
+not merge-ready unless the issue is explicitly reclassified through the
+authorized control plane.
 
 Implementation, controlled-runtime, and merge authorization are separate
 scopes. A changed head invalidates head-bound evidence. RED is excluded unless

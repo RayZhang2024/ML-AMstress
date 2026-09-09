@@ -22,6 +22,11 @@ class A8Tests(unittest.TestCase):
         green = snapshot(issue={"number": 234, "labels": ["status:review", "risk:green"], "dependencies_satisfied": True, "duplicate_or_conflicting_work": False}, contract=dict(snapshot()["contract"], declared_risk="green"), scope={"effective_risk": "green", "changed_files": ("docs/x.md",), "authorized_paths": ("docs/x.md",), "fully_enumerated": True})
         self.assertTrue(policy.evaluate(green)["merge_ready"])
 
+    def test_declared_yellow_effective_green_fails_closed(self):
+        result = policy.evaluate(snapshot(scope={"effective_risk": "green", "changed_files": ("scripts/a8_merge_policy.py",), "authorized_paths": ("scripts/a8_merge_policy.py",), "fully_enumerated": True}))
+        self.assertFalse(result["merge_ready"])
+        self.assertIn("risk_floor_mismatch", result["reason_codes"])
+
     def test_all_gate_classes_fail_closed(self):
         cases = ({"issue": {"number": 234, "labels": ["status:ready", "status:review", "risk:yellow"], "dependencies_satisfied": True, "duplicate_or_conflicting_work": False}}, {"issue": {"number": 234, "labels": ["status:review", "risk:yellow"], "dependencies_satisfied": False, "duplicate_or_conflicting_work": True}}, {"contract": {}}, {"pr": dict(snapshot()["pr"], draft=True)}, {"pr": dict(snapshot()["pr"], open=False)}, {"pr": dict(snapshot()["pr"], mergeable=False)}, {"scope": {"effective_risk": "yellow", "changed_files": (), "authorized_paths": ("x",), "fully_enumerated": False}}, {"scope": {"effective_risk": "yellow", "changed_files": ("other/x",), "authorized_paths": ("docs/x",), "fully_enumerated": True}}, {"scope": {"effective_risk": "red", "changed_files": ("x",), "authorized_paths": ("x",), "fully_enumerated": True}}, {"a5": dict(snapshot()["a5"], state="review:blocker")}, {"a5": dict(snapshot()["a5"], unresolved_findings=1)}, {"a5": dict(snapshot()["a5"], unresolved_threads=1)}, {"a5": dict(snapshot()["a5"], blocking_submissions=1)}, {"validations": {"repository": (), "ci": ()}})
         for changed in cases:
