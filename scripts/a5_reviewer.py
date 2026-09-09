@@ -80,6 +80,36 @@ POST_RUN_CONTROL_PLANE_REQUIREMENT_RE = re.compile(
     r"(?:canary\s+)?(?:pr|pull\s+request)\b.*\bremains?\s+open\s*/\s*unmerged\b"
     r")"
 )
+# Repository validation is trusted post-run evidence, not a deliverable that
+# can be established by changing source, tests, documentation, or snapshot
+# prose.  Keep this tied to both a validation subject and an outcome word so
+# that current-head source/file/content requirements remain repairable.
+VALIDATION_RESULT_REQUIREMENT_RE = re.compile(
+    r"(?ix)\b(?:"
+    r"(?:a5\s+repair\s+)?regressions?|"
+    r"(?:unit|regression|integration|functional|normal[-\s]+python)?\s*tests?(?:\s+(?:suite|run))?|"
+    r"(?:unit|regression|integration|functional|normal[-\s]+python)\s+(?:test\s+)?suites?|"
+    r"(?:full|normal)\s+(?:normal[-\s]+python\s+)?suite|"
+    r"(?:python\s+)?syntax\s+(?:compilation|compile|check)s?|"
+    r"(?:python\s+)?compil(?:ation|e)\s+checks?|"
+    r"git\s+diff\s+--check(?:\s+[^,;.]+)?|"
+    r"(?:lint|static(?:\s+(?:analysis|check))?)\s+(?:checks?|results?|outcomes?)?|"
+    r"(?:hosted\s+)?(?:normal[-\s]+python\s+)?ci(?:\s+(?:check|run))?|"
+    r"trusted(?:[-\s]+current[-\s]+main)?\s+(?:a5|reviewer)"
+    r")\b[^.]{0,1000}\b(?:pass(?:es|ed)?|success|succeeds?)\b|"
+    r"\b(?:pass(?:es|ed)?|success|succeeds?)\b[^.]{0,1000}\b(?:"
+    r"(?:a5\s+repair\s+)?regressions?|"
+    r"(?:unit|regression|integration|functional|normal[-\s]+python)?\s*tests?(?:\s+(?:suite|run))?|"
+    r"(?:unit|regression|integration|functional|normal[-\s]+python)\s+(?:test\s+)?suites?|"
+    r"(?:full|normal)\s+(?:normal[-\s]+python\s+)?suite|"
+    r"(?:python\s+)?syntax\s+(?:compilation|compile|check)s?|"
+    r"(?:python\s+)?compil(?:ation|e)\s+checks?|"
+    r"git\s+diff\s+--check(?:\s+[^,;.]+)?|"
+    r"(?:lint|static(?:\s+(?:analysis|check))?)\s+(?:checks?|results?|outcomes?)?|"
+    r"(?:hosted\s+)?(?:normal[-\s]+python\s+)?ci(?:\s+(?:check|run))?|"
+    r"trusted(?:[-\s]+current[-\s]+main)?\s+(?:a5|reviewer)"
+    r")\b"
+)
 HISTORICAL_EVIDENCE_REQUIREMENT_RE = re.compile(
     r"(?ix)\b(?:"
     r"(?:initial|prior|previous|pre[-\s]?repair|phase[-\s]?1|original)\s+(?:head|sha|file|fixture|state|content)\b|"
@@ -272,6 +302,7 @@ def _acceptance_lines(issue_body: str) -> tuple[str, ...]:
 def _is_external_acceptance_requirement(text: str) -> bool:
     historical_or_control = bool(CONTROL_PLANE_REQUIREMENT_RE.search(text) or
                                  POST_RUN_CONTROL_PLANE_REQUIREMENT_RE.search(text) or
+                                 VALIDATION_RESULT_REQUIREMENT_RE.search(text) or
                                  HISTORICAL_EVIDENCE_REQUIREMENT_RE.search(text))
     if historical_or_control:
         return True
