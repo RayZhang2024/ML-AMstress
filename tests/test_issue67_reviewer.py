@@ -38,6 +38,14 @@ class ReviewerContractTests(unittest.TestCase):
     def setUp(self):
         self.valid_snapshot = reviewer.validate_snapshot(snapshot())
 
+    def test_local_absolute_path_detector_preserves_relative_traversal_text(self):
+        self.assertIsNone(reviewer.LOCAL_ABSOLUTE_PATH_RE.search(
+            "The repository-relative path tests/../README.md is explanatory text."
+        ))
+        for unsafe in ("C:/Users/alice/private.txt", r"\\server\share\private.txt", "/etc/passwd"):
+            with self.subTest(unsafe=unsafe):
+                self.assertIsNotNone(reviewer.LOCAL_ABSOLUTE_PATH_RE.search(unsafe))
+
     def test_valid_clean_blocker_and_escalate(self):
         self.assertEqual(reviewer.parse_verdict(verdict(), self.valid_snapshot).verdict, "clean")
         finding = {"id": "F-1", "category": "tests", "message": "Missing test.",

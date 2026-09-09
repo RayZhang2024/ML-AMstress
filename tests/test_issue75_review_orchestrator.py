@@ -1423,6 +1423,78 @@ class ProtectedBlockerEvidenceTests(unittest.TestCase):
                         )
         self.assertEqual(client.comment_data, [])
 
+    def test_relative_traversal_finding_text_persists_in_protected_evidence_and_yellow_authority(self):
+        fields = ("message", "required_action", "required_evidence")
+        for field in fields:
+            with self.subTest(field=field):
+                finding = {
+                    "message": "A bounded finding message.",
+                    "required_action": "Make the bounded repair.",
+                    "required_evidence": "[AC-1] Run the bounded regression.",
+                }
+                traversal = (
+                    "[AC-1] tests/../README.md remains repository-relative explanatory text."
+                    if field == "required_evidence"
+                    else "tests/../README.md remains repository-relative explanatory text."
+                )
+                finding[field] = traversal
+                verdict = protected_blocker_verdict((reviewer.Finding(
+                    "F-1", "policy", finding["message"], finding["required_action"],
+                    finding["required_evidence"],
+                ),))
+                protected_client = self._client()
+                orchestrator.persist_protected_blocker_evidence(
+                    protected_client, protected_client.comment_data, protected_client.pr_data,
+                    protected_client.issue_data, HEAD, verdict,
+                )
+                protected = orchestrator._protected_blocker_markers(protected_client.comment_data)
+                self.assertEqual(protected[0]["findings"][0][field], traversal)
+
+                yellow_client = FakeClient(
+                    pr=automated_yellow_pull_request(), linked_issue=automated_yellow_issue(),
+                    issue_comments=automated_evidence(),
+                )
+                orchestrator.persist_yellow_repair_authority(
+                    yellow_client, yellow_client.comment_data, yellow_client.pr_data,
+                    yellow_client.issue_data, HEAD, verdict,
+                )
+                authority = orchestrator._yellow_repair_authority_markers(yellow_client.comment_data)
+                self.assertEqual(authority[0]["findings"][0][field], traversal)
+                self.assertEqual(authority[0]["findings"][0]["category"], "policy")
+
+    def test_true_absolute_paths_in_each_finding_field_fail_closed_without_evidence(self):
+        fields = ("message", "required_action", "required_evidence")
+        paths = ("C:/Users/alice/private.txt", r"\\server\share\private.txt", "/etc/passwd")
+        for field in fields:
+            for path in paths:
+                with self.subTest(field=field, path=path):
+                    finding = {
+                        "message": "A bounded finding message.",
+                        "required_action": "Make the bounded repair.",
+                        "required_evidence": "[AC-1] Run the bounded regression.",
+                    }
+                    finding[field] = path
+                    verdict = protected_blocker_verdict((reviewer.Finding(
+                        "F-1", "policy", finding["message"], finding["required_action"],
+                        finding["required_evidence"],
+                    ),))
+                    client = self._client()
+                    with self.assertRaisesRegex(orchestrator.OrchestrationError, "unsafe finding field"):
+                        orchestrator.persist_protected_blocker_evidence(
+                            client, client.comment_data, client.pr_data, client.issue_data, HEAD, verdict
+                        )
+                    self.assertEqual(client.comment_data, [])
+                    yellow_client = FakeClient(
+                        pr=automated_yellow_pull_request(), linked_issue=automated_yellow_issue(),
+                        issue_comments=automated_evidence(),
+                    )
+                    with self.assertRaisesRegex(orchestrator.OrchestrationError, "unsafe finding field"):
+                        orchestrator.persist_yellow_repair_authority(
+                            yellow_client, yellow_client.comment_data, yellow_client.pr_data,
+                            yellow_client.issue_data, HEAD, verdict,
+                        )
+                    self.assertEqual(yellow_client.comment_data, [])
+
     def test_reviewer_prompt_markers_never_reach_blocker_evidence(self):
         fields = ("message", "required_action", "required_evidence")
         for field in fields:
