@@ -5,6 +5,7 @@ from unittest import mock
 from scripts import a5_repair_worker as repair
 from scripts import a5_review_orchestrator as orchestrator
 from scripts import a5_reviewer as reviewer
+from scripts import yellow_lane_policy as yellow_policy
 
 
 OLD_HEAD = "a" * 40
@@ -17,9 +18,62 @@ def pr(head=OLD_HEAD, branch=BRANCH):
     return {
         "number": 210,
         "state": "open",
-        "base": {"ref": "main", "repo": {"full_name": orchestrator.REPOSITORY}},
+        "title": "Issue #210",
+        "body": "Refs #210",
+        "base": {"ref": "main", "sha": "d" * 40, "repo": {"full_name": orchestrator.REPOSITORY}},
         "head": {"sha": head, "ref": branch, "repo": {"full_name": orchestrator.REPOSITORY}},
     }
+
+
+def issue(risk="green"):
+    return {
+        "number": 210,
+        "state": "open",
+        "title": "A5 repair push verification",
+        "body": """## Goal
+Test.
+## Necessity Gate
+Test.
+## Required behavior
+Test.
+## Do not change
+Test.
+## Acceptance criteria
+- [ ] Existing GREEN A5 repair regressions pass.
+- [ ] Existing automatic-YELLOW A5 repair regressions pass.
+- [ ] Full normal-Python suite passes.
+- [ ] Python syntax compilation passes.
+- [ ] git diff --check origin/main...HEAD passes.
+- [ ] trusted-current-main A5 evidence is present.
+## Tests/validation
+Test.
+## Risk classification
+Declared risk label: `risk:%s`
+## Dependencies
+- none
+""" % risk,
+        "labels": [{"name": "status:review"}, {"name": "risk:" + risk}, {"name": "agent:codex"}],
+    }
+
+
+def changed_files(path="tests/test_issue210_repair_push_verification.py"):
+    return [{"filename": path, "patch": "+# exact-head evidence regression"}]
+
+
+def snapshot_check_names(lane="green"):
+    branch = BRANCH if lane == "green" else yellow_policy.yellow_branch(210, "A5 repair push verification")
+    pull_request = pr(branch=branch)
+    if lane != "green":
+        pull_request["base"]["sha"] = "e" * 40
+    snapshot, _ = orchestrator.build_snapshot(
+        pull_request,
+        issue("green" if lane == "green" else "yellow"),
+        orchestrator.WorkflowRun(100, OLD_HEAD, "success"),
+        changed_files(),
+        lane,
+        ("tests/test_issue210_repair_push_verification.py",),
+    )
+    return [item["name"] for item in snapshot["ci_checks"]], snapshot
 
 
 class SequencedClient:
@@ -61,6 +115,25 @@ def blocker_verdict():
 
 
 class RepairPushVerificationTests(unittest.TestCase):
+    def test_green_snapshot_exposes_each_required_exact_head_validation_gate(self):
+        names, snapshot = snapshot_check_names("green")
+        self.assertEqual(names, list(orchestrator.EXACT_HEAD_VALIDATION_CHECKS))
+        self.assertEqual({item["status"] for item in snapshot["ci_checks"]}, {"success"})
+        self.assertIn("Existing GREEN A5 repair regressions", names)
+        self.assertIn("Existing automatic-YELLOW A5 repair regressions", names)
+        self.assertIn("Full normal-Python suite", names)
+        self.assertIn("Python syntax compilation", names)
+        self.assertIn("git diff --check origin/main...HEAD", names)
+        self.assertIn("trusted-current-main A5", names)
+        self.assertEqual(snapshot["head_sha"], OLD_HEAD)
+
+    def test_automated_yellow_snapshot_exposes_same_exact_head_validation_gates(self):
+        names, snapshot = snapshot_check_names(yellow_policy.AUTOMATED_YELLOW_LANE)
+        self.assertEqual(names, list(orchestrator.EXACT_HEAD_VALIDATION_CHECKS))
+        self.assertEqual({item["status"] for item in snapshot["ci_checks"]}, {"success"})
+        self.assertEqual(snapshot["trusted_risk_floor"], "yellow")
+        self.assertEqual(snapshot["head_sha"], OLD_HEAD)
+
     def test_old_head_then_returned_head_completes_without_another_repair_attempt(self):
         client = SequencedClient([pr(OLD_HEAD), pr(REPAIR_HEAD)])
         transition = mock.Mock()

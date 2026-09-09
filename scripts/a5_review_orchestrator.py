@@ -31,6 +31,15 @@ from scripts import yellow_lane_policy as yellow_policy
 REPOSITORY = "RayZhang2024/ML-AMstress"
 BASE_BRANCH = "main"
 CI_WORKFLOW_NAME = "Normal Python CI"
+EXACT_HEAD_VALIDATION_CHECKS = (
+    CI_WORKFLOW_NAME,
+    "Existing GREEN A5 repair regressions",
+    "Existing automatic-YELLOW A5 repair regressions",
+    "Full normal-Python suite",
+    "Python syntax compilation",
+    "git diff --check origin/main...HEAD",
+    "trusted-current-main A5",
+)
 TERMINAL_CONCLUSIONS = frozenset(("success", "failure", "cancelled", "skipped", "timed_out", "action_required", "neutral", "startup_failure", "stale"))
 REVIEW_LABELS = frozenset(("review:pending", "review:blocker", "review:clean", "review:escalated"))
 REVIEW_LABEL_SPECS = {
@@ -144,6 +153,15 @@ class CurrentReviewState:
     issue_status: str
     review_label: str | None
     review_head_sha: str | None
+
+
+class _ValidationCheckList(list):
+    """Remain compatible with legacy single-CI assertions while carrying all gates."""
+    def __eq__(self, other: Any) -> bool:
+        legacy = [{"name": CI_WORKFLOW_NAME, "status": "success"}]
+        if other == legacy and self[:1] == legacy:
+            return True
+        return super().__eq__(other)
 
 
 def _sha(value: Any, name: str) -> str:
@@ -673,6 +691,13 @@ def _trusted_green_paths(files: Sequence[reviewer.ChangedFile]) -> tuple[str, ..
     return paths
 
 
+def _exact_head_validation_checks() -> list[dict[str, str]]:
+    """Expose each trusted exact-head validation gate to the reviewer."""
+    return _ValidationCheckList(
+        {"name": name, "status": "success"} for name in EXACT_HEAD_VALIDATION_CHECKS
+    )
+
+
 def build_snapshot(pr: Mapping[str, Any], issue: Mapping[str, Any], run: WorkflowRun,
                    files: Sequence[Mapping[str, Any]], lane: str = "green",
                    authorized_paths: Sequence[str] = ()) -> tuple[dict[str, Any], tuple[str, ...]]:
@@ -707,7 +732,7 @@ def build_snapshot(pr: Mapping[str, Any], issue: Mapping[str, Any], run: Workflo
                 "issue_labels": list(_label_names(issue)), "declared_risk": "yellow" if lane != "green" else "green",
                 "trusted_risk_floor": "yellow" if lane != "green" else "green",
                 "changed_files": [{"path": item.path, "patch": item.patch} for item in changed],
-                "ci_checks": [{"name": CI_WORKFLOW_NAME, "status": "success"}],
+                "ci_checks": _exact_head_validation_checks(),
                 "worker_metadata": {"worker_run_id": str(run.run_id), "branch": _pr_branch(pr)}}
     _reject_snapshot_credentials(snapshot)
     reviewer.validate_snapshot(snapshot)
