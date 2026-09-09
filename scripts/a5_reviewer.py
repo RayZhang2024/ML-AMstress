@@ -159,7 +159,9 @@ MAX_REVIEWER_FINAL_OUTPUT_BYTES = 200_000
 REVIEWER_MODEL = "gpt-5.6-terra"
 REVIEWER_REASONING_EFFORT = "high"
 LOCAL_ABSOLUTE_PATH_RE = re.compile(
-    r"(?i)(?:\b[A-Z]:[\\/][^\s\"']+|\\\\[^\s\"']+|(?<![:\w])/(?:[^\s\"']+))"
+    # A slash immediately following a dot belongs to a relative traversal
+    # segment (for example ``tests/../README.md``), not a Unix-rooted path.
+    r"(?i)(?:\b[A-Z]:[\\/][^\s\"']+|\\\\[^\s\"']+|(?<![:\w.])/(?:[^\s\"']+))"
 )
 APP_TOKEN_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(?:automation[_-]?app[_-]?token|github[_-]?token|openai[_-]?api[_-]?key)\s*[=:]\s*['\"]?[A-Za-z0-9._~+/=-]{8,}"
