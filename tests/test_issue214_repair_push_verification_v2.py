@@ -1,4 +1,5 @@
 import copy
+import json
 import unittest
 from unittest import mock
 
@@ -20,6 +21,45 @@ YELLOW_BRANCH = yellow_lane_policy.yellow_branch(214, "Repair push verification"
 def pull_request(head=OLD_HEAD, branch=GREEN_BRANCH, number=214):
     return {"number": number, "head": {"sha": head, "ref": branch,
             "repo": {"full_name": orchestrator.REPOSITORY}}}
+
+
+def validation_payload(**changes):
+    value = {
+        "schema_version": 1,
+        "repository": orchestrator.REPOSITORY,
+        "issue_number": 314,
+        "pr_number": 214,
+        "reviewed_head_sha": OLD_HEAD,
+        "source": "trusted-check-artifact",
+        "results": [
+            {
+                "name": "full-normal-python-tests",
+                "command": "python -m unittest discover -s tests -p test_*.py",
+                "status": "passed",
+            },
+            {
+                "name": "focused-normal-python-tests",
+                "command": "python -m unittest tests.test_issue214_repair_push_verification_v2",
+                "status": "passed",
+            },
+            {
+                "name": "diff-check-origin-main-head",
+                "command": "git diff --check origin/main...HEAD",
+                "status": "passed",
+            },
+            {
+                "name": "python-syntax-compilation",
+                "command": "python -m compileall -q .",
+                "status": "passed",
+            },
+        ],
+    }
+    value.update(changes)
+    return value
+
+
+def trusted_comment(body):
+    return {"body": body, "user": {"login": orchestrator.TRUSTED_AUDIT_AUTHOR}}
 
 
 class SequencedClient:
@@ -45,6 +85,127 @@ class SequencedClient:
 
     def comment(self, number, body):
         self.comments_written.append({"body": body, "user": {"login": orchestrator.TRUSTED_AUDIT_AUTHOR}})
+
+
+class ExactHeadEvidenceMarkerTests(unittest.TestCase):
+    def test_ac13_marker_requires_all_exact_head_validation_results(self):
+        marker = orchestrator._ac13_validation_evidence_marker(validation_payload())
+        payload = json.loads(marker.removeprefix("<!-- a5.ac13-validation-evidence:").removesuffix(" -->"))
+        self.assertEqual(
+            [item["name"] for item in payload["results"]],
+            sorted(orchestrator.REQUIRED_AC13_VALIDATION_NAMES),
+        )
+        self.assertIn("git diff --check origin/main...HEAD", marker)
+        accepted = orchestrator.accepted_ac13_validation_evidence(
+            [trusted_comment(marker)], pull_request(), {"number": 314}, OLD_HEAD,
+        )
+        self.assertEqual(accepted, marker)
+
+        incomplete = validation_payload(results=validation_payload()["results"][:-1])
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "incomplete"):
+            orchestrator._ac13_validation_evidence_marker(incomplete)
+
+        failed = validation_payload()
+        failed["results"][0] = dict(failed["results"][0], status="failed")
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "did not pass"):
+            orchestrator._ac13_validation_evidence_marker(failed)
+
+    def test_ac13_evidence_is_exact_head_trusted_and_deterministic(self):
+        marker = orchestrator._ac13_validation_evidence_marker(validation_payload())
+        comments = [trusted_comment(marker)]
+        self.assertEqual(orchestrator.accepted_ac13_validation_evidence(
+            comments, pull_request(), {"number": 314}, OLD_HEAD,
+        ), marker)
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "missing or ambiguous"):
+            orchestrator.accepted_ac13_validation_evidence(
+                comments, pull_request(), {"number": 314}, NEW_HEAD,
+            )
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "missing or ambiguous"):
+            orchestrator.accepted_ac13_validation_evidence(
+                [{"body": marker, "user": {"login": "untrusted"}}],
+                pull_request(), {"number": 314}, OLD_HEAD,
+            )
+        noncanonical = "<!-- a5.ac13-validation-evidence:" + json.dumps(
+            validation_payload(), sort_keys=False
+        ) + " -->"
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "not deterministic"):
+            orchestrator.accepted_ac13_validation_evidence(
+                [trusted_comment(noncanonical)], pull_request(), {"number": 314}, OLD_HEAD,
+            )
+
+    def test_ac14_result_binds_current_main_success_to_ac13_evidence(self):
+        validation_marker = orchestrator._ac13_validation_evidence_marker(validation_payload())
+        validation_key = orchestrator._validation_evidence_key(validation_marker)
+        result_payload = {
+            "schema_version": 1,
+            "repository": orchestrator.REPOSITORY,
+            "issue_number": 314,
+            "pr_number": 214,
+            "reviewed_head_sha": OLD_HEAD,
+            "context": "trusted-current-main",
+            "status": "success",
+            "validation_evidence_key": validation_key,
+            "unauthorized_repair": False,
+            "synthesized_evidence": False,
+        }
+        result_marker = orchestrator._trusted_current_main_a5_result_marker(result_payload)
+        comments = [trusted_comment(validation_marker), trusted_comment(result_marker)]
+        self.assertEqual(orchestrator.accepted_trusted_current_main_a5_result(
+            comments, pull_request(), {"number": 314}, OLD_HEAD,
+        ), result_marker)
+
+        conflicting = dict(result_payload, validation_evidence_key="a5.ac13:" + "0" * 64)
+        conflict_marker = orchestrator._trusted_current_main_a5_result_marker(conflicting)
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "conflicts"):
+            orchestrator.accepted_trusted_current_main_a5_result(
+                [trusted_comment(validation_marker), trusted_comment(conflict_marker)],
+                pull_request(), {"number": 314}, OLD_HEAD,
+            )
+
+    def test_ac14_rejects_unauthorized_or_synthesized_success_claims(self):
+        validation_marker = orchestrator._ac13_validation_evidence_marker(validation_payload())
+        base = {
+            "schema_version": 1,
+            "repository": orchestrator.REPOSITORY,
+            "issue_number": 314,
+            "pr_number": 214,
+            "reviewed_head_sha": OLD_HEAD,
+            "context": "trusted-current-main",
+            "status": "success",
+            "validation_evidence_key": orchestrator._validation_evidence_key(validation_marker),
+            "unauthorized_repair": False,
+            "synthesized_evidence": False,
+        }
+        for field in ("unauthorized_repair", "synthesized_evidence"):
+            with self.subTest(field=field):
+                invalid = dict(base, **{field: True})
+                with self.assertRaisesRegex(orchestrator.OrchestrationError, "malformed"):
+                    orchestrator._trusted_current_main_a5_result_marker(invalid)
+
+    def test_clean_a5_result_is_persisted_only_after_ac13_evidence_exists(self):
+        client = SequencedClient(())
+        pr = pull_request()
+        issue = {"number": 314}
+        orchestrator.maybe_persist_trusted_current_main_a5_result(
+            client, [], pr, issue, OLD_HEAD,
+        )
+        self.assertEqual(client.comments_written, [])
+
+        validation_marker = orchestrator._ac13_validation_evidence_marker(validation_payload())
+        comments = [trusted_comment(validation_marker)]
+        orchestrator.maybe_persist_trusted_current_main_a5_result(
+            client, comments, pr, issue, OLD_HEAD,
+        )
+        self.assertEqual(len(client.comments_written), 1)
+        result_marker = client.comments_written[0]["body"]
+        self.assertEqual(orchestrator.accepted_trusted_current_main_a5_result(
+            comments + client.comments_written, pr, issue, OLD_HEAD,
+        ), result_marker)
+
+        orchestrator.maybe_persist_trusted_current_main_a5_result(
+            client, comments + client.comments_written, pr, issue, OLD_HEAD,
+        )
+        self.assertEqual(len(client.comments_written), 1)
 
 
 class RepairPushHeadVerificationTests(unittest.TestCase):
