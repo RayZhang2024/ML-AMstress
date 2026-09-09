@@ -26,6 +26,7 @@ MAX_ALLOWED_PATHS = 50
 MAX_TEXT = 1000
 MAX_PATH = 240
 MAX_RESULT_CHANGES = 50
+MAX_CODEX_DIAGNOSTIC_CHARS = 4096
 MAX_IDENTIFIER_NUMBER = 2_000_000_000
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -51,6 +52,15 @@ AUDIT_SAFE_ERROR_MESSAGES = frozenset((
     "current branch does not match repair branch",
     "local HEAD does not match expected repair head",
     "Codex execution failed",
+    "Codex repair execution failed: launch-failure",
+    "Codex repair execution failed: timeout",
+    "Codex repair execution failed: terminated",
+    "Codex repair execution failed: authentication",
+    "Codex repair execution failed: usage-limit",
+    "Codex repair execution failed: model-availability",
+    "Codex repair execution failed: service-failure",
+    "Codex repair execution failed: transport-failure",
+    "Codex repair execution failed: unknown-nonzero",
     "Codex changed the repair branch",
     "Codex changed local HEAD",
     "could not inspect repair changes",
@@ -76,12 +86,60 @@ class RepairError(Exception):
     """A bounded, audit-safe repair failure."""
 
 
+CODEX_FAILURE_MESSAGES = {
+    "launch-failure": "Codex repair execution failed: launch-failure",
+    "timeout": "Codex repair execution failed: timeout",
+    "terminated": "Codex repair execution failed: terminated",
+    "authentication": "Codex repair execution failed: authentication",
+    "usage-limit": "Codex repair execution failed: usage-limit",
+    "model-availability": "Codex repair execution failed: model-availability",
+    "service-failure": "Codex repair execution failed: service-failure",
+    "transport-failure": "Codex repair execution failed: transport-failure",
+    "unknown-nonzero": "Codex repair execution failed: unknown-nonzero",
+}
+CODEX_FAILURE_SIGNATURES = {
+    "authentication": ("unauthorized", "authentication failed"),
+    "usage-limit": ("rate limit exceeded", "quota exceeded", "usage limit exceeded"),
+    "model-availability": ("model not found", "model unavailable", "invalid model"),
+    "service-failure": ("service unavailable", "internal server error"),
+    "transport-failure": ("connection refused", "connection reset", "network unreachable"),
+}
+
+
 def audit_safe_error_detail(error: Exception) -> str | None:
     """Return only explicitly reviewed static RepairError text for GitHub audit."""
     if not isinstance(error, RepairError):
         return None
     message = str(error)
     return message if message in AUDIT_SAFE_ERROR_MESSAGES else None
+
+
+def codex_failure_category(result: subprocess.CompletedProcess | None = None,
+                           error: BaseException | None = None) -> str:
+    """Classify only bounded Codex execution evidence; never retain streams."""
+    if isinstance(error, subprocess.TimeoutExpired):
+        return "timeout"
+    if isinstance(error, (OSError, ValueError)):
+        return "launch-failure"
+    if result is None or not isinstance(result.returncode, int):
+        return "unknown-nonzero"
+    if result.returncode < 0:
+        return "terminated"
+    matches = set()
+    for stream in (getattr(result, "stdout", None), getattr(result, "stderr", None)):
+        if not isinstance(stream, str):
+            continue
+        bounded = stream[:MAX_CODEX_DIAGNOSTIC_CHARS].casefold()
+        for category, phrases in CODEX_FAILURE_SIGNATURES.items():
+            if any(phrase in bounded for phrase in phrases):
+                matches.add(category)
+    return matches.pop() if len(matches) == 1 else "unknown-nonzero"
+
+
+def codex_failure_error(result: subprocess.CompletedProcess | None = None,
+                        error: BaseException | None = None) -> RepairError:
+    """Create the sole audit-visible Codex failure detail from an allowlist."""
+    return RepairError(CODEX_FAILURE_MESSAGES[codex_failure_category(result, error)])
 
 
 @dataclasses.dataclass(frozen=True)
@@ -307,9 +365,16 @@ def preflight(request: RepairRequest, cwd: str) -> None:
 def run_codex(request: RepairRequest, cwd: str, executable: str | None = None) -> None:
     command = [resolve_codex_executable(executable), "exec", "--model", CODEX_REPAIR_MODEL,
                "--sandbox", "workspace-write", "-c", 'approval_policy="never"', "-"]
-    result = _run(command, cwd, _isolated_environment(), build_repair_prompt(request))
+    try:
+        result = _run(command, cwd, _isolated_environment(), build_repair_prompt(request))
+    except subprocess.TimeoutExpired as error:
+        raise codex_failure_error(error=error) from None
+    except RepairError as error:
+        if str(error) == "trusted subprocess could not start":
+            raise codex_failure_error(error=error.__cause__ or error) from None
+        raise
     if result.returncode:
-        raise RepairError("Codex execution failed")
+        raise codex_failure_error(result=result)
 
 
 def post_codex_identity(request: RepairRequest, cwd: str) -> None:

@@ -195,9 +195,16 @@ def preflight(request: YellowRepairRequest, cwd: str) -> None:
 def run_codex(request: YellowRepairRequest, cwd: str, executable: str | None = None) -> None:
     command = [green_repair.resolve_codex_executable(executable), "exec", "--model", green_repair.CODEX_REPAIR_MODEL,
                "--sandbox", "workspace-write", "-c", 'approval_policy="never"', "-"]
-    result = green_repair._run(command, cwd, green_repair._isolated_environment(), build_prompt(request))
+    try:
+        result = green_repair._run(command, cwd, green_repair._isolated_environment(), build_prompt(request))
+    except green_repair.subprocess.TimeoutExpired as error:
+        raise YellowRepairError(str(green_repair.codex_failure_error(error=error))) from None
+    except green_repair.RepairError as error:
+        if str(error) == "trusted subprocess could not start":
+            raise YellowRepairError(str(green_repair.codex_failure_error(error=error.__cause__ or error))) from None
+        raise
     if result.returncode:
-        raise YellowRepairError("Codex execution failed")
+        raise YellowRepairError(str(green_repair.codex_failure_error(result=result)))
 
 
 def enforce_change_scope(request: YellowRepairRequest, paths: tuple[str, ...]) -> None:
