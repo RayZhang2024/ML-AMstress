@@ -84,6 +84,11 @@ HISTORICAL_EVIDENCE_REQUIREMENT_RE = re.compile(
     r"(?ix)\b(?:"
     r"(?:initial|prior|previous|pre[-\s]?repair|phase[-\s]?1|original)\s+(?:head|sha|file|fixture|state|content)\b|"
     r"(?:head|sha|file|fixture|state|content)\b.*\b(?:initial|prior|previous|pre[-\s]?repair|phase[-\s]?1|original)\b|"
+    # A state explicitly described before a controlled test transition is
+    # historical evidence, even when it names an exact repository file.
+    r"before\s+(?:(?:a|the)\s+)?(?:(?:controlled|deliberate)\s+)?defect\s+injection\b|"
+    r"before\s+(?:(?:a|the)\s+)?controlled\s+(?:test|setup)(?:\s*/\s*(?:test|setup))?\s+transition\b|"
+    r"pre[-\s]?defect\b|"
     r"(?:persisted|pre[-\s]?repair)\b.*\b(?:a5\s+)?(?:blocker|review)\s+evidence\b|"
     r"(?:blocker|review)\s+evidence\b.*\b(?:persisted|pre[-\s]?repair|historical)\b|"
     r"(?:repair[-\s]?lane|automated[-\s]?yellow)\b.*\b(?:execution|history|attempt|repair)\b|"
