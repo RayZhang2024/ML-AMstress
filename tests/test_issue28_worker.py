@@ -1077,8 +1077,40 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("AUTOMATION_APP_TOKEN: ${{ steps.automation-app-token.outputs.token }}", self.workflow)
         self.assertIn("permission-contents: write", self.workflow)
         self.assertIn("permission-pull-requests: write", self.workflow)
+        self.assertIn("permission-workflows: write", self.workflow)
         self.assertNotIn("gh pr merge", self.workflow)
         self.assertNotIn("enablePullRequestAutoMerge", self.workflow)
+
+    def test_workflow_tokens_have_exact_minimum_permissions(self):
+        workflow_permissions = self.workflow.split("permissions:", 1)[1].split(
+            "concurrency:", 1
+        )[0]
+        self.assertEqual(
+            [
+                line.strip()
+                for line in workflow_permissions.splitlines()
+                if line.strip()
+            ],
+            ["contents: read", "issues: write", "pull-requests: read"],
+        )
+
+        app_token_step = self.workflow.split(
+            "      - name: Mint repository-scoped automation App token", 1
+        )[1].split("      - name: Run fail-closed GREEN/YELLOW router", 1)[0]
+        self.assertIn("owner: RayZhang2024", app_token_step)
+        self.assertIn("repositories: ML-AMstress", app_token_step)
+        self.assertEqual(
+            [
+                line.strip()
+                for line in app_token_step.splitlines()
+                if line.strip().startswith("permission-")
+            ],
+            [
+                "permission-contents: write",
+                "permission-pull-requests: write",
+                "permission-workflows: write",
+            ],
+        )
 
     def test_workflow_uses_verified_local_python_before_dependencies(self):
         self.assertNotIn("actions/setup-python", self.workflow)
