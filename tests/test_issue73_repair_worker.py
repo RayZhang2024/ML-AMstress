@@ -109,12 +109,71 @@ class RepairExecutionTests(unittest.TestCase):
         self.assertNotIn("AUTOMATION_APP_TOKEN", environment)
 
     def test_codex_failure_does_not_expose_streams(self):
-        completed = mock.Mock(returncode=9, stdout="secret stdout", stderr="secret stderr")
+        completed = mock.Mock(returncode=9, stdout="untrusted stdout", stderr="untrusted stderr")
         with mock.patch.object(worker, "resolve_codex_executable", return_value="codex"), \
              mock.patch.object(worker, "_run", return_value=completed):
-            with self.assertRaisesRegex(worker.RepairError, "Codex execution failed") as caught:
+            with self.assertRaisesRegex(worker.RepairError, "unknown-nonzero") as caught:
                 worker.run_codex(request(), ".")
-        self.assertNotIn("secret", str(caught.exception))
+        self.assertNotIn("untrusted", str(caught.exception))
+
+    def test_codex_failure_categories_are_bounded_and_unambiguous(self):
+        cases = {
+            "authentication": "authentication failed",
+            "usage-limit": "rate limit exceeded",
+            "model-availability": "model not found",
+            "service-failure": "service unavailable",
+            "transport-failure": "connection refused",
+        }
+        for category, phrase in cases.items():
+            with self.subTest(category=category):
+                result = mock.Mock(returncode=1, stdout="", stderr=phrase)
+                error = worker.codex_failure_error(result=result)
+                self.assertEqual(str(error), worker.CODEX_FAILURE_MESSAGES[category])
+                self.assertEqual(worker.audit_safe_error_detail(error), str(error))
+        conflicting = mock.Mock(returncode=1, stdout="authentication failed", stderr="rate limit exceeded")
+        arbitrary = mock.Mock(returncode=1, stdout="unexpected output", stderr="")
+        oversized = mock.Mock(returncode=1, stdout="x" * worker.MAX_CODEX_DIAGNOSTIC_CHARS + " model not found", stderr="")
+        for result in (conflicting, arbitrary, oversized):
+            self.assertEqual(worker.codex_failure_category(result=result), "unknown-nonzero")
+
+    def test_codex_timeout_launch_and_termination_details_are_static(self):
+        timeout = subprocess.TimeoutExpired(("codex",), 1)
+        self.assertEqual(worker.codex_failure_category(error=timeout), "timeout")
+        self.assertEqual(worker.codex_failure_category(error=OSError("untrusted")), "launch-failure")
+        terminated = mock.Mock(returncode=-9, stdout="untrusted", stderr="untrusted")
+        self.assertEqual(worker.codex_failure_category(result=terminated), "terminated")
+        with mock.patch.object(worker, "resolve_codex_executable", return_value="codex"), \
+             mock.patch.object(worker, "_run", side_effect=timeout):
+            with self.assertRaisesRegex(worker.RepairError, "^Codex repair execution failed: timeout$"):
+                worker.run_codex(request(), ".")
+        with mock.patch.object(worker, "resolve_codex_executable", return_value="codex"), \
+             mock.patch.object(worker.subprocess, "run", side_effect=OSError("untrusted launch detail")):
+            with self.assertRaisesRegex(worker.RepairError, "^Codex repair execution failed: launch-failure$") as caught:
+                worker.run_codex(request(), ".")
+        self.assertNotIn("untrusted launch detail", str(caught.exception))
+
+    def test_runtime_sensitive_output_never_survives_failure_detail(self):
+        token = "".join(("gh", "p_", "abcdefgh"))
+        jwt = ".".join(("eyJh", "eyJi", "c2ln"))
+        key = "".join(("sk", "-", "abcdefgh"))
+        credential = "".join(("sec", "ret", "=", "abcdefgh"))
+        prompt = " ".join(("repair", "this", "prompt"))
+        path = "/".join(("C:", "private", "fixture"))
+        source = " ".join((token, jwt, key, credential, prompt, path, "authentication failed"))
+        error = worker.codex_failure_error(result=mock.Mock(returncode=1, stdout=source, stderr=""))
+        detail = worker.audit_safe_error_detail(error)
+        self.assertEqual(detail, worker.CODEX_FAILURE_MESSAGES["authentication"])
+        for value in (token, jwt, key, credential, prompt, path):
+            self.assertNotIn(value, str(error))
+            self.assertNotIn(value, detail)
+
+    def test_codex_nonzero_is_invoked_once_without_retry(self):
+        completed = mock.Mock(returncode=1, stdout="", stderr="unexpected")
+        with mock.patch.object(worker, "resolve_codex_executable", return_value="codex"), \
+             mock.patch.object(worker, "_run", return_value=completed) as run:
+            with self.assertRaises(worker.RepairError):
+                worker.run_codex(request(), ".")
+        run.assert_called_once()
 
     def test_post_codex_identity_rejects_model_commit_or_checkout(self):
         with mock.patch.object(worker, "_git_text", side_effect=(request().branch, NEW_HEAD)):

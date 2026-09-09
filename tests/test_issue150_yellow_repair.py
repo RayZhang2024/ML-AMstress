@@ -127,6 +127,24 @@ class YellowExecutionTests(unittest.TestCase):
             self.assertNotIn(name, environment)
         self.assertNotIn("dangerously", " ".join(command))
 
+    def test_codex_failure_is_classified_once_without_stream_leakage(self):
+        token = "".join(("gh", "p_", "abcdefgh"))
+        jwt = ".".join(("eyJh", "eyJi", "c2ln"))
+        key = "".join(("sk", "-", "abcdefgh"))
+        credential = "".join(("sec", "ret", "=", "abcdefgh"))
+        prompt = " ".join(("repair", "this", "prompt"))
+        path = "/".join(("C:", "private", "yellow"))
+        output = " ".join((token, jwt, key, credential, prompt, path, "connection refused"))
+        completed = subprocess.CompletedProcess([], 1, output, "")
+        with mock.patch.object(green, "resolve_codex_executable", return_value="codex.exe"), \
+                mock.patch.object(green, "_run", return_value=completed) as run:
+            with self.assertRaisesRegex(yellow.YellowRepairError, "^Codex repair execution failed: transport-failure$") as caught:
+                yellow.run_codex(request(), ".")
+        run.assert_called_once()
+        for value in (token, jwt, key, credential, prompt, path):
+            self.assertNotIn(value, str(caught.exception))
+        self.assertEqual(green.audit_safe_error_detail(caught.exception), str(caught.exception))
+
     def test_exact_scope_rejects_added_path_and_scientific_path(self):
         yellow.enforce_change_scope(request(), ("docs/change.md",))
         for paths in (("docs/extra.md",), ("import_and_partition.py",)):

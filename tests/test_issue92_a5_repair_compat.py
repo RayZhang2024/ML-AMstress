@@ -79,11 +79,11 @@ class RepairCodexCompatibilityTests(unittest.TestCase):
         self.assertEqual(environment["GIT_CONFIG_GLOBAL"], os.devnull)
 
     def test_repair_codex_nonzero_remains_bounded_and_stream_free(self):
-        completed = mock.Mock(returncode=1, stdout="secret stdout", stderr="secret stderr")
+        completed = mock.Mock(returncode=1, stdout="untrusted stdout", stderr="untrusted stderr")
         with mock.patch.object(repair, "resolve_codex_executable", return_value="codex.exe"), mock.patch.object(
             repair, "_run", return_value=completed
         ):
-            with self.assertRaisesRegex(repair.RepairError, "^Codex execution failed$") as caught:
+            with self.assertRaisesRegex(repair.RepairError, "^Codex repair execution failed: unknown-nonzero$") as caught:
                 repair.run_codex(request(), ".")
         self.assertNotIn("stdout", str(caught.exception))
         self.assertNotIn("stderr", str(caught.exception))
@@ -130,6 +130,16 @@ class RepairFailureAuditTests(unittest.TestCase):
         )
         self.assertIsNone(repair.audit_safe_error_detail(repair.RepairError("local validation failed: secret")))
         self.assertIsNone(repair.audit_safe_error_detail(ValueError("Codex execution failed")))
+
+    def test_runtime_credential_fragments_never_reach_audit_marker(self):
+        token = "".join(("gh", "p_", "abcdefgh"))
+        credential = "".join(("sec", "ret", "=", "abcdefgh"))
+        source = " ".join((token, credential, "authentication failed"))
+        error = repair.codex_failure_error(mock.Mock(returncode=1, stdout=source, stderr=""))
+        marker = orchestrator._repair_failure_marker(1, error)
+        self.assertEqual(self.payload(marker)["detail"], repair.CODEX_FAILURE_MESSAGES["authentication"])
+        self.assertNotIn(token, marker)
+        self.assertNotIn(credential, marker)
 
 
 if __name__ == "__main__":
