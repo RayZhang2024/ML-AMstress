@@ -22,6 +22,18 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          # Validate the immutable PR head, not GitHub's synthetic merge ref.
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Verify checked-out pull-request head
+        run: test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+
+      - name: Check exact pull-request diff
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git diff --check origin/main...HEAD
 
       - name: Set up Python
         uses: actions/setup-python@v5
