@@ -13,6 +13,7 @@ OLD_HEAD = "a" * 40
 NEW_HEAD = "b" * 40
 THIRD_HEAD = "c" * 40
 GREEN_BRANCH = "codex/issue-214-repair-push-verification"
+PR_ONE_BRANCH = "codex/issue-1-repair-push-verification"
 YELLOW_BRANCH = yellow_lane_policy.yellow_branch(214, "Repair push verification")
 
 
@@ -82,6 +83,25 @@ class RepairPushHeadVerificationTests(unittest.TestCase):
         wrong["head"]["ref"] = "codex/issue-214-other"
         with self.assertRaisesRegex(orchestrator.OrchestrationError, "branch identity"):
             self.verify((wrong,))
+
+    def test_pr_one_refreshed_boolean_number_fails_before_transition(self):
+        verdict = reviewer.ReviewVerdict(1, "blocker", OLD_HEAD, "green", "blocked", (
+            reviewer.Finding("F-1", "policy", "repair", "repair", "[AC-7] repair"),), "")
+        current = orchestrator.CurrentReviewState("status:in-progress", "review:blocker", OLD_HEAD)
+        client = SequencedClient((pull_request(NEW_HEAD, PR_ONE_BRANCH, True),), PR_ONE_BRANCH)
+        result = repair.RepairResult(1, orchestrator.REPOSITORY, 1, 214, PR_ONE_BRANCH, 1,
+                                     OLD_HEAD, NEW_HEAD, ("F-1",), ("scripts/a5_review_orchestrator.py",),
+                                     "passed", "a5.3:" + "d" * 64)
+        with mock.patch.object(orchestrator, "checkout_exact_pr_branch"), \
+                mock.patch.object(repair, "execute_repair", return_value=result), \
+                mock.patch.object(orchestrator, "apply_transition") as transition:
+            with self.assertRaisesRegex(orchestrator.OrchestrationError, "PR identity is malformed"):
+                orchestrator._repair(
+                    client, pull_request(branch=PR_ONE_BRANCH, number=1), {"number": 214}, (),
+                    current, verdict, "a5.2:" + "d" * 64,
+                    ("scripts/a5_review_orchestrator.py",), ".")
+        self.assertEqual(client.pr_calls, 1)
+        transition.assert_not_called()
 
     def test_explicit_transient_read_failure_retries_then_succeeds(self):
         transient = orchestrator.OrchestrationError("GitHub get-pr: transport timeout")

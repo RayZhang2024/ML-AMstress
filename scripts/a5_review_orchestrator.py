@@ -348,7 +348,9 @@ def _verify_repair_push_head(client: Any, pr_number: int, expected_branch: str,
                     or read_number + 1 == MAX_REPAIR_PUSH_HEAD_VERIFICATION_READS):
                 raise
         else:
-            if not isinstance(refreshed, Mapping) or refreshed.get("number") != pr_number:
+            refreshed_number = refreshed.get("number") if isinstance(refreshed, Mapping) else None
+            if (isinstance(refreshed_number, bool) or not isinstance(refreshed_number, int)
+                    or refreshed_number < 1 or refreshed_number != pr_number):
                 raise OrchestrationError("repair push verification PR identity is malformed")
             if _pr_branch(refreshed) != expected_branch:
                 raise OrchestrationError("repair push verification branch identity differs")
