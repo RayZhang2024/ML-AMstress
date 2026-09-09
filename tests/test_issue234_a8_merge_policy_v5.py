@@ -27,6 +27,13 @@ class A8Tests(unittest.TestCase):
         for changed in cases:
             with self.subTest(changed=changed): self.assertFalse(policy.evaluate(snapshot(**changed))["merge_ready"])
 
+    def test_non_iterable_contract_sections_fail_closed(self):
+        for sections in (None, 7, "Goal"):
+            with self.subTest(sections=sections):
+                result = policy.evaluate(snapshot(contract=dict(snapshot()["contract"], sections=sections)))
+                self.assertFalse(result["merge_ready"])
+                self.assertEqual(result["reason_codes"], ("malformed_contract",))
+
     def test_head_runtime_red_and_determinism(self):
         stale = snapshot(pr=dict(snapshot()["pr"], head_sha=NEXT_HEAD))
         self.assertIn("missing_or_stale_normal_ci", policy.evaluate(stale)["reason_codes"])

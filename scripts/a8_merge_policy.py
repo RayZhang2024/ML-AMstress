@@ -95,7 +95,8 @@ def evaluate(snapshot: Any) -> dict[str, Any]:
         reasons.add("unresolved_dependencies")
     if issue.get("duplicate_or_conflicting_work") is not False:
         reasons.add("duplicate_or_conflicting_work")
-    if (contract.get("complete") is not True or tuple(contract.get("sections", ())) != REQUIRED_CONTRACT_SECTIONS
+    contract_sections = _items(contract.get("sections"))
+    if (contract.get("complete") is not True or contract_sections != REQUIRED_CONTRACT_SECTIONS
             or contract.get("issue_number") != issue.get("number") or contract.get("declared_risk") != declared
             or not isinstance(contract.get("dependencies"), (list, tuple))
             or not isinstance(contract.get("controlled_runtime_required"), bool)):
