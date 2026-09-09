@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 from typing import Any, Callable
 
 from scripts import a5_repair_worker as green_repair
@@ -193,11 +194,19 @@ def preflight(request: YellowRepairRequest, cwd: str) -> None:
 
 
 def run_codex(request: YellowRepairRequest, cwd: str, executable: str | None = None) -> None:
-    command = [green_repair.resolve_codex_executable(executable), "exec", "--model", green_repair.CODEX_REPAIR_MODEL,
-               "--sandbox", "workspace-write", "-c", 'approval_policy="never"', "-"]
-    result = green_repair._run(command, cwd, green_repair._isolated_environment(), build_prompt(request))
+    try:
+        command = [green_repair.resolve_codex_executable(executable), "exec", "--model", green_repair.CODEX_REPAIR_MODEL,
+                   "--sandbox", "workspace-write", "-c", 'approval_policy="never"', "-"]
+        result = green_repair._run(command, cwd, green_repair._isolated_environment(), build_prompt(request))
+    except subprocess.TimeoutExpired:
+        raise YellowRepairError(green_repair.CODEX_FAILURE_TIMEOUT) from None
+    except green_repair.RepairError as error:
+        if str(error) in ("Codex executable is not configured", "Codex executable is not available",
+                          "trusted subprocess could not start"):
+            raise YellowRepairError(green_repair.CODEX_FAILURE_LAUNCH) from None
+        raise
     if result.returncode:
-        raise YellowRepairError("Codex execution failed")
+        raise YellowRepairError(green_repair.classify_codex_execution_failure(result))
 
 
 def enforce_change_scope(request: YellowRepairRequest, paths: tuple[str, ...]) -> None:

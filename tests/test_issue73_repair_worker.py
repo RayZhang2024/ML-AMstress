@@ -112,9 +112,43 @@ class RepairExecutionTests(unittest.TestCase):
         completed = mock.Mock(returncode=9, stdout="secret stdout", stderr="secret stderr")
         with mock.patch.object(worker, "resolve_codex_executable", return_value="codex"), \
              mock.patch.object(worker, "_run", return_value=completed):
-            with self.assertRaisesRegex(worker.RepairError, "Codex execution failed") as caught:
+            with self.assertRaisesRegex(worker.RepairError, "^Codex execution failed: unknown-nonzero$") as caught:
                 worker.run_codex(request(), ".")
         self.assertNotIn("secret", str(caught.exception))
+
+    def test_codex_failure_classification_is_bounded_and_unambiguous(self):
+        secret = "token=abc.def.ghi prompt=C:/Users/private/sentinel"
+        cases = {
+            "authentication": "authentication failed " + secret,
+            "usage": "rate limit exceeded " + secret,
+            "model": "model not found " + secret,
+            "service": "service unavailable " + secret,
+            "transport": "connection refused " + secret,
+        }
+        for category, stderr in cases.items():
+            with self.subTest(category=category):
+                result = mock.Mock(returncode=1, stdout="", stderr=stderr)
+                detail = worker.classify_codex_execution_failure(result)
+                self.assertEqual(detail, "Codex execution failed: " + category)
+                self.assertIn(detail, worker.AUDIT_SAFE_ERROR_MESSAGES)
+                self.assertNotIn("sentinel", detail)
+        ambiguous = mock.Mock(returncode=1, stdout="authentication failed", stderr="model not found")
+        self.assertEqual(worker.classify_codex_execution_failure(ambiguous), worker.CODEX_FAILURE_UNKNOWN)
+        oversized = mock.Mock(returncode=1, stdout="x" * worker.MAX_CODEX_DIAGNOSTIC_CHARS + " authentication failed",
+                              stderr=secret)
+        self.assertEqual(worker.classify_codex_execution_failure(oversized), worker.CODEX_FAILURE_UNKNOWN)
+
+    def test_codex_launch_timeout_and_termination_are_static_and_stream_free(self):
+        with mock.patch.object(worker, "resolve_codex_executable", side_effect=worker.RepairError("Codex executable is not available")):
+            with self.assertRaisesRegex(worker.RepairError, "^Codex execution failed: launch$") as caught:
+                worker.run_codex(request(), ".")
+        self.assertNotIn("available", str(caught.exception))
+        with mock.patch.object(worker, "resolve_codex_executable", return_value="codex"), \
+             mock.patch.object(worker, "_run", side_effect=subprocess.TimeoutExpired("codex", 1, output="secret", stderr="secret")):
+            with self.assertRaisesRegex(worker.RepairError, "^Codex execution failed: timeout$"):
+                worker.run_codex(request(), ".")
+        terminated = mock.Mock(returncode=-9, stdout="secret", stderr="secret")
+        self.assertEqual(worker.classify_codex_execution_failure(terminated), worker.CODEX_FAILURE_TERMINATED)
 
     def test_post_codex_identity_rejects_model_commit_or_checkout(self):
         with mock.patch.object(worker, "_git_text", side_effect=(request().branch, NEW_HEAD)):

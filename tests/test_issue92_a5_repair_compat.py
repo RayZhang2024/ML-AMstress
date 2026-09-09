@@ -83,7 +83,7 @@ class RepairCodexCompatibilityTests(unittest.TestCase):
         with mock.patch.object(repair, "resolve_codex_executable", return_value="codex.exe"), mock.patch.object(
             repair, "_run", return_value=completed
         ):
-            with self.assertRaisesRegex(repair.RepairError, "^Codex execution failed$") as caught:
+            with self.assertRaisesRegex(repair.RepairError, "^Codex execution failed: unknown-nonzero$") as caught:
                 repair.run_codex(request(), ".")
         self.assertNotIn("stdout", str(caught.exception))
         self.assertNotIn("stderr", str(caught.exception))
@@ -98,14 +98,14 @@ class RepairFailureAuditTests(unittest.TestCase):
         return json.loads(marker[len(prefix):-len(suffix)])
 
     def test_reviewed_repair_error_gets_bounded_static_detail(self):
-        marker = orchestrator._repair_failure_marker(1, repair.RepairError("Codex execution failed"))
+        marker = orchestrator._repair_failure_marker(1, repair.RepairError("Codex execution failed: transport"))
         self.assertLess(len(marker), orchestrator.MAX_AUDIT)
         self.assertEqual(
             self.payload(marker),
             {
                 "attempt": 1,
                 "category": "trusted-repair-failed",
-                "detail": "Codex execution failed",
+                "detail": "Codex execution failed: transport",
                 "schema_version": 1,
             },
         )
