@@ -149,6 +149,11 @@ moving an issue to `status:review` is not issue completion, and merging a PR
 does not by itself prove that all required controlled acceptance evidence has
 been satisfied.
 
+The exceptional D0 knowledge bootstrap is additionally bounded by
+[AUTONOMOUS_KNOWLEDGE_BOOTSTRAP.md](AUTONOMOUS_KNOWLEDGE_BOOTSTRAP.md). It is
+dormant unless exact owner-authored pre-start evidence is present and does not
+relax protected-YELLOW implementation, CI, review, or merge requirements.
+
 ## Merge authority
 
 - GREEN changes are eligible for human merge only after all required CI checks
