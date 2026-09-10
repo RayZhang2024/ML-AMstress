@@ -27,6 +27,7 @@ from scripts import a5_review_state as state_contract
 from scripts import a5_reviewer as reviewer
 from scripts import codex_issue_worker as green_worker
 from scripts import yellow_lane_policy as yellow_policy
+from scripts import knowledge_bootstrap_policy as bootstrap_policy
 
 
 REPOSITORY = "RayZhang2024/ML-AMstress"
@@ -63,6 +64,7 @@ CI_MARKER_RE = re.compile(r"^<!-- a5\.4a-ci:(\{.*\}) -->$")
 REPAIR_MARKER_RE = re.compile(r"^<!-- a5\.4a-repair:(\{.*\}) -->$")
 PROTECTED_BLOCKER_EVIDENCE_RE = re.compile(r"^<!-- a5\.4b-protected-blocker:(\{.*\}) -->$")
 YELLOW_REPAIR_AUTHORITY_RE = re.compile(r"^<!-- a5\.yellow-repair-authority:(\{.*\}) -->$")
+BOOTSTRAP_AUDIT_RE = re.compile(r"^<!-- a5\.knowledge-bootstrap-skip:(\{.*\}) -->$")
 PROTECTED_IMPLEMENTATION_AUTHORIZATION_RE = re.compile(
     r"^<!-- protected-implementation-authorization:(\{.*\}) -->$"
 )
@@ -425,6 +427,40 @@ def _automated_yellow_authorized_paths(comments: Sequence[Mapping[str, Any]], is
     except yellow_policy.PolicyError:
         raise OrchestrationError("automated YELLOW authorization is invalid") from None
     return prestart.authorized_paths
+
+
+def _bootstrap_audit(pr_number: int, issue_number: int, head_sha: str) -> str:
+    payload = {"schema_version": 1, "repository": REPOSITORY, "pr_number": pr_number,
+               "issue_number": issue_number, "head_sha": head_sha,
+               "a5_semantic_review_and_repair": "skipped-under-d0",
+               "gpt_holistic_review": "required"}
+    body = "<!-- a5.knowledge-bootstrap-skip:" + json.dumps(payload, sort_keys=True, separators=(",", ":")) + " -->"
+    if len(body) > MAX_AUDIT:
+        raise OrchestrationError("bootstrap audit is unexpectedly unbounded")
+    return body
+
+
+def _bootstrap_skip_if_authorized(client: Any, pr: Mapping[str, Any], issue_comments: Sequence[Mapping[str, Any]],
+                                  pr_comments: Sequence[Mapping[str, Any]], issue_number: int) -> bool:
+    if review_lane(_pr_branch(pr)) != yellow_policy.AUTOMATED_YELLOW_LANE:
+        return False
+    base_sha = _sha(pr.get("base", {}).get("sha"), "PR base")
+    authorization = _automated_yellow_authorization(issue_comments, issue_number, _pr_branch(pr), base_sha)
+    try:
+        prestart = yellow_policy.parse_prestart(authorization["prestart"], expected_repository=REPOSITORY,
+                                                expected_issue=issue_number, expected_base=base_sha)
+        files = client.changed_files(pr["number"])
+        paths = tuple(item.get("filename") for item in files if isinstance(item, Mapping))
+        if len(paths) != len(files):
+            raise bootstrap_policy.PolicyError("changed paths are invalid")
+        bootstrap_policy.validate_activation(issue_comments, prestart, paths,
+                                             expected_issue=issue_number, expected_base=base_sha)
+    except (yellow_policy.PolicyError, bootstrap_policy.PolicyError):
+        return False
+    marker = _bootstrap_audit(pr["number"], issue_number, _sha(pr["head"].get("sha"), "PR head"))
+    if marker not in [comment.get("body") for comment in pr_comments if _trusted_comment(comment)]:
+        client.comment(pr["number"], marker)
+    return True
 
 
 def validate_issue_identity(issue: Mapping[str, Any], branch: str, issue_number: int,
@@ -1309,6 +1345,11 @@ def orchestrate(client: Any, event: Mapping[str, Any], cwd: str,
     if run.conclusion != "success":
         record_ci_observation(client, comments, run, pr_number)
         return "ci-non-success"
+
+    # D0 is evaluated before reviewer invocation, state labels, or repair authority.
+    # Invalid or absent evidence falls through to the unchanged ordinary A5 path.
+    if _bootstrap_skip_if_authorized(client, pr, authorization_comments, comments, issue_number):
+        return "bootstrap-skipped"
 
     ensure_review_labels(client)
     current = current_review_state(pr, issue, comments)

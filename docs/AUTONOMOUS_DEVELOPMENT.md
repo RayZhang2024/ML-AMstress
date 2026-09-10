@@ -7,6 +7,9 @@ or any other automation.
 
 Deterministic issue labels, dependency syntax, eligibility checks, and state
 transitions are defined in [AUTONOMOUS_ORCHESTRATION.md](AUTONOMOUS_ORCHESTRATION.md).
+The exceptional, dormant D0 knowledge-only lane is defined in
+[AUTONOMOUS_KNOWLEDGE_BOOTSTRAP.md](AUTONOMOUS_KNOWLEDGE_BOOTSTRAP.md); it remains
+protected YELLOW and cannot authorize scientific, runtime, or merge work.
 
 ## Work-unit rules
 
