@@ -242,6 +242,10 @@ human/domain-owner approval.
 
 ## Protected YELLOW path
 
+The exceptional D0 route in [AUTONOMOUS_KNOWLEDGE_BOOTSTRAP.md](AUTONOMOUS_KNOWLEDGE_BOOTSTRAP.md)
+is dormant unless exact owner evidence is present, supplements canonical YELLOW
+authorization, and cannot alter ordinary routing, runtime, or merge authority.
+
 Protected governance/control-plane work and all YELLOW work require explicit
 protected-path implementation authorization. It is separate from any
 controlled-runtime authorization and from merge authorization. The shared

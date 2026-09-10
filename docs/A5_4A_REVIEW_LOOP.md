@@ -61,6 +61,12 @@ The loop contains no merge or auto-merge behavior. Ordinary GREEN workers and
 GREEN A5.3 repair are denied the distinct YELLOW repair module, all other live
 A5 control-plane scripts, and `.github/**` paths.
 
+An exact owner-authorized D0 candidate may use the exceptional route in
+[AUTONOMOUS_KNOWLEDGE_BOOTSTRAP.md](AUTONOMOUS_KNOWLEDGE_BOOTSTRAP.md) only after
+successful exact-head CI and identity/path revalidation. A5 records an explicit
+skip audit before reviewer or repair authority creation; it is not a clean
+reviewer verdict and GPT holistic review remains required.
+
 Before A5.3 is authorized, trusted A5.1 classifies issue acceptance criteria as
 repository-editable or external/post-run. A criterion is external only when it
 requires observing a live control-plane result or state, such as hosted CI
