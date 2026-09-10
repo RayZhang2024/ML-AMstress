@@ -5,6 +5,10 @@ review. It is subordinate to [AUTONOMOUS_DEVELOPMENT.md](AUTONOMOUS_DEVELOPMENT.
 and does not activate Codex workers, autonomous production execution, or
 auto-merge.
 
+D0 knowledge-bootstrap evidence is exceptional and descriptive only: it must
+agree with ordinary canonical YELLOW authorization and cannot authorize
+scientific/runtime execution or merge.
+
 ## Label vocabulary
 
 Labels are exact, lower-case strings. An issue may have at most one label from

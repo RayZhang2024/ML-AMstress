@@ -26,6 +26,7 @@ from scripts import a5_yellow_repair_worker as yellow_repair
 from scripts import a5_review_state as state_contract
 from scripts import a5_reviewer as reviewer
 from scripts import codex_issue_worker as green_worker
+from scripts import knowledge_bootstrap_policy as bootstrap_policy
 from scripts import yellow_lane_policy as yellow_policy
 
 
@@ -425,6 +426,47 @@ def _automated_yellow_authorized_paths(comments: Sequence[Mapping[str, Any]], is
     except yellow_policy.PolicyError:
         raise OrchestrationError("automated YELLOW authorization is invalid") from None
     return prestart.authorized_paths
+
+
+def _bootstrap_skip_audit(pr_number: int, issue_number: int, head_sha: str) -> str:
+    """A bounded, exact-head record; it is deliberately not an A5 verdict."""
+    return "<!-- knowledge-bootstrap-a5-skip:{\"schema_version\":1,\"pr_number\":%d,\"issue_number\":%d,\"head_sha\":\"%s\"} -->" % (pr_number, issue_number, head_sha)
+
+
+def _bootstrap_skip_if_authorized(client: Any, pr: Mapping[str, Any], issue: Mapping[str, Any], run: WorkflowRun, issue_comments: Sequence[Mapping[str, Any]]) -> str:
+    """Probe D0; an absent marker must inspect no PR, client, or helper state."""
+    # Keep this first decision restricted to already-supplied comment bodies.
+    marker_present = False
+    for comment in issue_comments:
+        body = comment.get("body") if isinstance(comment, Mapping) else None
+        if isinstance(body, str) and body.startswith(bootstrap_policy.MARKER_PREFIX):
+            marker_present = True
+            break
+    if not marker_present:
+        return "not-applicable"
+    try:
+        evidence = bootstrap_policy.authorized_marker(issue_comments)
+        if evidence is None:
+            return "not-authorized"
+        pr_number, branch = validate_pr_identity(pr, run)
+        if review_lane(branch) != yellow_policy.AUTOMATED_YELLOW_LANE:
+            return "not-authorized"
+        issue_number = canonical_linked_issue(pr, require_refs=True)
+        if issue.get("number") != issue_number:
+            return "not-authorized"
+        base_sha = _sha(pr.get("base", {}).get("sha"), "PR base")
+        paths = _automated_yellow_authorized_paths(issue_comments, issue_number, branch, base_sha)
+        bootstrap_policy.validate(evidence, expected_issue=issue_number, expected_base=base_sha, expected_paths=paths)
+        if run.conclusion != "success":
+            return "not-authorized"
+        build_snapshot(pr, issue, run, client.changed_files(pr_number), yellow_policy.AUTOMATED_YELLOW_LANE, paths)
+    except (OrchestrationError, bootstrap_policy.PolicyError, yellow_policy.PolicyError, TypeError, AttributeError):
+        return "not-authorized"
+    audit = _bootstrap_skip_audit(pr_number, issue_number, run.head_sha)
+    existing = client.comments(pr_number)
+    if audit not in [comment.get("body") for comment in existing if _trusted_comment(comment)]:
+        client.comment(pr_number, audit)
+    return "bootstrap-skipped"
 
 
 def validate_issue_identity(issue: Mapping[str, Any], branch: str, issue_number: int,
@@ -1309,6 +1351,12 @@ def orchestrate(client: Any, event: Mapping[str, Any], cwd: str,
     if run.conclusion != "success":
         record_ci_observation(client, comments, run, pr_number)
         return "ci-non-success"
+
+    # D0 is dormant without an owner marker; invalid evidence falls through to
+    # the ordinary protected-YELLOW A5 path.
+    bootstrap = _bootstrap_skip_if_authorized(client, pr, issue, run, authorization_comments)
+    if bootstrap == "bootstrap-skipped":
+        return bootstrap
 
     ensure_review_labels(client)
     current = current_review_state(pr, issue, comments)

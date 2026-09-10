@@ -6,6 +6,12 @@ credentials disabled, then runs the coordinator as
 `python -m scripts.a5_review_orchestrator` on the designated self-hosted
 Windows runner.
 
+The exceptional D0 knowledge bootstrap first scans only supplied issue-comment
+bodies. Without the exact `knowledge-bootstrap-prestart` prefix it is
+not-applicable before PR, session, CI, or audit state is inspected. A valid
+exact-head skip is an idempotent audit record, never a clean A5 verdict, and
+does not invoke reviewer or repair code.
+
 The workflow keeps the built-in `GITHUB_TOKEN` for A5.2 labels/status/audit
 state. It mints a repository-scoped, short-lived App installation token with
 `actions/create-github-app-token@v3` from `AUTOMATION_APP_CLIENT_ID` and
