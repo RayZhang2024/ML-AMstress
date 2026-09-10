@@ -27,6 +27,7 @@ from scripts import a5_review_state as state_contract
 from scripts import a5_reviewer as reviewer
 from scripts import codex_issue_worker as green_worker
 from scripts import yellow_lane_policy as yellow_policy
+from scripts import knowledge_bootstrap_policy as bootstrap_policy
 
 
 REPOSITORY = "RayZhang2024/ML-AMstress"
@@ -743,6 +744,64 @@ def _yellow_repair_marker(pr_number: int, issue_number: int, head: str, decision
     return result
 
 
+def _bootstrap_skip_if_authorized(comments: Sequence[Mapping[str, Any]], *, audit_comments: Sequence[Mapping[str, Any]] = (), client: Any | None = None,
+                                  pr: Mapping[str, Any] | None = None, issue: Mapping[str, Any] | None = None,
+                                  run: WorkflowRun | None = None, branch: str | None = None,
+                                  authorization_comments: Sequence[Mapping[str, Any]] = ()) -> str | None:
+    """Return a D0 skip only after marker-first, complete exact-head validation.
+
+    The prefix scan is intentionally the first and only operation on the
+    no-marker path.  In particular it neither consults the client nor touches
+    PR, run, issue, A5, YELLOW, or bootstrap validation state.
+    """
+    # Keep this inline: the no-marker path must not invoke any D0 helper.
+    candidates = tuple(comment for comment in comments if isinstance(comment, Mapping)
+                       and isinstance(comment.get("body"), str)
+                       and comment["body"].startswith(bootstrap_policy.MARKER_PREFIX))
+    if not candidates:
+        return None
+    # Presence permits validation, but every invalid/ambiguous candidate falls
+    # through to ordinary A5 with no audit or suppression.
+    if len(candidates) != 1:
+        return None
+    candidate = candidates[0]
+    author = candidate.get("user") if isinstance(candidate, Mapping) else None
+    if not isinstance(author, Mapping) or author.get("login") != bootstrap_policy.TRUSTED_AUTHOR:
+        return None
+    try:
+        if not isinstance(pr, Mapping) or not isinstance(issue, Mapping) or run is None or client is None:
+            raise OrchestrationError("bootstrap validation context is unavailable")
+        if run.conclusion != "success" or branch is None or review_lane(branch) != yellow_policy.AUTOMATED_YELLOW_LANE:
+            raise OrchestrationError("bootstrap lane or CI is invalid")
+        pr_number, actual_branch = validate_pr_identity(pr, run)
+        if review_lane(actual_branch) != yellow_policy.AUTOMATED_YELLOW_LANE:
+            raise OrchestrationError("bootstrap lane is invalid")
+        issue_number = canonical_linked_issue(pr, require_refs=True)
+        base = _sha(pr.get("base", {}).get("sha"), "PR base")
+        evidence = bootstrap_policy.parse_marker(candidate.get("body"), expected_issue=issue_number, expected_base=base)
+        if issue.get("number") != issue_number:
+            raise OrchestrationError("bootstrap issue is stale")
+        yellow_paths = _automated_yellow_authorized_paths(authorization_comments, issue_number, actual_branch, base)
+        if evidence.repository != REPOSITORY or evidence.authorized_paths != yellow_paths:
+            raise OrchestrationError("bootstrap and YELLOW evidence do not match")
+        files = client.changed_files(pr_number)
+        paths = tuple(item.get("filename") for item in files if isinstance(item, Mapping))
+        if not paths or len(paths) != len(files) or tuple(sorted(paths)) != evidence.authorized_paths:
+            raise OrchestrationError("bootstrap paths do not match current PR")
+    except (OrchestrationError, bootstrap_policy.PolicyError, yellow_policy.PolicyError, TypeError, ValueError):
+        return None
+    payload = {"schema_version": 1, "repository": REPOSITORY, "pr_number": pr_number,
+               "issue_number": issue_number, "head_sha": run.head_sha,
+               "base_sha": base, "lane": yellow_policy.AUTOMATED_YELLOW_LANE,
+               "result": "bootstrap-skip-not-clean"}
+    audit = "<!-- a5.4a-knowledge-bootstrap-skip:" + json.dumps(payload, sort_keys=True, separators=(",", ":")) + " -->"
+    if len(audit) > MAX_AUDIT:
+        raise OrchestrationError("bootstrap audit is unexpectedly unbounded")
+    if audit not in [item.get("body") for item in audit_comments if _trusted_comment(item)]:
+        client.comment(pr_number, audit)
+    return "bootstrap-skip"
+
+
 def _audit_safe_finding_text(value: Any, name: str) -> str:
     """Accept only parser-valid text that is safe to place in a trusted audit."""
     try:
@@ -1306,6 +1365,12 @@ def orchestrate(client: Any, event: Mapping[str, Any], cwd: str,
         issue, branch, issue_number, authorization_comments, _sha(pr.get("base", {}).get("sha"), "PR base")
     )
     validate_dependencies(client, contract)
+    bootstrap = _bootstrap_skip_if_authorized(
+        authorization_comments, audit_comments=comments, client=client, pr=pr, issue=issue, run=run, branch=branch,
+        authorization_comments=authorization_comments,
+    )
+    if bootstrap is not None:
+        return bootstrap
     if run.conclusion != "success":
         record_ci_observation(client, comments, run, pr_number)
         return "ci-non-success"

@@ -61,6 +61,14 @@ The loop contains no merge or auto-merge behavior. Ordinary GREEN workers and
 GREEN A5.3 repair are denied the distinct YELLOW repair module, all other live
 A5 control-plane scripts, and `.github/**` paths.
 
+For the exceptional D0 knowledge bootstrap only, A5 first performs a
+zero-touch marker-prefix scan of already supplied issue-comment bodies. With no marker,
+ordinary A5 is unchanged. A valid marker may produce a bounded exact-head
+`bootstrap-skip-not-clean` audit only after current automated-YELLOW identity,
+matching pre-start path evidence, and successful hosted CI are revalidated;
+review and repair are then not invoked. Invalid evidence falls through to
+ordinary A5 without a bootstrap audit.
+
 Before A5.3 is authorized, trusted A5.1 classifies issue acceptance criteria as
 repository-editable or external/post-run. A criterion is external only when it
 requires observing a live control-plane result or state, such as hosted CI

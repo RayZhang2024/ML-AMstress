@@ -269,6 +269,10 @@ and records the ordinary run-bound `codex-worker-claim` used by the read-only
 completion observer. Duplicate, malformed, stale, conflicting, or untrusted
 evidence fails closed before Codex runs.
 
+The separate D0 bootstrap marker is documented in
+[AUTONOMOUS_KNOWLEDGE_BOOTSTRAP.md](AUTONOMOUS_KNOWLEDGE_BOOTSTRAP.md). It is
+not routing evidence and cannot bypass worker eligibility or merge gates.
+
 ## Current activation boundary
 
 The single `issues:labeled` workflow in `.github/workflows/codex-green-worker.yml`
